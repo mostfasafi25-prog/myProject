@@ -1,0 +1,465 @@
+/* استيراد الخطوط العربية والإنجليزية */
+@import url("https://fonts.googleapis.com/css2?family=Playpen+Sans+Arabic:wght@100..800&family=Outfit:wght@100..900&family=Tajawal:wght@300;400;500;700;800&family=IBM+Plex+Sans+Arabic:wght@300;400;500;600;700&display=swap");
+
+/* CSS Reset */
+* {
+  padding: 0;
+  margin: 0;
+  box-sizing: border-box;
+}
+
+/* إعدادات عامة */
+html {
+  scroll-behavior: smooth;
+  font-size: 16px;
+  overflow-x: hidden;
+}
+
+/* إعدادات الجسم الأساسية */
+body {
+  font-family: "Outfit", sans-serif;
+  background-color: transparent;
+  color: inherit;
+  line-height: 1.6;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: all 0.3s ease;
+}
+
+/* إعدادات الاتجاه */
+[dir="rtl"] {
+  direction: rtl;
+  text-align: right;
+}
+
+[dir="ltr"] {
+  direction: ltr;
+  text-align: left;
+}
+
+/* فئات اللغة الديناميكية */
+:root {
+  --font-family-arabic: "Playpen Sans Arabic", "Tajawal", "IBM Plex Sans Arabic", sans-serif;
+  --font-family-english: "Outfit", sans-serif;
+}
+
+[lang="ar"] {
+  font-family: var(--font-family-arabic) !important;
+}
+
+[lang="en"] {
+  font-family: var(--font-family-english) !important;
+}
+
+/* تعديل خاص للمكونات في العربية */
+[lang="ar"] .english-text {
+  font-family: var(--font-family-english) !important;
+}
+
+[lang="en"] .arabic-text {
+  font-family: var(--font-family-arabic) !important;
+}
+
+/* إعدادات النصوص حسب الاتجاه */
+[dir="rtl"] .text-right {
+  text-align: right;
+}
+
+[dir="rtl"] .text-left {
+  text-align: left;
+}
+
+[dir="ltr"] .text-right {
+  text-align: right;
+}
+
+[dir="ltr"] .text-left {
+  text-align: left;
+}
+
+/* توزيع العناصر داخل الحاويات */
+[dir="rtl"] .flex-row {
+  flex-direction: row-reverse;
+}
+
+[dir="rtl"] .space-x-4 > * + * {
+  margin-right: 1rem;
+  margin-left: 0;
+}
+
+[dir="ltr"] .space-x-4 > * + * {
+  margin-left: 1rem;
+  margin-right: 0;
+}
+
+/* الروابط */
+a {
+  text-decoration: none;
+  color: inherit;
+  transition: color 0.3s ease;
+}
+
+a:hover {
+  color: #006a63;
+}
+
+/* القوائم */
+ul,
+ol {
+  list-style: none;
+}
+
+/* الصور */
+img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+/* الأزرار */
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  outline: none;
+  background: none;
+}
+
+/* التمرير الشخصي */
+::-webkit-scrollbar {
+  width: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1a1a1a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2e7d32;
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #43a047;
+}
+
+/* إخفاء شريط التمرير في بعض المتصفحات */
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+/* تأثيرات التركيز للوصول */
+:focus-visible {
+  outline: 2px solid #2e7d32;
+  outline-offset: 2px;
+}
+
+/* الطباعة */
+@media print {
+  * {
+    background: transparent !important;
+    color: #000 !important;
+    box-shadow: none !important;
+    text-shadow: none !important;
+  }
+}
+
+/* فئات مساعدة */
+.container {
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 20px;
+}
+
+.text-center {
+  text-align: center !important;
+}
+
+.text-gold {
+  color: #8e612a !important;
+}
+
+.text-white {
+  color: #ffffff !important;
+}
+
+.text-gray {
+  color: #b0b0b0 !important;
+}
+
+.bg-dark {
+  background-color: #0a0a0a;
+}
+
+.bg-black {
+  background-color: #000000;
+}
+
+.bg-gold {
+  background-color: #8e612a;
+}
+
+/* أنيميشن أساسية */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Margins and Paddings حسب الاتجاه */
+[dir="rtl"] .ml-auto {
+  margin-right: auto;
+  margin-left: 0;
+}
+
+[dir="rtl"] .mr-auto {
+  margin-left: auto;
+  margin-right: 0;
+}
+
+[dir="ltr"] .ml-auto {
+  margin-left: auto;
+  margin-right: 0;
+}
+
+[dir="ltr"] .mr-auto {
+  margin-right: auto;
+  margin-left: 0;
+}
+
+/* إعدادات MUI مع دعم متعدد اللغات */
+* {
+  font-family: inherit !important;
+}
+
+body {
+  font-family: inherit !important;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: transparent;
+  color: inherit;
+  margin: 0;
+  padding: 0;
+}
+
+/* تجاوز مكونات MUI حسب اللغة */
+[lang="ar"] .MuiTypography-root,
+[lang="ar"] .MuiTypography-h1,
+[lang="ar"] .MuiTypography-h2,
+[lang="ar"] .MuiTypography-h3,
+[lang="ar"] .MuiTypography-h4,
+[lang="ar"] .MuiTypography-h5,
+[lang="ar"] .MuiTypography-h6,
+[lang="ar"] .MuiTypography-body1,
+[lang="ar"] .MuiTypography-body2,
+[lang="ar"] .MuiTypography-subtitle1,
+[lang="ar"] .MuiTypography-subtitle2,
+[lang="ar"] .MuiTypography-button,
+[lang="ar"] .MuiTypography-caption,
+[lang="ar"] .MuiTypography-overline {
+  font-family: var(--font-family-arabic) !important;
+}
+
+[lang="en"] .MuiTypography-root,
+[lang="en"] .MuiTypography-h1,
+[lang="en"] .MuiTypography-h2,
+[lang="en"] .MuiTypography-h3,
+[lang="en"] .MuiTypography-h4,
+[lang="en"] .MuiTypography-h5,
+[lang="en"] .MuiTypography-h6,
+[lang="en"] .MuiTypography-body1,
+[lang="en"] .MuiTypography-body2,
+[lang="en"] .MuiTypography-subtitle1,
+[lang="en"] .MuiTypography-subtitle2,
+[lang="en"] .MuiTypography-button,
+[lang="en"] .MuiTypography-caption,
+[lang="en"] .MuiTypography-overline {
+  font-family: var(--font-family-english) !important;
+}
+
+/* باقي تجاوزات MUI */
+.MuiButton-root,
+.MuiButtonBase-root,
+.MuiButton-text,
+.MuiButton-contained,
+.MuiButton-outlined {
+  font-family: inherit !important;
+}
+
+.MuiInputBase-root,
+.MuiInputBase-input,
+.MuiInputLabel-root,
+.MuiFormLabel-root {
+  font-family: inherit !important;
+}
+
+.MuiListItem-root,
+.MuiListItemText-primary,
+.MuiListItemText-secondary,
+.MuiMenuItem-root {
+  font-family: inherit !important;
+}
+
+.MuiTableCell-root,
+.MuiTableHead-root .MuiTableCell-root {
+  font-family: inherit !important;
+}
+
+.MuiTab-root,
+.MuiTabs-root {
+  font-family: inherit !important;
+}
+
+.MuiChip-root,
+.MuiChip-label {
+  font-family: inherit !important;
+}
+
+.MuiAlert-root,
+.MuiAlert-message,
+.MuiAlert-title {
+  font-family: inherit !important;
+}
+
+/* إضافات لتجاوز مشاكل الشائعة في RTL */
+[dir="rtl"] .MuiDrawer-paperAnchorLeft {
+  right: 0;
+  left: auto !important;
+}
+
+[dir="rtl"] .MuiDrawer-paperAnchorRight {
+  left: 0;
+  right: auto !important;
+}
+
+[dir="rtl"] .MuiFormControlLabel-labelPlacementStart {
+  margin-right: 0;
+  margin-left: 8px;
+}
+
+/* إعدادات Responsive */
+@media (max-width: 768px) {
+  [dir="rtl"] .mobile-rtl-fix {
+    text-align: right !important;
+    padding-right: 0 !important;
+    padding-left: 16px !important;
+  }
+
+  [dir="ltr"] .mobile-ltr-fix {
+    text-align: left !important;
+    padding-left: 0 !important;
+    padding-right: 16px !important;
+  }
+}
+
+/* فئات مساعدة إضافية */
+.float-start {
+  float: left;
+}
+
+[dir="rtl"] .float-start {
+  float: right;
+}
+
+.float-end {
+  float: right;
+}
+
+[dir="rtl"] .float-end {
+  float: left;
+}
+
+/* Bootstrap-like utilities */
+.me-auto {
+  margin-right: auto !important;
+}
+
+[dir="rtl"] .me-auto {
+  margin-left: auto !important;
+  margin-right: 0 !important;
+}
+
+.ms-auto {
+  margin-left: auto !important;
+}
+
+[dir="rtl"] .ms-auto {
+  margin-right: auto !important;
+  margin-left: 0 !important;
+}
+
+/* SweetAlert2 — ثيم الصيدلية (خط عربي، زوايا ناعمة، ألوان خضراء) */
+.app-swal-popup {
+  border-radius: 18px !important;
+  padding: 1.35rem 1.1rem 1.45rem !important;
+  box-shadow: 0 22px 48px rgba(12, 38, 18, 0.2) !important;
+  font-family: var(--font-family-arabic), "Tajawal", sans-serif !important;
+  border: 1px solid rgba(46, 125, 50, 0.14) !important;
+  background: linear-gradient(165deg, #ffffff 0%, #f8faf8 100%) !important;
+}
+
+.app-swal-title {
+  font-size: 1.18rem !important;
+  font-weight: 700 !important;
+  color: #1b2e1b !important;
+  padding: 0 0.35rem !important;
+  line-height: 1.45 !important;
+}
+
+.app-swal-html {
+  font-size: 0.98rem !important;
+  line-height: 1.75 !important;
+  color: #37474f !important;
+  text-align: right !important;
+  white-space: pre-line !important;
+}
+
+.app-swal-confirm,
+.app-swal-cancel {
+  border-radius: 10px !important;
+  font-weight: 600 !important;
+  padding: 0.52rem 1.25rem !important;
+  font-family: inherit !important;
+  font-size: 0.95rem !important;
+}
+
+.app-swal-actions {
+  gap: 0.65rem !important;
+  margin-top: 1rem !important;
+}
+
+.app-swal-toast {
+  border-radius: 14px !important;
+  box-shadow: 0 14px 36px rgba(12, 38, 18, 0.16) !important;
+  border: 1px solid rgba(46, 125, 50, 0.1) !important;
+}
+
+.app-swal-toast-title {
+  font-size: 0.96rem !important;
+  margin: 0.15rem 0 0 !important;
+  font-weight: 600 !important;
+}
+
+.swal2-timer-progress-bar {
+  background: linear-gradient(90deg, #66bb6a, #2e7d32) !important;
+}
+
+.swal2-icon.swal2-success .swal2-success-ring {
+  border-color: rgba(46, 125, 50, 0.28) !important;
+}
+
+.swal2-icon.swal2-success [class^="swal2-success-line"] {
+  background-color: #2e7d32 !important;
+}

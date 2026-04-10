@@ -1,0 +1,26 @@
+=== نشر المشروع على Render (ملخص) ===
+
+1) مستودع Git
+   - اجعل جذر الريبو = مجلد pharmacy-system (يحتوي render.yaml و pharmacy-backend و pharmacy-frontend).
+   - ادفع التغييرات إلى GitHub.
+
+2) في Render: New → Blueprint → اختر الريبو → Render يقرأ render.yaml وينشئ خدمتين.
+
+3) متغيرات يدوية (Environment) لخدمة pharmacy-api:
+   - APP_KEY = ناتج: php artisan key:generate --show (من جهازك داخل pharmacy-backend)
+   - APP_URL = https://pharmacy-api-....onrender.com (رابط الخدمة بعد أول نشر)
+   - DATABASE_URL = Internal Database URL من صفحة Postgres (زر Copy)
+
+   ربط قاعدة البيانات: من صفحة Web Service → Connect → اختر pharmacy-mustafa-db إن وُجد الخيار.
+
+4) بعد نجاح pharmacy-api:
+   - Shell على Render: php artisan migrate --force
+
+5) متغير لخدمة pharmacy-web (Static):
+   - VITE_API_BASE_URL = نفس رابط الـ API بدون / في النهاية (مثل https://pharmacy-api-xxx.onrender.com)
+   - ثم أعد النشر (Deploy) للـ Static حتى يُبنى الفرونت بالرابط الصحيح.
+
+6) React Router (صفحات مباشرة):
+   - في Static Site بالداشبورد: Redirects/Rewrites → Rewrite: /* → /index.html
+
+7) أمان: إن نشرت كلمة مرور قاعدة البيانات في مكان عام، غيّرها من لوحة Postgres.

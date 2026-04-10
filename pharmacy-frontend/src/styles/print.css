@@ -1,0 +1,162 @@
+/* طباعة وصل الكاشير — صفحة واحدة مضغوطة */
+@media print {
+  @page {
+    size: 80mm auto;
+    margin: 3mm;
+  }
+
+  html,
+  body {
+    width: 100% !important;
+    height: auto !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #fff !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  #root {
+    min-height: 0 !important;
+    height: auto !important;
+    overflow: visible !important;
+    display: block !important;
+  }
+
+  body * {
+    visibility: hidden !important;
+  }
+
+  .pharmacy-print-root,
+  .pharmacy-print-root * {
+    visibility: visible !important;
+  }
+
+  .pharmacy-print-root {
+    position: relative !important;
+    left: auto !important;
+    top: auto !important;
+    width: 100% !important;
+    max-width: 74mm !important;
+    margin: 0 auto !important;
+    padding: 2mm 3mm !important;
+    box-sizing: border-box !important;
+    font-family: "Tajawal", "Segoe UI", sans-serif !important;
+    font-size: 9pt !important;
+    line-height: 1.25 !important;
+    color: #000 !important;
+    background: #fff !important;
+    page-break-after: auto;
+    opacity: 1 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    pointer-events: auto !important;
+  }
+
+  .pharmacy-receipt-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 8.5pt;
+    margin: 4px 0;
+  }
+
+  .pharmacy-receipt-table th,
+  .pharmacy-receipt-table td {
+    padding: 3px 2px;
+    border-bottom: 1px solid #bbb;
+    text-align: right;
+    vertical-align: top;
+  }
+
+  .pharmacy-receipt-table th {
+    font-weight: 700;
+    border-bottom: 2px solid #000;
+    font-size: 8pt;
+  }
+
+  .pharmacy-receipt-table .pharmacy-receipt-num {
+    text-align: center;
+    width: 1.4rem;
+  }
+
+  .pharmacy-receipt-table .pharmacy-receipt-total {
+    text-align: left;
+    white-space: nowrap;
+    font-weight: 700;
+  }
+
+  .pharmacy-receipt-meta {
+    font-size: 8pt;
+    margin: 2px 0;
+    text-align: center;
+  }
+
+  .pharmacy-receipt-footer {
+    margin-top: 6px;
+    padding-top: 4px;
+    border-top: 1px solid #000;
+    font-size: 8.5pt;
+  }
+
+  .pharmacy-receipt-footer-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 2px 0;
+  }
+
+  .pharmacy-receipt-total-line {
+    display: flex;
+    justify-content: space-between;
+    font-weight: 800;
+    font-size: 10pt;
+    margin-top: 4px;
+    padding-top: 4px;
+    border-top: 1px dashed #000;
+  }
+
+  /* تقارير الإدارة — تبقى كما هي */
+  .pharmacy-print-reports,
+  .pharmacy-print-reports * {
+    visibility: visible !important;
+  }
+
+  .pharmacy-print-reports {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    padding: 12mm;
+    font-family: "Tajawal", "Segoe UI", sans-serif;
+    font-size: 11px;
+    background: #fff !important;
+    color: #000 !important;
+  }
+}
+
+/* شاشة: إخفاء وصل الطباعة */
+.pharmacy-print-root {
+  position: fixed;
+  left: -10000px;
+  top: 0;
+  width: 74mm;
+  box-sizing: border-box;
+  pointer-events: none;
+  opacity: 0;
+  overflow: hidden;
+  max-height: 0;
+}
+
+.pharmacy-print-reports {
+  display: none;
+}
+
+@media print {
+  .pharmacy-print-reports {
+    display: block;
+    position: absolute;
+    left: 0;
+    top: 0;
+  }
+}

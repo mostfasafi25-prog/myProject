@@ -1,0 +1,42 @@
+# Blueprint لـ Render — ضع الملف في جذر مستودع Git (مجلد pharmacy-system إن كان هو الجذر).
+# بعد الربط: عيّن المتغيرات اليدوية (sync: false) من لوحة Render.
+
+services:
+  - type: web
+    name: pharmacy-api
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./pharmacy-backend/Dockerfile
+    dockerContext: ./pharmacy-backend
+    healthCheckPath: /api/health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: APP_DEBUG
+        value: "false"
+      - key: LOG_CHANNEL
+        value: stderr
+      - key: DB_CONNECTION
+        value: pgsql
+      # انسخ من لوحة Postgres → Internal Database URL (بعد ربط الخدمة أو لصق يدوي)
+      - key: DATABASE_URL
+        sync: false
+      # php artisan key:generate --show محلياً
+      - key: APP_KEY
+        sync: false
+      # https://pharmacy-api-xxxx.onrender.com بدون شرطة أخيرة
+      - key: APP_URL
+        sync: false
+
+  - type: web
+    name: pharmacy-web
+    runtime: static
+    plan: free
+    region: oregon
+    rootDir: pharmacy-frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_BASE_URL
+        sync: false
