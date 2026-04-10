@@ -13,6 +13,8 @@ COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 WORKDIR /var/www/html
 
 COPY . .
+RUN chmod +x docker-entrypoint.sh \
+    && mv docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 ENV COMPOSER_ALLOW_SUPERUSER=1
 RUN composer install --no-dev --no-interaction --prefer-dist --no-scripts \
@@ -23,5 +25,5 @@ RUN chmod -R 775 storage bootstrap/cache
 ENV PORT=8000
 EXPOSE 8000
 
-# على Render (بدون Shell على Free): تهيئة القاعدة تلقائياً. AdminCashierSeeder يستخدم updateOrCreate — آمن عند كل إقلاع.
-CMD ["sh", "-c", "php artisan migrate --force && php artisan db:seed --class=AdminCashierSeeder --force && exec php artisan serve --host=0.0.0.0 --port=$PORT"]
+# يتطلب DATABASE_URL على Render (ربط Postgres من Environment).
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
