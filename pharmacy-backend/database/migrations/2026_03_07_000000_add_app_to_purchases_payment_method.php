@@ -8,13 +8,18 @@ return new class extends Migration
 {
     private function syncPurchasesPaymentMethodCheck(array $methods): void
     {
+        DB::statement('ALTER TABLE purchases DROP CONSTRAINT IF EXISTS purchases_payment_method_check');
+
         $names = DB::select("
             SELECT c.conname
             FROM pg_constraint c
             JOIN pg_class t ON c.conrelid = t.oid
             WHERE t.relname = 'purchases'
               AND c.contype = 'c'
-              AND pg_get_constraintdef(c.oid) LIKE '%\"payment_method\"%'
+              AND (
+                  c.conname ILIKE '%payment_method%'
+                  OR pg_get_constraintdef(c.oid) ILIKE '%payment_method%'
+              )
         ");
         foreach ($names as $row) {
             $cn = str_replace('"', '""', $row->conname);

@@ -31,13 +31,18 @@ return new class extends Migration
 
     private function syncPostgresCategoryCheck(bool $withMealPreparation): void
     {
+        DB::statement('ALTER TABLE treasury_transactions DROP CONSTRAINT IF EXISTS treasury_transactions_category_check');
+
         $names = DB::select("
             SELECT c.conname
             FROM pg_constraint c
             JOIN pg_class t ON c.conrelid = t.oid
             WHERE t.relname = 'treasury_transactions'
               AND c.contype = 'c'
-              AND pg_get_constraintdef(c.oid) LIKE '%\"category\"%'
+              AND (
+                  c.conname ILIKE '%category%'
+                  OR pg_get_constraintdef(c.oid) ILIKE '%category%'
+              )
         ");
         foreach ($names as $row) {
             $cn = str_replace('"', '""', $row->conname);

@@ -8,13 +8,18 @@ return new class extends Migration
 {
     private function syncUsersRoleCheck(array $roles): void
     {
+        DB::statement('ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check');
+
         $names = DB::select("
             SELECT c.conname
             FROM pg_constraint c
             JOIN pg_class t ON c.conrelid = t.oid
             WHERE t.relname = 'users'
               AND c.contype = 'c'
-              AND pg_get_constraintdef(c.oid) LIKE '%\"role\"%'
+              AND (
+                  c.conname ILIKE '%role%'
+                  OR pg_get_constraintdef(c.oid) ILIKE '%role%'
+              )
         ");
         foreach ($names as $row) {
             $cn = str_replace('"', '""', $row->conname);
