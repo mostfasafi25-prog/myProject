@@ -11,6 +11,10 @@ $corsOriginsEnv = env('CORS_ALLOWED_ORIGINS');
 $allowedOrigins = ($corsOriginsEnv === null || $corsOriginsEnv === '')
     ? ['*']
     : array_values(array_filter(array_map('trim', explode(',', $corsOriginsEnv))));
+// قيمة فارغة أو فواصل فقط = مصفوفة فارغة → لا يُرسل Access-Control-Allow-Origin → خطأ CORS في المتصفح
+if ($allowedOrigins === []) {
+    $allowedOrigins = ['*'];
+}
 
 return [
 
