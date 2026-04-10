@@ -54,6 +54,26 @@ class AuthController extends Controller
             return response()->json(['errors' => $v->errors()], 422);
         }
 
+        if (filter_var(env('REGISTER_SIMPLE_MODE', false), FILTER_VALIDATE_BOOLEAN)) {
+            if ($request->role === 'admin') {
+                return response()->json([
+                    'error' => 'وضع التسجيل السريع لا يدعم دور المدير. اختر كاشير للاختبار، أو أنشئ أدمن عبر db:seed.',
+                ], 422);
+            }
+
+            User::create([
+                'username' => $request->username,
+                'password' => Hash::make($request->password),
+                'role' => $request->role,
+                'approval_status' => 'approved',
+            ]);
+
+            return response()->json([
+                'message' => 'تم إنشاء الحساب (وضع اختبار: بدون بريد). يمكنك تسجيل الدخول فورًا.',
+                'requires_verification' => false,
+            ], 201);
+        }
+
         $confirmEmail = env('HOTMAIL_CONFIRM_EMAIL');
         if (!$confirmEmail) {
             return response()->json(['error' => 'لم يتم إعداد بريد Hotmail لتأكيد التسجيل'], 500);

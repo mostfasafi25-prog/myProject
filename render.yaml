@@ -28,6 +28,9 @@ services:
       # https://pharmacy-api-xxxx.onrender.com بدون شرطة أخيرة
       - key: APP_URL
         sync: false
+      # للاختبار فقط: true يُسجّل كاشير فورًا بدون بريد. اتركه false أو احذفه في الإنتاج الحقيقي.
+      - key: REGISTER_SIMPLE_MODE
+        value: "false"
 
   - type: web
     name: pharmacy-web
