@@ -1,5 +1,17 @@
 <?php
 
+/*
+|--------------------------------------------------------------------------
+| allowed_origins
+|--------------------------------------------------------------------------
+| الافتراضي * يكفي غالباً. إن ظهرت أخطاء CORS من Vercel عيّن CORS_ALLOWED_ORIGINS على Render، مثال:
+| https://pharmacy-frontend-psi.vercel.app — عدة أصول مفصولة بفاصلة.
+*/
+$corsOriginsEnv = env('CORS_ALLOWED_ORIGINS');
+$allowedOrigins = ($corsOriginsEnv === null || $corsOriginsEnv === '')
+    ? ['*']
+    : array_values(array_filter(array_map('trim', explode(',', $corsOriginsEnv))));
+
 return [
 
     /*
@@ -19,7 +31,7 @@ return [
 
     'allowed_methods' => ['*'],
 
-    'allowed_origins' => ['*'],
+    'allowed_origins' => $allowedOrigins,
 
     'allowed_origins_patterns' => [],
 
