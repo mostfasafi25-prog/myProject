@@ -316,6 +316,9 @@ export default function Login() {
                 إنشاء حساب جديد
               </Button>
             </Typography>
+            <Typography variant="caption" color="text.disabled" textAlign="center" sx={{ display: "block", mt: 0.5 }}>
+              نشر الواجهة: {__APP_DEPLOY_REF__}
+            </Typography>
           </Stack>
         </Paper>
       </Box>
