@@ -12,9 +12,16 @@ use Symfony\Component\HttpFoundation\Response;
  */
 class PreflightCors
 {
+    private function isApiPath(Request $request): bool
+    {
+        $path = $request->path();
+
+        return $path === 'api' || str_starts_with($path, 'api/');
+    }
+
     public function handle(Request $request, Closure $next): Response
     {
-        if ($request->isMethod('OPTIONS') && $request->is('api/*')) {
+        if ($request->isMethod('OPTIONS') && $this->isApiPath($request)) {
             return response('', 204)
                 ->header('Access-Control-Allow-Origin', '*')
                 ->header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
@@ -25,7 +32,7 @@ class PreflightCors
         /** @var Response $response */
         $response = $next($request);
 
-        if ($request->is('api/*') && ! $response->headers->has('Access-Control-Allow-Origin')) {
+        if ($this->isApiPath($request) && ! $response->headers->get('Access-Control-Allow-Origin')) {
             $response->headers->set('Access-Control-Allow-Origin', '*');
         }
 
