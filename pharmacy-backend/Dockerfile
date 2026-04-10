@@ -23,4 +23,5 @@ RUN chmod -R 775 storage bootstrap/cache
 ENV PORT=8000
 EXPOSE 8000
 
-CMD php artisan serve --host=0.0.0.0 --port=${PORT}
+# على Render (بدون Shell على Free): تهيئة القاعدة تلقائياً. AdminCashierSeeder يستخدم updateOrCreate — آمن عند كل إقلاع.
+CMD ["sh", "-c", "php artisan migrate --force && php artisan db:seed --class=AdminCashierSeeder --force && exec php artisan serve --host=0.0.0.0 --port=$PORT"]
