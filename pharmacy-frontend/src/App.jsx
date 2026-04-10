@@ -23,6 +23,10 @@ import DebtCustomersPage from "./pages/Admin/DebtCustomersPage";
 import StocktakePage from "./pages/Admin/StocktakePage";
 import NotificationsPage from "./pages/Admin/NotificationsPage";
 import SuperCashierSupplyPage from "./pages/SuperCashierSupplyPage";
+
+/** مؤقت فقط: الدخول مباشرة للإدارة بدون تسجيل دخول. أعده إلى false قبل الإنتاج الحقيقي. */
+const TEMP_BYPASS_AUTH_TO_ADMIN = true;
+
 const cookies = new Cookies();
 const UI_SETTINGS_KEY = "uiSettings";
 const CHATBASE_BOT_ID = "fELicw62nCAmG-UO2a7Ub";
@@ -40,7 +44,18 @@ const fontFamilyMap = {
   inter: '"Inter","Tajawal","Cairo","Arial",sans-serif',
 };
 
+function tempBypassAdminUser() {
+  return {
+    id: 0,
+    username: "admin",
+    role: "admin",
+    approval_status: "approved",
+    name: "مدير (وضع مؤقت)",
+  };
+}
+
 function getStoredUser() {
+  if (TEMP_BYPASS_AUTH_TO_ADMIN) return tempBypassAdminUser();
   try {
     return JSON.parse(localStorage.getItem("user"));
   } catch {
@@ -49,6 +64,7 @@ function getStoredUser() {
 }
 
 function isAuthenticated() {
+  if (TEMP_BYPASS_AUTH_TO_ADMIN) return true;
   const user = getStoredUser();
   const token = cookies.get("token");
   return Boolean(user?.role && token);
@@ -66,6 +82,7 @@ function ProtectedRoleRoute({ allowRoles, children }) {
 }
 
 function RootRedirect() {
+  if (TEMP_BYPASS_AUTH_TO_ADMIN) return <Navigate to="/admin" replace />;
   if (!isAuthenticated()) return <Navigate to="/login" replace />;
   const user = getStoredUser();
   if (user?.role === "admin") return <Navigate to="/admin" replace />;
@@ -86,6 +103,12 @@ function getStoredUiSettings() {
 function App() {
   const [mode, setMode] = useState(() => localStorage.getItem("themeMode") || "light");
   const [uiSettings, setUiSettings] = useState(getStoredUiSettings);
+
+  useEffect(() => {
+    if (TEMP_BYPASS_AUTH_TO_ADMIN) {
+      cookies.set("token", "__TEMP_BYPASS_AUTH__", { path: "/" });
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -251,8 +274,14 @@ function App() {
       <CssBaseline />
       <BrowserRouter>
         <Routes>
-          <Route path="/login" element={<Login />} />
-          <Route path="/register" element={<Register />} />
+          <Route
+            path="/login"
+            element={TEMP_BYPASS_AUTH_TO_ADMIN ? <Navigate to="/admin" replace /> : <Login />}
+          />
+          <Route
+            path="/register"
+            element={TEMP_BYPASS_AUTH_TO_ADMIN ? <Navigate to="/admin" replace /> : <Register />}
+          />
           <Route
             path="/admin"
             element={
