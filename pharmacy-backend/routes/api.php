@@ -23,6 +23,21 @@ Route::get('/health', function () {
     ]);
 });
 
+// فتح الرابط في المتصفح يرسل GET؛ نرجع JSON واضح بدل صفحة 405 الافتراضية
+Route::get('/login', function () {
+    return response()->json([
+        'app' => 'pharmacy-backend',
+        'message' => 'تسجيل الدخول يتم عبر طلب POST فقط (ليس من شريط العنوان).',
+        'use_method' => 'POST',
+        'content_type' => 'application/json',
+        'body' => [
+            'username' => 'string',
+            'password' => 'string',
+        ],
+        'hint' => 'استخدم واجهة الموقع أو: curl -X POST .../api/login -d {"username":"admin","password":"..."}',
+    ]);
+});
+
 Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
     return $request->user();
 });
