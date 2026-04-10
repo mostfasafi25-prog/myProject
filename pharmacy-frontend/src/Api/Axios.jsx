@@ -1,6 +1,12 @@
 import axios from "axios";
 import { baseURL } from "./Api";
 import Cookies from "universal-cookie";
+import {
+  apiDebugEnabled,
+  logAxiosError,
+  logAxiosRequest,
+  logAxiosResponse,
+} from "./apiDebugLog";
 
 const cookies = new Cookies();
 
@@ -17,5 +23,20 @@ Axios.interceptors.request.use((config) => {
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
+  const method = (config.method || "get").toUpperCase();
+  const path = config.url || "";
+  console.info("[صيدلية][→]", method, path, token ? "(مع توكن)" : "(بدون توكن)");
+  if (apiDebugEnabled()) logAxiosRequest(config);
   return config;
 });
+
+Axios.interceptors.response.use(
+  (response) => {
+    if (apiDebugEnabled()) logAxiosResponse(response);
+    return response;
+  },
+  (error) => {
+    logAxiosError(error);
+    return Promise.reject(error);
+  },
+);

@@ -63,6 +63,13 @@ export default function Login() {
       const token = response?.data?.token;
       let user = response?.data?.user;
 
+      console.info("[صيدلية][تسجيل دخول] بعد الرد", {
+        username,
+        roleSelectedInUi: roleView,
+        serverRole: user?.role,
+        hasToken: Boolean(token),
+      });
+
       if (!token || !user?.role) {
         setError("استجابة تسجيل الدخول غير مكتملة");
         return;
@@ -105,6 +112,7 @@ export default function Login() {
         setError("نوع المستخدم غير مدعوم");
       }
     } catch (err) {
+      console.warn("[صيدلية][تسجيل دخول] فشل", err?.response?.status, err?.response?.data?.error || err?.message);
       setError(err?.response?.data?.error || "فشل تسجيل الدخول");
     } finally {
       setLoading(false);

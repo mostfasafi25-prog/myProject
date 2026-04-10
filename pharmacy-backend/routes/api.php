@@ -1,6 +1,7 @@
 ﻿<?php
 
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\ProductController;
@@ -17,10 +18,22 @@ use App\Http\Controllers\AdminDashboardController;
 */
 
 Route::get('/health', function () {
-    return response()->json([
+    $payload = [
         'app' => 'pharmacy-backend',
         'status' => 'ok',
-    ]);
+        'time' => now()->toIso8601String(),
+        'database' => 'unknown',
+    ];
+    try {
+        DB::connection()->getPdo();
+        $payload['database'] = 'connected';
+    } catch (\Throwable $e) {
+        $payload['database'] = 'error';
+        $payload['status'] = 'degraded';
+        $payload['database_message'] = config('app.debug') ? $e->getMessage() : 'فشل الاتصال بقاعدة البيانات';
+    }
+
+    return response()->json($payload);
 });
 
 // فتح الرابط في المتصفح يرسل GET؛ نرجع JSON واضح بدل صفحة 405 الافتراضية

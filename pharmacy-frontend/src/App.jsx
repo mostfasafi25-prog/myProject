@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import Cookies from "universal-cookie";
 import { Axios } from "./Api/Axios";
+import { logHealthResult } from "./Api/apiDebugLog";
 import Login from "./pages/Auth/Login";
 import Register from "./pages/Auth/Register";
 import HomeDashboard from "./pages/Admin/HomeDashboard";
@@ -85,6 +86,21 @@ function getStoredUiSettings() {
 function App() {
   const [mode, setMode] = useState(() => localStorage.getItem("themeMode") || "light");
   const [uiSettings, setUiSettings] = useState(getStoredUiSettings);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await Axios.get("health");
+        if (!cancelled) logHealthResult(true, data, null);
+      } catch (e) {
+        if (!cancelled) logHealthResult(false, null, e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let identified = false;
