@@ -53,9 +53,7 @@ import {
 } from "@mui/material";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import Cookies from "universal-cookie";
-import axios from "axios";
-import { baseURL } from "../../Api/Api";
+import { Axios } from "../../Api/Axios";
 import { persistUserAvatarForLogin } from "../../utils/staffProfileExtras";
 import { PHARMACY_USER_STORAGE_EVENT } from "../../utils/userRoles";
 import { adminPageContainerSx } from "../../utils/adminPageLayout";
@@ -96,7 +94,6 @@ export default function SettingsPage({
   const theme = useTheme();
   const location = useLocation();
   const navigate = useNavigate();
-  const cookies = new Cookies();
   const [draft, setDraft] = useState(uiSettings);
   const [savedMsg, setSavedMsg] = useState("");
   const [accountMsg, setAccountMsg] = useState({ type: "", text: "" });
@@ -243,15 +240,10 @@ export default function SettingsPage({
 
     try {
       setPwdLoading(true);
-      const token = cookies.get("token");
-      await axios.post(
-        `${baseURL}change-password`,
-        {
-          current_password: passwordForm.currentPassword,
-          new_password: passwordForm.newPassword,
-        },
-        { headers: { Authorization: `Bearer ${token}` } },
-      );
+      await Axios.post("change-password", {
+        current_password: passwordForm.currentPassword,
+        new_password: passwordForm.newPassword,
+      });
       setAccountMsg({ type: "success", text: "تم تحديث كلمة المرور بنجاح" });
       setPasswordForm({ currentPassword: "", newPassword: "", confirmNewPassword: "" });
     } catch (err) {

@@ -12,9 +12,8 @@ import {
   useTheme,
 } from "@mui/material";
 import { useEffect, useState } from "react";
-import axios from "axios";
 import Cookies from "universal-cookie";
-import { baseURL } from "../../Api/Api";
+import { Axios } from "../../Api/Axios";
 import { adminPageContainerSx } from "../../utils/adminPageLayout";
 import AdminLayout from "./AdminLayout";
 
@@ -33,9 +32,7 @@ export default function AIAssistantPage({ mode, onToggleMode }) {
         const token = cookies.get("token");
         if (!token) return;
 
-        const { data } = await axios.get(`${baseURL}chatbase/identity-token`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
+        const { data } = await Axios.get("chatbase/identity-token");
         if (!data?.token) return;
 
         window.chatbase("identify", { token: data.token });

@@ -29,8 +29,7 @@ import {
   PersonAddAlt1,
 } from "@mui/icons-material";
 import { Link, useNavigate } from "react-router-dom";
-import axios from "axios";
-import { baseURL } from "../../Api/Api";
+import { Axios } from "../../Api/Axios";
 import { PHARMACY_DISPLAY_NAME } from "../../config/appBranding";
 
 export default function Register() {
@@ -63,7 +62,7 @@ export default function Register() {
     try {
       setLoading(true);
       const role = roleView === "admin" ? "admin" : "cashier";
-      const response = await axios.post(`${baseURL}register`, { username, password, role, full_name: fullName });
+      const response = await Axios.post("register", { username, password, role, full_name: fullName });
       if (response?.data?.requires_verification) {
         setChallengeId(response?.data?.challenge_id || "");
         setOtpChannel(response?.data?.channel || "");
@@ -91,7 +90,7 @@ export default function Register() {
 
     try {
       setLoading(true);
-      await axios.post(`${baseURL}register/verify-otp`, {
+      await Axios.post("register/verify-otp", {
         challenge_id: challengeId,
         code: otpCode,
       });

@@ -28,9 +28,7 @@ import { useEffect, useMemo, useState } from "react";
 import FilterBarRow from "../../components/FilterBarRow";
 import { adminPageContainerSx, adminPageSubtitleSx, adminPageTitleRowSx } from "../../utils/adminPageLayout";
 import AdminLayout from "./AdminLayout";
-import axios from "axios";
-import Cookies from "universal-cookie";
-import { baseURL } from "../../Api/Api";
+import { Axios } from "../../Api/Axios";
 import { showAppToast } from "../../utils/appToast";
 import { readStaffProfileExtras, writeStaffProfileExtras } from "../../utils/staffProfileExtras";
 
@@ -172,11 +170,7 @@ export default function StaffPage({ mode, onToggleMode }) {
     const loadUsersFromApi = async () => {
       setLoadingUsers(true);
       try {
-        const cookies = new Cookies();
-        const token = cookies.get("token");
-        const { data } = await axios.get(`${baseURL}users`, {
-          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-        });
+        const { data } = await Axios.get("users");
         const apiUsers = Array.isArray(data?.data) ? data.data : [];
         if (apiUsers.length) {
           const extras = readStaffProfileExtras();
@@ -311,20 +305,12 @@ export default function StaffPage({ mode, onToggleMode }) {
     }
     setEditSaving(true);
     try {
-      const cookies = new Cookies();
-      const token = cookies.get("token");
-      await axios.put(
-        `${baseURL}users/${editTarget.id}`,
-        {
-          username,
-          password: nextPassword,
-          role: editForm.role,
-          approval_status: editForm.status === "pending" ? "pending" : "approved",
-        },
-        {
-          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-        },
-      );
+      await Axios.put(`users/${editTarget.id}`, {
+        username,
+        password: nextPassword,
+        role: editForm.role,
+        approval_status: editForm.status === "pending" ? "pending" : "approved",
+      });
 
       const extras = readStaffProfileExtras();
       const oldU = editTarget.username;

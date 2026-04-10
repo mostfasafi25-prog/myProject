@@ -40,10 +40,8 @@ import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import InventoryIcon from "@mui/icons-material/Inventory";
 import Payment from "@mui/icons-material/Payment";
 import PhoneAndroid from "@mui/icons-material/PhoneAndroid";
-import axios from "axios";
+import { Axios } from "../../Api/Axios";
 import { formatMoney } from "../../utils/currency";
-
-const API_BASE_URL = "http://127.0.0.1:8000/api";
 
 const CATEGORY_COLOR = "#2e7d32";
 const CARD_RADIUS = 2;
@@ -215,7 +213,7 @@ const Purchases = () => {
 
   const fetchMainCategories = useCallback(async () => {
     try {
-      const res = await axios.get(`${API_BASE_URL}/categories/main`, {
+      const res = await Axios.get("categories/main", {
         params: { scope: "purchase" },
       });
       if (res.data?.success) setCategories(res.data.data || []);
@@ -227,7 +225,7 @@ const Purchases = () => {
   const fetchProducts = useCallback(async () => {
     try {
       setLoading(true);
-      const res = await axios.get(`${API_BASE_URL}/products`, {
+      const res = await Axios.get("products", {
         params: { per_page: 500, include_inactive: 0, scope: "purchase" },
       });
       if (res.data?.success) setProducts(res.data.data || []);
@@ -241,7 +239,7 @@ const Purchases = () => {
 
   const fetchRecentPurchases = useCallback(async () => {
     try {
-      const res = await axios.get(`${API_BASE_URL}/purchases?per_page=5`);
+      const res = await Axios.get("purchases?per_page=5");
       if (res.data?.success) setRecentPurchases(res.data.data || []);
     } catch (e) {
       console.error("جلب المشتريات:", e);
@@ -349,7 +347,7 @@ const Purchases = () => {
     setLoadingAddCategory(true);
     setAddCategoryError(null);
     try {
-      const res = await axios.post(`${API_BASE_URL}/categories`, {
+      const res = await Axios.post("categories", {
         name,
         scope: "purchase",
         is_main: true,
@@ -383,7 +381,7 @@ const Purchases = () => {
 
     setLoadingAdd(true);
     try {
-      await axios.post(`${API_BASE_URL}/products`, {
+      await Axios.post("products", {
         name: addItemForm.name.trim(),
         unit: addItemForm.unit,
         category_id: addItemForm.category_id,
@@ -484,7 +482,7 @@ const Purchases = () => {
         total_price: parseFloat(c.total_price),
       }));
       const totalAmount = items.reduce((s, i) => s + i.total_price, 0);
-      await axios.post(`${API_BASE_URL}/purchases`, {
+      await Axios.post("purchases", {
         invoice_number: generateInvoiceNumber(),
         items,
         total_amount: totalAmount,
@@ -514,8 +512,8 @@ const Purchases = () => {
     setDeleteError(null);
     try {
       const { type, id } = deleteConfirm;
-      const url = type === "category" ? `${API_BASE_URL}/categories/${id}` : `${API_BASE_URL}/products/${id}`;
-      const res = await axios.delete(url);
+      const path = type === "category" ? `categories/${id}` : `products/${id}`;
+      const res = await Axios.delete(path);
       if (res.data?.success) {
         setDeleteConfirm(null);
         await fetchMainCategories();

@@ -2,7 +2,7 @@ import { CssBaseline, ThemeProvider, createTheme } from "@mui/material";
 import { useEffect, useMemo, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import Cookies from "universal-cookie";
-import axios from "axios";
+import { Axios } from "./Api/Axios";
 import Login from "./pages/Auth/Login";
 import Register from "./pages/Auth/Register";
 import HomeDashboard from "./pages/Admin/HomeDashboard";
@@ -22,8 +22,6 @@ import DebtCustomersPage from "./pages/Admin/DebtCustomersPage";
 import StocktakePage from "./pages/Admin/StocktakePage";
 import NotificationsPage from "./pages/Admin/NotificationsPage";
 import SuperCashierSupplyPage from "./pages/SuperCashierSupplyPage";
-import { baseURL } from "./Api/Api";
-
 const cookies = new Cookies();
 const UI_SETTINGS_KEY = "uiSettings";
 const CHATBASE_BOT_ID = "fELicw62nCAmG-UO2a7Ub";
@@ -113,9 +111,7 @@ function App() {
       const token = cookies.get("token");
       if (!token) return;
       try {
-        const { data } = await axios.get(`${baseURL}chatbase/identity-token`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
+        const { data } = await Axios.get("chatbase/identity-token");
         if (data?.token) {
           window.chatbase?.("identify", { token: data.token });
           identified = true;

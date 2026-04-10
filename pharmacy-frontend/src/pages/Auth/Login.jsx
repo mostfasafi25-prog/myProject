@@ -30,9 +30,8 @@ import {
   PointOfSale,
 } from "@mui/icons-material";
 import { Link, useNavigate } from "react-router-dom";
-import axios from "axios";
 import Cookies from "universal-cookie";
-import { baseURL } from "../../Api/Api";
+import { Axios } from "../../Api/Axios";
 import { PHARMACY_DISPLAY_NAME } from "../../config/appBranding";
 import { appendUserLoginNotification } from "../../utils/cashierShiftNotification";
 import { mergeUserWithProfileExtras } from "../../utils/staffProfileExtras";
@@ -59,7 +58,7 @@ export default function Login() {
 
     try {
       setLoading(true);
-      const response = await axios.post(`${baseURL}login`, { username, password });
+      const response = await Axios.post("login", { username, password });
 
       const token = response?.data?.token;
       let user = response?.data?.user;

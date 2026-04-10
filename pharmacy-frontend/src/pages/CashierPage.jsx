@@ -66,8 +66,7 @@ import {
 import { appendShiftActivityRecord } from "../utils/shiftActivityLog";
 import { isNotificationUnreadForCurrentUser } from "../utils/notificationVisibility";
 import { appendSalesReturn } from "../utils/salesReturnsStorage";
-import axios from "axios";
-import { baseURL } from "../Api/Api";
+import { Axios } from "../Api/Axios";
 import { confirmApp, showAppToast } from "../utils/appToast";
 import { productDisplayName } from "../utils/productDisplayName";
 import { appendAudit } from "../utils/auditLog";
@@ -368,12 +367,7 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
     if (!payload.items.length) {
       throw new Error("لا يمكن حفظ الطلب لأن عناصر الفاتورة غير صالحة");
     }
-    await axios.post(`${baseURL}orders`, payload, {
-      headers: (() => {
-        const token = cookies.get("token");
-        return token ? { Authorization: `Bearer ${token}` } : undefined;
-      })(),
-    });
+    await Axios.post("orders", payload);
   };
 
   const flushPendingOfflineInvoices = async () => {

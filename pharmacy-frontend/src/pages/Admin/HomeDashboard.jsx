@@ -26,8 +26,6 @@ import {
   useTheme,
 } from "@mui/material";
 import { keyframes } from "@mui/system";
-import axios from "axios";
-import Cookies from "universal-cookie";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
@@ -40,7 +38,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { baseURL } from "../../Api/Api";
+import { Axios } from "../../Api/Axios";
 import { productDisplayName } from "../../utils/productDisplayName";
 import { daysUntilExpiry } from "../../utils/productExpiry";
 import { adminPageContainerSx } from "../../utils/adminPageLayout";
@@ -97,7 +95,6 @@ const shimmer = keyframes`
 export default function HomeDashboard({ mode = "light", onToggleMode }) {
   const theme = useTheme();
   const navigate = useNavigate();
-  const cookies = new Cookies();
   const [periodView, setPeriodView] = useState("day");
   const [summary, setSummary] = useState(null);
   const [summaryLoading, setSummaryLoading] = useState(true);
@@ -150,10 +147,7 @@ export default function HomeDashboard({ mode = "light", onToggleMode }) {
       setSummaryLoading(true);
       setSummaryErr("");
       try {
-        const token = cookies.get("token");
-        const { data } = await axios.get(`${baseURL}dashboard/summary`, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
+        const { data } = await Axios.get("dashboard/summary");
         if (!cancelled && data?.success && data?.data) setSummary(data.data);
       } catch {
         if (!cancelled) setSummaryErr("تعذر تحميل ملخص الخادم — تُستخدم البيانات المحلية حيث أمكن");
