@@ -1,22 +1,45 @@
 <?php
 
 use Illuminate\Database\Migrations\Migration;
-use Illuminate\Database\Schema\Blueprint;
-use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
+    private function syncPurchasesPaymentMethodCheck(array $methods): void
+    {
+        $names = DB::select("
+            SELECT c.conname
+            FROM pg_constraint c
+            JOIN pg_class t ON c.conrelid = t.oid
+            WHERE t.relname = 'purchases'
+              AND c.contype = 'c'
+              AND pg_get_constraintdef(c.oid) LIKE '%\"payment_method\"%'
+        ");
+        foreach ($names as $row) {
+            $cn = str_replace('"', '""', $row->conname);
+            DB::statement("ALTER TABLE purchases DROP CONSTRAINT IF EXISTS \"{$cn}\"");
+        }
+
+        $list = implode(', ', array_map(
+            fn ($x) => "'".str_replace("'", "''", $x)."'",
+            $methods
+        ));
+
+        DB::statement("ALTER TABLE purchases ADD CONSTRAINT purchases_payment_method_check CHECK (\"payment_method\" in ({$list}))");
+    }
+
     public function up(): void
     {
-        // إضافة 'app' لطريقة الدفع (كاش / تطبيق)
         $driver = Schema::getConnection()->getDriverName();
         if ($driver === 'mysql') {
             DB::statement("ALTER TABLE purchases MODIFY COLUMN payment_method ENUM('cash','credit','bank_transfer','check','app') DEFAULT 'cash'");
-        } else {
-            Schema::table('purchases', function (Blueprint $table) {
-                $table->string('payment_method', 50)->default('cash')->change();
-            });
+
+            return;
+        }
+
+        if ($driver === 'pgsql') {
+            $this->syncPurchasesPaymentMethodCheck(['cash', 'credit', 'bank_transfer', 'check', 'app']);
         }
     }
 
@@ -25,6 +48,12 @@ return new class extends Migration
         $driver = Schema::getConnection()->getDriverName();
         if ($driver === 'mysql') {
             DB::statement("ALTER TABLE purchases MODIFY COLUMN payment_method ENUM('cash','credit','bank_transfer','check') DEFAULT 'cash'");
+
+            return;
+        }
+
+        if ($driver === 'pgsql') {
+            $this->syncPurchasesPaymentMethodCheck(['cash', 'credit', 'bank_transfer', 'check']);
         }
     }
 };

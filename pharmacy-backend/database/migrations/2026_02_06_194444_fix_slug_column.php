@@ -1,24 +1,30 @@
 <?php
 
 use Illuminate\Database\Migrations\Migration;
-use Illuminate\Database\Schema\Blueprint;
-use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
     public function up(): void
     {
-        // استخدم SQL مباشر
-        DB::statement("ALTER TABLE categories MODIFY slug VARCHAR(255) NULL");
-        
-        // أو يمكنك إضافة قيمة افتراضية
-        // DB::statement("ALTER TABLE categories MODIFY slug VARCHAR(255) NULL DEFAULT NULL");
+        if (Schema::getConnection()->getDriverName() === 'pgsql') {
+            DB::statement('ALTER TABLE categories ALTER COLUMN slug DROP NOT NULL');
+
+            return;
+        }
+
+        DB::statement('ALTER TABLE categories MODIFY slug VARCHAR(255) NULL');
     }
 
     public function down(): void
     {
-        // العودة للوضع السابق
-        DB::statement("ALTER TABLE categories MODIFY slug VARCHAR(255) NOT NULL");
+        if (Schema::getConnection()->getDriverName() === 'pgsql') {
+            DB::statement('ALTER TABLE categories ALTER COLUMN slug SET NOT NULL');
+
+            return;
+        }
+
+        DB::statement('ALTER TABLE categories MODIFY slug VARCHAR(255) NOT NULL');
     }
 };
