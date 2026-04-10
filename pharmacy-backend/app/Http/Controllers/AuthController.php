@@ -55,9 +55,9 @@ class AuthController extends Controller
         }
 
         if (filter_var(env('REGISTER_SIMPLE_MODE', false), FILTER_VALIDATE_BOOLEAN)) {
-            if ($request->role === 'admin') {
+            if ($request->role === 'admin' && ! filter_var(env('REGISTER_SIMPLE_ALLOW_ADMIN', false), FILTER_VALIDATE_BOOLEAN)) {
                 return response()->json([
-                    'error' => 'وضع التسجيل السريع لا يدعم دور المدير. اختر كاشير للاختبار، أو أنشئ أدمن عبر db:seed.',
+                    'error' => 'التسجيل السريع كمدير معطّل. فعّل REGISTER_SIMPLE_ALLOW_ADMIN=true على السيرفر (اختبار فقط)، أو أنشئ أدمن عبر db:seed.',
                 ], 422);
             }
 

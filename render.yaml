@@ -28,8 +28,10 @@ services:
       # https://pharmacy-api-xxxx.onrender.com بدون شرطة أخيرة
       - key: APP_URL
         sync: false
-      # للاختبار فقط: true يُسجّل كاشير فورًا بدون بريد. اتركه false أو احذفه في الإنتاج الحقيقي.
+      # للاختبار فقط: true = تسجيل فوري بدون بريد. REGISTER_SIMPLE_ALLOW_ADMIN=true يسمح تسجيل مدير من الواجهة (خطير).
       - key: REGISTER_SIMPLE_MODE
+        value: "false"
+      - key: REGISTER_SIMPLE_ALLOW_ADMIN
         value: "false"
 
   - type: web
