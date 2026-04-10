@@ -7,6 +7,28 @@ define('LARAVEL_START', microtime(true));
 
 /*
 |--------------------------------------------------------------------------
+| CORS preflight (OPTIONS) قبل تحميل Laravel
+|--------------------------------------------------------------------------
+| يضمن وجود Access-Control-Allow-Origin لطلبات المتصفح من Vercel وغيره
+| حتى لو لم تُطبَّق middleware لأي سبب.
+*/
+$__rqMethod = $_SERVER['REQUEST_METHOD'] ?? '';
+$__rqPath = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+if (
+    $__rqMethod === 'OPTIONS'
+    && ($__rqPath === '/api' || str_starts_with($__rqPath, '/api/'))
+) {
+    header('Access-Control-Allow-Origin: *');
+    header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, X-CSRF-TOKEN');
+    header('Access-Control-Max-Age: 86400');
+    http_response_code(204);
+    exit;
+}
+unset($__rqMethod, $__rqPath);
+
+/*
+|--------------------------------------------------------------------------
 | Check If The Application Is Under Maintenance
 |--------------------------------------------------------------------------
 |
@@ -48,8 +70,15 @@ $app = require_once __DIR__.'/../bootstrap/app.php';
 
 $kernel = $app->make(Kernel::class);
 
-$response = $kernel->handle(
-    $request = Request::capture()
-)->send();
+$request = Request::capture();
+$response = $kernel->handle($request);
+
+$__p = $request->path();
+if (($__p === 'api' || str_starts_with($__p, 'api/')) && ! $response->headers->get('Access-Control-Allow-Origin')) {
+    $response->headers->set('Access-Control-Allow-Origin', '*');
+}
+unset($__p);
+
+$response->send();
 
 $kernel->terminate($request, $response);
