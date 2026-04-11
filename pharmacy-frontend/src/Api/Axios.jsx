@@ -15,6 +15,10 @@ export const Axios = axios.create({
   // false: API على دومين مختلف (Render) — التوكن يُرسل عبر Authorization وليس كوكيز cross-site.
   // true يكسر CORS مع Allow-Origin: * على Laravel.
   withCredentials: false,
+  headers: {
+    Accept: "application/json",
+    "X-Requested-With": "XMLHttpRequest",
+  },
 });
 
 // الحصول على التوكن عند كل طلب

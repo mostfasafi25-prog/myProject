@@ -71,7 +71,13 @@ export default function Login() {
       });
 
       if (!token || !user?.role) {
-        setError("استجابة تسجيل الدخول غير مكتملة");
+        const raw = response?.data;
+        const looksLikeHtml = typeof raw === "string" && raw.trimStart().startsWith("<");
+        setError(
+          looksLikeHtml
+            ? "السيرفر أرجع صفحة HTML بدل JSON — تحقق من عنوان الـ API وLogs على Render."
+            : "استجابة تسجيل الدخول غير مكتملة",
+        );
         return;
       }
 
@@ -112,8 +118,16 @@ export default function Login() {
         setError("نوع المستخدم غير مدعوم");
       }
     } catch (err) {
-      console.warn("[صيدلية][تسجيل دخول] فشل", err?.response?.status, err?.response?.data?.error || err?.message);
-      setError(err?.response?.data?.error || "فشل تسجيل الدخول");
+      const msg = err?.message || "";
+      const serverMsg = err?.response?.data?.error;
+      console.warn("[صيدلية][تسجيل دخول] فشل", err?.response?.status, serverMsg || msg);
+      if (!err?.response && msg.includes("Network")) {
+        setError("تعذر الاتصال بالخادم — CORS أو إضافة متصفح أو السيرفر متوقف.");
+      } else if (msg.includes("JSON") || msg.includes("Unexpected token")) {
+        setError("السيرفر لم يرجع JSON صالحاً — راجع Network → Response لطلب login.");
+      } else {
+        setError(serverMsg || "فشل تسجيل الدخول");
+      }
     } finally {
       setLoading(false);
     }
