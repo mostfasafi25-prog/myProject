@@ -24,7 +24,7 @@ import StocktakePage from "./pages/Admin/StocktakePage";
 import NotificationsPage from "./pages/Admin/NotificationsPage";
 import SuperCashierSupplyPage from "./pages/SuperCashierSupplyPage";
 
-/** مؤقت فقط: true = تخطي تسجيل الدخول والذهاب للإدارة — لا تفعله في الإنتاج. */
+/** true = دخول مباشر للإدارة بدون تسجيل دخول. عطّل للإنتاج: false */
 const TEMP_BYPASS_AUTH_TO_ADMIN = false;
 
 const cookies = new Cookies();

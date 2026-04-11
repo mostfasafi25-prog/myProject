@@ -1,5 +1,6 @@
 ﻿<?php
 
+use App\Http\Middleware\ActAsAdminForOpenApi;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
@@ -51,7 +52,9 @@ Route::get('/login', function () {
     ]);
 });
 
-Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
+$apiAuthMiddleware = config('app.skip_api_auth') ? [ActAsAdminForOpenApi::class] : ['auth:sanctum'];
+
+Route::middleware($apiAuthMiddleware)->get('/user', function (Request $request) {
     return $request->user();
 });
 
@@ -60,7 +63,7 @@ Route::post('/register/verify-otp', [AuthController::class, 'verifyRegisterOtp']
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/login/verify-otp', [AuthController::class, 'verifyLoginOtp']);
 
-Route::middleware('auth:sanctum')->group(function () {
+Route::middleware($apiAuthMiddleware)->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::get('/me', [AuthController::class, 'me']);
     Route::get('/chatbase/identity-token', [AuthController::class, 'chatbaseIdentityToken']);

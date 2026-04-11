@@ -59,6 +59,12 @@ return [
     'asset_url' => env('ASSET_URL'),
 
     /*
+    | true = مسارات الـ API المحمية تعمل بدون توكن (يُستخدم أول مدير في DB).
+    | عطّل في الإنتاج: SKIP_API_AUTH=false
+    */
+    'skip_api_auth' => filter_var(env('SKIP_API_AUTH', false), FILTER_VALIDATE_BOOLEAN),
+
+    /*
     |--------------------------------------------------------------------------
     | Application Timezone
     |--------------------------------------------------------------------------
