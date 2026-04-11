@@ -49,7 +49,8 @@ import { buildInitialDemoProducts } from "../../data/pharmacyDemoCatalog";
 import { fetchAndPersistSalesCategories, PHARMACY_ADMIN_CATEGORIES_SYNCED } from "../../utils/backendCategoriesSync";
 import { normalizeSaleOptions, productHasSaleOptions } from "../../utils/productSaleOptions";
 import { debitStoreBalanceForPurchase, notifyStoreBalanceChanged } from "../../utils/storeBalanceSync";
-import { compressImageFileToDataUrl } from "../../utils/imageCompress";
+import { compressImageFileForUpload } from "../../utils/imageCompress";
+import { safeLocalStorageSetJsonWithDataUrlFallback } from "../../utils/safeLocalStorage";
 import { isAdmin, isSuperCashier, purchaserDisplayName } from "../../utils/userRoles";
 
 const inventoryDialogPaperSx = { borderRadius: 3, overflow: "hidden" };
@@ -249,7 +250,15 @@ export default function InventoryPage({ mode, onToggleMode }) {
 
   const persistProducts = (next) => {
     setItems(next);
-    localStorage.setItem(PRODUCTS_KEY, JSON.stringify(next));
+    const r = safeLocalStorageSetJsonWithDataUrlFallback(PRODUCTS_KEY, next);
+    if (!r.ok) {
+      showAppToast("تعذر حفظ المخزون — الذاكرة المحلية ممتلئة. امسح بيانات الموقع أو صور الأصناف الكبيرة.", "error");
+      return;
+    }
+    if (r.stripped && Array.isArray(r.data)) {
+      setItems(r.data);
+      showAppToast("تم الحفظ بعد إزالة صور كبيرة من بعض الأصناف لضيق مساحة المتصفح.", "warning");
+    }
   };
 
   const toggleItemActive = (id, checked) => {
@@ -782,6 +791,7 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   onChange={(e) => setNewItem((p) => ({ ...p, qty: normalizeOneDecimal(e.target.value) }))}
                   fullWidth
                   size="small"
+                  helperText="اتركه ٠ أو فارغاً لإضافة تعريف الصنف فقط دون توريد ودون خصم من الخزنة"
                   inputProps={{ style: { textAlign: "right" } }}
                 />
               </Grid>
@@ -833,12 +843,10 @@ export default function InventoryPage({ mode, onToggleMode }) {
                     e.target.value = "";
                     if (!f?.type?.startsWith("image/")) return;
                     try {
-                      const dataUrl = await compressImageFileToDataUrl(f);
+                      const dataUrl = await compressImageFileForUpload(f);
                       setNewItem((p) => ({ ...p, imageUrl: dataUrl }));
                     } catch {
-                      const r = new FileReader();
-                      r.onload = () => setNewItem((p) => ({ ...p, imageUrl: String(r.result || "") }));
-                      r.readAsDataURL(f);
+                      showAppToast("تعذر ضغط الصورة. جرّب صورة أصغر أو بصيغة JPG/PNG.", "error");
                     }
                   }}
                 />
@@ -1030,21 +1038,24 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   setPurchaseError("يرجى إدخال سعر بيع صحيح أكبر من صفر");
                   return;
                 }
-                if (paidPurchaseQty <= 0 && bonusStockQty <= 0) {
-                  setPurchaseError("أدخل كمية مشتراة أو بونص");
-                  return;
-                }
                 if (paidPurchaseQty <= 0 && bonusStockQty > 0) {
                   setPurchaseError("البونص يُضاف مع كمية مشتراة؛ أدخل كمية المشتراة الأساسية");
                   return;
                 }
-                if (purchaseCost <= 0) {
-                  setPurchaseError("قيمة الشراء غير صحيحة");
-                  return;
-                }
-                if (!superCashier && treasuryBalance < purchaseCost) {
-                  setPurchaseError("لا يكفي المال في الخزنة لإتمام الشراء");
-                  return;
+                const catalogOnly = stockQtyTotal <= 0;
+                if (!catalogOnly) {
+                  if (paidPurchaseQty <= 0 && bonusStockQty <= 0) {
+                    setPurchaseError("أدخل كمية مشتراة أو بونص");
+                    return;
+                  }
+                  if (purchaseCost <= 0) {
+                    setPurchaseError("قيمة الشراء غير صحيحة");
+                    return;
+                  }
+                  if (!superCashier && treasuryBalance < purchaseCost) {
+                    setPurchaseError("لا يكفي المال في الخزنة لإتمام الشراء");
+                    return;
+                  }
                 }
                 const buyerLabel = purchaserDisplayName(currentUser);
                 const newId = Date.now();
@@ -1074,98 +1085,100 @@ export default function InventoryPage({ mode, onToggleMode }) {
                 };
                 const next = [newRow, ...items];
                 persistProducts(next);
-                let balance = { total: 0, cash: 0, app: 0 };
-                try {
-                  const parsed = JSON.parse(localStorage.getItem(STORE_BALANCE_KEY));
-                  if (parsed && typeof parsed === "object") {
-                    balance = {
-                      total: Number(parsed.total || 0),
-                      cash: Number(parsed.cash || 0),
-                      app: Number(parsed.app || 0),
-                    };
-                  }
-                } catch {
-                  // ignore malformed value
-                }
-                const { nextBalance, paidFromCash, paidFromApp } = debitStoreBalanceForPurchase(balance, purchaseCost, {
-                  allowNegativeTreasury: superCashier,
-                });
-                localStorage.setItem(STORE_BALANCE_KEY, JSON.stringify(nextBalance));
-                notifyStoreBalanceChanged();
-                const currentUser = (() => {
+                if (!catalogOnly) {
+                  let balance = { total: 0, cash: 0, app: 0 };
                   try {
-                    return JSON.parse(localStorage.getItem("user")) || null;
+                    const parsed = JSON.parse(localStorage.getItem(STORE_BALANCE_KEY));
+                    if (parsed && typeof parsed === "object") {
+                      balance = {
+                        total: Number(parsed.total || 0),
+                        cash: Number(parsed.cash || 0),
+                        app: Number(parsed.app || 0),
+                      };
+                    }
                   } catch {
-                    return null;
+                    // ignore malformed value
                   }
-                })();
-                const purchaseInvoice = {
-                  id: `PO-${Date.now()}`,
-                  purchasedBy: buyerLabel,
-                  purchasedByUsername: currentUser?.username || "",
-                  purchasedByRole: currentUser?.role || "admin",
-                  supplier: "مورد عام",
-                  status: "مكتمل",
-                  paymentMethod: paidFromApp > 0 ? "mixed" : "cash",
-                  purchasedAt: new Date().toISOString(),
-                  total: Number(purchaseCost.toFixed(2)),
-                  treasuryDebit: {
+                  const { nextBalance, paidFromCash, paidFromApp } = debitStoreBalanceForPurchase(balance, purchaseCost, {
+                    allowNegativeTreasury: superCashier,
+                  });
+                  localStorage.setItem(STORE_BALANCE_KEY, JSON.stringify(nextBalance));
+                  notifyStoreBalanceChanged();
+                  const authUser = (() => {
+                    try {
+                      return JSON.parse(localStorage.getItem("user")) || null;
+                    } catch {
+                      return null;
+                    }
+                  })();
+                  const purchaseInvoice = {
+                    id: `PO-${Date.now()}`,
+                    purchasedBy: buyerLabel,
+                    purchasedByUsername: authUser?.username || "",
+                    purchasedByRole: authUser?.role || "admin",
+                    supplier: "مورد عام",
+                    status: "مكتمل",
+                    paymentMethod: paidFromApp > 0 ? "mixed" : "cash",
+                    purchasedAt: new Date().toISOString(),
                     total: Number(purchaseCost.toFixed(2)),
-                    cash: paidFromCash,
-                    app: paidFromApp,
-                  },
-                  bonusQty: bonusStockQty > 0 ? bonusStockQty : undefined,
-                  items: [
-                    {
-                      productId: newId,
-                      name: productDisplayName(newRow),
-                      variantLabel: variantTrim || undefined,
-                      category: newItem.category,
-                      saleType: newItem.saleType,
-                      qtyPaid: paidPurchaseQty,
-                      qtyBonus: bonusStockQty,
-                      qty: stockQtyTotal,
-                      unitPrice: Number(newItem.price || 0),
+                    treasuryDebit: {
                       total: Number(purchaseCost.toFixed(2)),
+                      cash: paidFromCash,
+                      app: paidFromApp,
                     },
-                  ],
-                };
-                try {
-                  const existing = JSON.parse(localStorage.getItem(PURCHASE_INVOICES_KEY));
-                  const nextPurchases = Array.isArray(existing) ? [purchaseInvoice, ...existing] : [purchaseInvoice];
-                  localStorage.setItem(PURCHASE_INVOICES_KEY, JSON.stringify(nextPurchases));
-                } catch {
-                  localStorage.setItem(PURCHASE_INVOICES_KEY, JSON.stringify([purchaseInvoice]));
-                }
-                const notification = {
-                  id: `NTF-${Date.now()}`,
-                  type: "purchase",
-                  prefCategory: "purchase",
-                  read: false,
-                  title: "تم تسجيل شراء جديد",
-                  message: superCashier
-                    ? `توريد جديد بواسطة ${buyerLabel} — ${productDisplayName(newRow)}`
-                    : `فاتورة ${purchaseInvoice.id} بقيمة ${purchaseInvoice.total.toFixed(1)} شيكل بواسطة ${purchaseInvoice.purchasedBy}`,
-                  details: `الصنف: ${productDisplayName(newRow)} | المخزون: ${stockQtyTotal.toFixed(1)} (مشتراة ${paidPurchaseQty.toFixed(1)}${
-                    bonusStockQty > 0 ? ` + بونص ${bonusStockQty.toFixed(1)}` : ""
-                  }) | السعر: ${Number(newItem.price || 0).toFixed(1)} شيكل`,
-                  createdAt: new Date().toISOString(),
-                  fromManagement: true,
-                  managementLabel:
-                    currentUser?.role === "admin" || currentUser?.role === "super_admin"
-                      ? "إدارة النظام"
-                      : currentUser?.role === "super_cashier"
-                        ? "إدارة التوريد (سوبر كاشير)"
-                        : "النظام",
-                };
-                try {
-                  const existingNotifications = JSON.parse(localStorage.getItem(NOTIFICATIONS_KEY));
-                  const nextNotifications = Array.isArray(existingNotifications)
-                    ? [notification, ...existingNotifications]
-                    : [notification];
-                  localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify(nextNotifications));
-                } catch {
-                  localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify([notification]));
+                    bonusQty: bonusStockQty > 0 ? bonusStockQty : undefined,
+                    items: [
+                      {
+                        productId: newId,
+                        name: productDisplayName(newRow),
+                        variantLabel: variantTrim || undefined,
+                        category: newItem.category,
+                        saleType: newItem.saleType,
+                        qtyPaid: paidPurchaseQty,
+                        qtyBonus: bonusStockQty,
+                        qty: stockQtyTotal,
+                        unitPrice: Number(newItem.price || 0),
+                        total: Number(purchaseCost.toFixed(2)),
+                      },
+                    ],
+                  };
+                  try {
+                    const existing = JSON.parse(localStorage.getItem(PURCHASE_INVOICES_KEY));
+                    const nextPurchases = Array.isArray(existing) ? [purchaseInvoice, ...existing] : [purchaseInvoice];
+                    localStorage.setItem(PURCHASE_INVOICES_KEY, JSON.stringify(nextPurchases));
+                  } catch {
+                    localStorage.setItem(PURCHASE_INVOICES_KEY, JSON.stringify([purchaseInvoice]));
+                  }
+                  const notification = {
+                    id: `NTF-${Date.now()}`,
+                    type: "purchase",
+                    prefCategory: "purchase",
+                    read: false,
+                    title: "تم تسجيل شراء جديد",
+                    message: superCashier
+                      ? `توريد جديد بواسطة ${buyerLabel} — ${productDisplayName(newRow)}`
+                      : `فاتورة ${purchaseInvoice.id} بقيمة ${purchaseInvoice.total.toFixed(1)} شيكل بواسطة ${purchaseInvoice.purchasedBy}`,
+                    details: `الصنف: ${productDisplayName(newRow)} | المخزون: ${stockQtyTotal.toFixed(1)} (مشتراة ${paidPurchaseQty.toFixed(1)}${
+                      bonusStockQty > 0 ? ` + بونص ${bonusStockQty.toFixed(1)}` : ""
+                    }) | السعر: ${Number(newItem.price || 0).toFixed(1)} شيكل`,
+                    createdAt: new Date().toISOString(),
+                    fromManagement: true,
+                    managementLabel:
+                      authUser?.role === "admin" || authUser?.role === "super_admin"
+                        ? "إدارة النظام"
+                        : authUser?.role === "super_cashier"
+                          ? "إدارة التوريد (سوبر كاشير)"
+                          : "النظام",
+                  };
+                  try {
+                    const existingNotifications = JSON.parse(localStorage.getItem(NOTIFICATIONS_KEY));
+                    const nextNotifications = Array.isArray(existingNotifications)
+                      ? [notification, ...existingNotifications]
+                      : [notification];
+                    localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify(nextNotifications));
+                  } catch {
+                    localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify([notification]));
+                  }
                 }
                 setNewItem({
                   name: "",
@@ -1185,9 +1198,11 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   usageTips: "",
                 });
                 setPurchaseSuccess(
-                  superCashier
-                    ? `تمت إضافة الصنف للمخزون وتسجيل التوريد باسمك`
-                    : `تمت إضافة الصنف وخصم ${purchaseCost.toFixed(2)} شيكل من الخزنة`,
+                  catalogOnly
+                    ? "تم تعريف الصنف بمخزون ٠ — يمكنك تزويد المخزون لاحقاً من «تزويد مخزون»."
+                    : superCashier
+                      ? `تمت إضافة الصنف للمخزون وتسجيل التوريد باسمك`
+                      : `تمت إضافة الصنف وخصم ${purchaseCost.toFixed(2)} شيكل من الخزنة`,
                 );
                 showAppToast("تم إضافة الصنف بنجاح", "success");
                 setTimeout(() => {
@@ -1654,12 +1669,10 @@ export default function InventoryPage({ mode, onToggleMode }) {
                     e.target.value = "";
                     if (!f?.type?.startsWith("image/")) return;
                     try {
-                      const dataUrl = await compressImageFileToDataUrl(f);
+                      const dataUrl = await compressImageFileForUpload(f);
                       setEditForm((p) => ({ ...p, imageUrl: dataUrl }));
                     } catch {
-                      const r = new FileReader();
-                      r.onload = () => setEditForm((p) => ({ ...p, imageUrl: String(r.result || "") }));
-                      r.readAsDataURL(f);
+                      showAppToast("تعذر ضغط الصورة. جرّب صورة أصغر أو بصيغة JPG/PNG.", "error");
                     }
                   }}
                 />

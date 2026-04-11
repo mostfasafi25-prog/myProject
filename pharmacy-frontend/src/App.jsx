@@ -24,6 +24,7 @@ import DebtCustomersPage from "./pages/Admin/DebtCustomersPage";
 import StocktakePage from "./pages/Admin/StocktakePage";
 import NotificationsPage from "./pages/Admin/NotificationsPage";
 import SuperCashierDashboardPage from "./pages/SuperCashierDashboardPage";
+import { mergeUserWithProfileExtras } from "./utils/staffProfileExtras";
 
 /** true = دخول مباشر للإدارة بدون تسجيل دخول. عطّل للإنتاج: false */
 const TEMP_BYPASS_AUTH_TO_ADMIN = false;
@@ -95,7 +96,8 @@ function tempBypassAdminUser() {
 function getStoredUser() {
   if (TEMP_BYPASS_AUTH_TO_ADMIN) return tempBypassAdminUser();
   try {
-    return JSON.parse(localStorage.getItem("user"));
+    const raw = JSON.parse(localStorage.getItem("user"));
+    return mergeUserWithProfileExtras(raw);
   } catch {
     return null;
   }

@@ -66,7 +66,8 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Axios } from "../../Api/Axios";
-import { persistUserAvatarForLogin } from "../../utils/staffProfileExtras";
+import { persistSessionUser, persistUserAvatarForLogin } from "../../utils/staffProfileExtras";
+import { compressImageFileForUpload } from "../../utils/imageCompress";
 import { PHARMACY_USER_STORAGE_EVENT } from "../../utils/userRoles";
 import { adminPageContainerSx } from "../../utils/adminPageLayout";
 import AdminLayout from "./AdminLayout";
@@ -480,17 +481,16 @@ export default function SettingsPage({
     try {
       const raw = localStorage.getItem("user");
       const u = raw ? JSON.parse(raw) : {};
-      const next = { ...u };
-      if (avatarDataUrl) {
-        next.avatarDataUrl = avatarDataUrl;
-        delete next.avatar;
-      } else {
-        delete next.avatarDataUrl;
-        delete next.avatar;
-      }
-      localStorage.setItem("user", JSON.stringify(next));
-      const uname = typeof next.username === "string" ? next.username : "";
+      const uname = typeof u.username === "string" ? u.username : "";
       if (uname) persistUserAvatarForLogin(uname, avatarDataUrl || null);
+      const next = { ...u };
+      delete next.avatarDataUrl;
+      delete next.avatar;
+      const saved = persistSessionUser(next);
+      if (!saved.ok) {
+        setAccountMsg({ type: "error", text: "تعذر حفظ الجلسة — الذاكرة المحلية ممتلئة. امسح بيانات الموقع أو قلّل حجم الصور." });
+        return;
+      }
       setAvatarPreview(avatarDataUrl || null);
       window.dispatchEvent(new Event(PHARMACY_USER_STORAGE_EVENT));
     } catch {
@@ -498,7 +498,7 @@ export default function SettingsPage({
     }
   };
 
-  const handleAvatarFile = (e) => {
+  const handleAvatarFile = async (e) => {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
@@ -511,18 +511,13 @@ export default function SettingsPage({
       setAccountMsg({ type: "error", text: "حجم الصورة كبير جدًا — الحد الأقصى 2 ميجابايت" });
       return;
     }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = typeof reader.result === "string" ? reader.result : null;
-      if (!dataUrl) {
-        setAccountMsg({ type: "error", text: "فشل قراءة الملف" });
-        return;
-      }
+    try {
+      const dataUrl = await compressImageFileForUpload(file);
       persistUserAvatar(dataUrl);
       setAccountMsg({ type: "success", text: "تم حفظ صورة الملف الشخصي" });
-    };
-    reader.onerror = () => setAccountMsg({ type: "error", text: "فشل قراءة الملف" });
-    reader.readAsDataURL(file);
+    } catch {
+      setAccountMsg({ type: "error", text: "تعذر ضغط الصورة. جرّب صورة أصغر (JPG/PNG)." });
+    }
   };
 
   const handleRemoveAvatar = () => {

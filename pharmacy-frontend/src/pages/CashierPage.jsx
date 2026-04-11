@@ -87,6 +87,8 @@ import {
 } from "../utils/pharmacyDebtCustomers";
 import { persistSalesCategories, PHARMACY_ADMIN_CATEGORIES_SYNCED } from "../utils/backendCategoriesSync";
 import { isSuperCashier, purchaserDisplayName, PHARMACY_USER_STORAGE_EVENT } from "../utils/userRoles";
+import { mergeUserWithProfileExtras } from "../utils/staffProfileExtras";
+import { safeLocalStorageSetJsonWithDataUrlFallback } from "../utils/safeLocalStorage";
 import {
   getCashierPrintReceiptPref,
   getCashierSystemSettings,
@@ -234,7 +236,10 @@ async function fetchAllSalesProductsPages(axiosInstance) {
 
 function readStoredUser() {
   try {
-    return JSON.parse(localStorage.getItem("user")) || null;
+    const raw = localStorage.getItem("user");
+    if (!raw) return null;
+    const u = JSON.parse(raw);
+    return mergeUserWithProfileExtras(u);
   } catch {
     return null;
   }
@@ -769,7 +774,7 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
         const currentQty = Number(p.qty || 0);
         return { ...p, qty: Number((currentQty - soldQty).toFixed(1)) };
       });
-      localStorage.setItem(ADMIN_PRODUCTS_KEY, JSON.stringify(next));
+      safeLocalStorageSetJsonWithDataUrlFallback(ADMIN_PRODUCTS_KEY, next);
     } catch {
       // ignore
     }

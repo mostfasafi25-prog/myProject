@@ -37,7 +37,7 @@ import { Axios } from "../../Api/Axios";
 import { PHARMACY_DISPLAY_NAME } from "../../config/appBranding";
 import { SITE_OG_DESCRIPTION } from "../../config/siteSeo";
 import { appendUserLoginNotification } from "../../utils/cashierShiftNotification";
-import { mergeUserWithProfileExtras } from "../../utils/staffProfileExtras";
+import { mergeUserWithProfileExtras, persistSessionUser } from "../../utils/staffProfileExtras";
 import { formatLoginCatchError, loginFailureUserMessage } from "../../utils/formatApiError";
 
 const welcomeContainer = {
@@ -159,8 +159,14 @@ export default function Login() {
         return;
       }
 
+      const sessionSave = persistSessionUser(user);
+      if (!sessionSave.ok) {
+        setError(
+          "تعذر حفظ جلسة المستخدم: الذاكرة المحلية للمتصفح ممتلئة. من الإعدادات امسح بيانات الموقع أو احذف الصور الكبيرة من «الموظفين» ثم أعد المحاولة.",
+        );
+        return;
+      }
       cookies.set("token", token, { path: "/" });
-      localStorage.setItem("user", JSON.stringify(user));
       appendUserLoginNotification({ username: user.username, role: user.role });
 
       if (user.role === "admin" || user.role === "super_admin") {

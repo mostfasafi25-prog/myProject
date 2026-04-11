@@ -45,7 +45,8 @@ import { adminPageContainerSx, adminPageSubtitleSx, adminPageTitleRowSx } from "
 import AdminLayout from "./AdminLayout";
 import { Axios } from "../../Api/Axios";
 import { showAppToast } from "../../utils/appToast";
-import { compressImageFileToDataUrl } from "../../utils/imageCompress";
+import { compressImageFileForUpload } from "../../utils/imageCompress";
+import { safeLocalStorageSetJsonWithDataUrlFallback } from "../../utils/safeLocalStorage";
 import { readStaffProfileExtras, writeStaffProfileExtras } from "../../utils/staffProfileExtras";
 
 const ROWS_PER_PAGE = 5;
@@ -189,11 +190,7 @@ export default function StaffPage({ mode, onToggleMode }) {
   const [loadingUsers, setLoadingUsers] = useState(false);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STAFF_STORAGE_KEY, JSON.stringify(staff));
-    } catch {
-      // ignore quota / private mode
-    }
+    safeLocalStorageSetJsonWithDataUrlFallback(STAFF_STORAGE_KEY, staff);
   }, [staff]);
 
   useEffect(() => {
@@ -879,12 +876,10 @@ export default function StaffPage({ mode, onToggleMode }) {
                     e.target.value = "";
                     if (!f?.type?.startsWith("image/")) return;
                     try {
-                      const dataUrl = await compressImageFileToDataUrl(f);
+                      const dataUrl = await compressImageFileForUpload(f);
                       setEditForm((p) => ({ ...p, avatarDataUrl: dataUrl }));
                     } catch {
-                      const r = new FileReader();
-                      r.onload = () => setEditForm((p) => ({ ...p, avatarDataUrl: String(r.result || "") }));
-                      r.readAsDataURL(f);
+                      showAppToast("تعذر ضغط الصورة. جرّب صورة أصغر.", "error");
                     }
                   }}
                 />
@@ -1036,12 +1031,10 @@ export default function StaffPage({ mode, onToggleMode }) {
                     e.target.value = "";
                     if (!f?.type?.startsWith("image/")) return;
                     try {
-                      const dataUrl = await compressImageFileToDataUrl(f);
+                      const dataUrl = await compressImageFileForUpload(f);
                       setNewUser((p) => ({ ...p, avatarDataUrl: dataUrl }));
                     } catch {
-                      const r = new FileReader();
-                      r.onload = () => setNewUser((p) => ({ ...p, avatarDataUrl: String(r.result || "") }));
-                      r.readAsDataURL(f);
+                      showAppToast("تعذر ضغط الصورة. جرّب صورة أصغر.", "error");
                     }
                   }}
                 />

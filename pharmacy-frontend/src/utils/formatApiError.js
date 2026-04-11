@@ -139,6 +139,9 @@ export function formatLoginCatchError(err) {
   if (res) {
     return loginFailureUserMessage(res.status ?? 0, res.data);
   }
+  if (err?.name === "QuotaExceededError" || err?.code === 22) {
+    return "الذاكرة المحلية للمتصفح ممتلئة. امسح بيانات الموقع أو الصور المحفوظة ثم أعد المحاولة.";
+  }
   if (err?.message === "Network Error" || err?.code === "ERR_NETWORK") {
     return "لا يوجد اتصال بالسيرفر. تحقق من الإنترنت، من تشغيل الخادم، ومن ضبط عنوان الـ API (مثل VITE_API_BASE_URL) إن كنت على الإنتاج.";
   }

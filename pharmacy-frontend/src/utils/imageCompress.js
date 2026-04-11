@@ -1,3 +1,43 @@
+/** ملف يُعتبر «كبيراً» ويُضغط بقوة أكبر */
+const LARGE_FILE_BYTES = 350 * 1024;
+const VERY_LARGE_FILE_BYTES = 1.2 * 1024 * 1024;
+/** طول data URL بعد الضغط — إن تجاوز نعيد تمريراً أشد */
+const TARGET_MAX_DATA_URL_CHARS = 280_000;
+
+/**
+ * ضغط مناسب لرفع الصور في الموقع (متعدد المراحل حسب حجم الملف ونتيجة الضغط).
+ * يُفضّل استخدامه بدل compressImageFileToDataUrl لكل اختيار ملف من المستخدم.
+ */
+export async function compressImageFileForUpload(file) {
+  if (!file?.type?.startsWith("image/")) {
+    throw new Error("not_image");
+  }
+  const sz = file.size || 0;
+  let maxEdge = 720;
+  let quality = 0.82;
+  if (sz > VERY_LARGE_FILE_BYTES) {
+    maxEdge = 480;
+    quality = 0.72;
+  } else if (sz > LARGE_FILE_BYTES) {
+    maxEdge = 600;
+    quality = 0.78;
+  }
+  let dataUrl = await compressImageFileToDataUrl(file, maxEdge, quality);
+  if (dataUrl.length > TARGET_MAX_DATA_URL_CHARS) {
+    dataUrl = await compressImageFileToDataUrl(file, 480, 0.72);
+  }
+  if (dataUrl.length > TARGET_MAX_DATA_URL_CHARS) {
+    dataUrl = await compressImageFileToDataUrl(file, 400, 0.68);
+  }
+  if (dataUrl.length > TARGET_MAX_DATA_URL_CHARS) {
+    dataUrl = await compressImageFileToDataUrl(file, 320, 0.62);
+  }
+  if (dataUrl.length > TARGET_MAX_DATA_URL_CHARS) {
+    dataUrl = await compressImageFileToDataUrl(file, 256, 0.58);
+  }
+  return dataUrl;
+}
+
 /**
  * يصغّر الصورة ويحوّلها إلى JPEG لتقليل الحجم (مهم لـ localStorage وسرعة العرض).
  */
