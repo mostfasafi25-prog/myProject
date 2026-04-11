@@ -183,7 +183,6 @@ export default function InventoryPage({ mode, onToggleMode }) {
     price: "",
     imageUrl: "",
     bonusQty: "",
-    barcode: "",
     expiryDate: "",
     saleOptionRows: [],
     usageHowTo: "",
@@ -211,7 +210,6 @@ export default function InventoryPage({ mode, onToggleMode }) {
     costPrice: "",
     price: "",
     imageUrl: "",
-    barcode: "",
     expiryDate: "",
     saleOptionRows: [],
     usageHowTo: "",
@@ -346,7 +344,6 @@ export default function InventoryPage({ mode, onToggleMode }) {
         String(item.variantLabel || "").toLowerCase().includes(q) ||
         String(productDisplayName(item)).toLowerCase().includes(q) ||
         String(item.category || "").toLowerCase().includes(q) ||
-        String(item.barcode || "").toLowerCase().includes(q) ||
         normalizeSaleOptions(item).some((o) => o.label.toLowerCase().includes(q));
       const matchesStatus =
         statusFilter === "all" ||
@@ -438,7 +435,6 @@ export default function InventoryPage({ mode, onToggleMode }) {
                 costPrice: "",
                 price: "",
                 imageUrl: "",
-                barcode: "",
                 expiryDate: "",
                 saleOptionRows: [],
                 usageHowTo: "",
@@ -575,8 +571,14 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary" }}>القسم</TableCell>
                   <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary" }}>طريقة البيع</TableCell>
                   <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary" }}>الكمية</TableCell>
-                  <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary" }}>
-                    الأسعار والربح
+                  <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary", width: "11%" }}>
+                    سعر الشراء
+                  </TableCell>
+                  <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary", width: "11%" }}>
+                    سعر البيع
+                  </TableCell>
+                  <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary", width: "11%" }}>
+                    ربح الوحدة
                   </TableCell>
                   <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary" }}>الحالة</TableCell>
                   <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary" }}>تزويد</TableCell>
@@ -606,7 +608,6 @@ export default function InventoryPage({ mode, onToggleMode }) {
                           })(),
                           price: String(item.price ?? ""),
                           imageUrl: typeof item.image === "string" ? item.image : "",
-                          barcode: String(item.barcode ?? ""),
                           expiryDate: String(item.expiryDate ?? "").slice(0, 10),
                           saleOptionRows: saleOptionRowsFromProduct(item),
                           usageHowTo: String(item.usageHowTo ?? ""),
@@ -658,6 +659,34 @@ export default function InventoryPage({ mode, onToggleMode }) {
                       <TableCell align="center">
                         {(() => {
                           const sale = parseNonNegativeNumber(item.price);
+                          const hasExplicitCost =
+                            item.costPrice != null ||
+                            item.cost_price != null ||
+                            item.purchaseUnitPrice != null ||
+                            item.purchase_unit_price != null;
+                          const cost = unitInventoryCost(item);
+                          if (!hasExplicitCost) {
+                            return (
+                              <Typography variant="body2" fontWeight={700} color="warning.main">
+                                حدّث الشراء
+                              </Typography>
+                            );
+                          }
+                          return (
+                            <Typography fontWeight={800} color="text.primary">
+                              {cost.toFixed(1)} ش
+                            </Typography>
+                          );
+                        })()}
+                      </TableCell>
+                      <TableCell align="center">
+                        <Typography fontWeight={800} color="text.primary">
+                          {parseNonNegativeNumber(item.price).toFixed(1)} ش
+                        </Typography>
+                      </TableCell>
+                      <TableCell align="center">
+                        {(() => {
+                          const sale = parseNonNegativeNumber(item.price);
                           const cost = unitInventoryCost(item);
                           const margin = Math.round((sale - cost) * 10) / 10;
                           const hasExplicitCost =
@@ -665,35 +694,31 @@ export default function InventoryPage({ mode, onToggleMode }) {
                             item.cost_price != null ||
                             item.purchaseUnitPrice != null ||
                             item.purchase_unit_price != null;
-                          const profitText =
-                            sale <= 0
-                              ? "—"
-                              : !hasExplicitCost
-                                ? "حدّث الشراء"
-                                : `${margin >= 0 ? "+" : ""}${margin.toFixed(1)}`;
+                          if (sale <= 0) {
+                            return (
+                              <Typography variant="body2" fontWeight={700} color="text.disabled">
+                                —
+                              </Typography>
+                            );
+                          }
+                          if (!hasExplicitCost) {
+                            return (
+                              <Typography variant="body2" fontWeight={700} color="warning.main">
+                                —
+                              </Typography>
+                            );
+                          }
                           return (
-                            <Stack direction="row" alignItems="center" justifyContent="center" spacing={0.75} flexWrap="wrap">
-                              <Typography fontWeight={800} color="text.primary">
-                                {sale.toFixed(1)} ش
-                              </Typography>
-                              <Typography
-                                variant="body2"
-                                fontWeight={900}
-                                sx={{
-                                  color:
-                                    sale <= 0
-                                      ? "text.disabled"
-                                      : !hasExplicitCost
-                                        ? "warning.main"
-                                        : margin >= 0
-                                          ? "success.main"
-                                          : "error.main",
-                                }}
-                              >
-                                ربح {profitText}
-                                {sale > 0 && hasExplicitCost ? " ش" : ""}
-                              </Typography>
-                            </Stack>
+                            <Typography
+                              variant="body2"
+                              fontWeight={900}
+                              sx={{
+                                color: margin >= 0 ? "success.main" : "error.main",
+                              }}
+                            >
+                              {margin >= 0 ? "+" : ""}
+                              {margin.toFixed(1)} ش
+                            </Typography>
                           );
                         })()}
                       </TableCell>
@@ -805,17 +830,6 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   onChange={(e) => setNewItem((p) => ({ ...p, name: e.target.value }))}
                   fullWidth
                   size="small"
-                  inputProps={{ style: { textAlign: "right" } }}
-                />
-              </Grid>
-              <Grid size={{ xs: 12, sm: 6 }}>
-                <TextField
-                  label="الباركود (اختياري)"
-                  value={newItem.barcode}
-                  onChange={(e) => setNewItem((p) => ({ ...p, barcode: e.target.value }))}
-                  fullWidth
-                  size="small"
-                  placeholder="للبحث السريع في الكاشير"
                   inputProps={{ style: { textAlign: "right" } }}
                 />
               </Grid>
@@ -1192,7 +1206,6 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   image: newItem.imageUrl?.trim() || "",
                   createdAt: new Date().toISOString(),
                   ...(saleOpts.length ? { saleOptions: saleOpts } : {}),
-                  ...(String(newItem.barcode || "").trim() ? { barcode: String(newItem.barcode).trim() } : {}),
                   ...(String(newItem.expiryDate || "").trim() ? { expiryDate: String(newItem.expiryDate).trim() } : {}),
                   ...(String(newItem.usageHowTo || "").trim() ? { usageHowTo: String(newItem.usageHowTo).trim() } : {}),
                   ...(String(newItem.usageFrequency || "").trim()
@@ -1310,7 +1323,6 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   costPrice: "",
                   price: "",
                   imageUrl: "",
-                  barcode: "",
                   expiryDate: "",
                   saleOptionRows: [],
                   usageHowTo: "",
@@ -1718,16 +1730,6 @@ export default function InventoryPage({ mode, onToggleMode }) {
               </Grid>
               <Grid size={{ xs: 12, sm: 6 }}>
                 <TextField
-                  label="الباركود"
-                  value={editForm.barcode}
-                  onChange={(e) => setEditForm((p) => ({ ...p, barcode: e.target.value }))}
-                  fullWidth
-                  size="small"
-                  inputProps={{ style: { textAlign: "right" } }}
-                />
-              </Grid>
-              <Grid size={{ xs: 12, sm: 6 }}>
-                <TextField
                   label="تاريخ انتهاء الصلاحية"
                   type="date"
                   value={editForm.expiryDate}
@@ -2006,7 +2008,6 @@ export default function InventoryPage({ mode, onToggleMode }) {
                 const img = editForm.imageUrl?.trim() || editTarget.image || "";
                 const variantTrim = String(editForm.variantLabel || "").trim();
                 const saleOpts = buildPersistedSaleOptions(editForm.saleOptionRows, editTarget.id);
-                const barcodeTrim = String(editForm.barcode || "").trim();
                 const expTrim = String(editForm.expiryDate || "").trim().slice(0, 10);
                 const usageHowTrim = String(editForm.usageHowTo || "").trim();
                 const usageFreqTrim = String(editForm.usageFrequency || "").trim();
@@ -2027,8 +2028,6 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   else delete row.variantLabel;
                   if (saleOpts.length) row.saleOptions = saleOpts;
                   else delete row.saleOptions;
-                  if (barcodeTrim) row.barcode = barcodeTrim;
-                  else delete row.barcode;
                   if (expTrim) row.expiryDate = expTrim;
                   else delete row.expiryDate;
                   if (usageHowTrim) row.usageHowTo = usageHowTrim;
