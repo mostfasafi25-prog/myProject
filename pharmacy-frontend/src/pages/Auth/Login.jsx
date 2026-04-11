@@ -150,7 +150,7 @@ export default function Login() {
 
       user = mergeUserWithProfileExtras(user);
 
-      if (roleView === "admin" && user.role !== "admin") {
+      if (roleView === "admin" && user.role !== "admin" && user.role !== "super_admin") {
         setError("تم اختيار «مدير» — هذا الحساب ليس حساب مدير نظام.");
         return;
       }
@@ -163,7 +163,7 @@ export default function Login() {
       localStorage.setItem("user", JSON.stringify(user));
       appendUserLoginNotification({ username: user.username, role: user.role });
 
-      if (user.role === "admin") {
+      if (user.role === "admin" || user.role === "super_admin") {
         navigate("/admin", { replace: true });
       } else if (user.role === "cashier" || user.role === "super_cashier") {
         navigate("/cashier", { replace: true });

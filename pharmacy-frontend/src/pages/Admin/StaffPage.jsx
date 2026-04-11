@@ -139,7 +139,13 @@ function mapApiUserToStaff(user) {
     email: "",
     password: "",
     role:
-      user.role === "admin" ? "admin" : user.role === "super_cashier" ? "super_cashier" : "cashier",
+      user.role === "admin"
+        ? "admin"
+        : user.role === "super_admin"
+          ? "super_admin"
+          : user.role === "super_cashier"
+            ? "super_cashier"
+            : "cashier",
     status,
     createdAt: user.created_at || new Date().toISOString(),
   };
@@ -523,6 +529,7 @@ export default function StaffPage({ mode, onToggleMode }) {
                 >
                   <MenuItem value="all">كل الأدوار</MenuItem>
                   <MenuItem value="admin">Admin</MenuItem>
+                  <MenuItem value="super_admin">Super Admin</MenuItem>
                   <MenuItem value="cashier">Cashier</MenuItem>
                   <MenuItem value="super_cashier">سوبر كاشير</MenuItem>
                 </Select>
@@ -640,8 +647,22 @@ export default function StaffPage({ mode, onToggleMode }) {
                     <TableCell align="center" sx={{ verticalAlign: "middle" }}>
                       <Chip
                         size="small"
-                        label={row.role === "admin" ? "Admin" : row.role === "super_cashier" ? "سوبر كاشير" : "Cashier"}
-                        color={row.role === "admin" ? "primary" : row.role === "super_cashier" ? "info" : "secondary"}
+                        label={
+                          row.role === "admin"
+                            ? "Admin"
+                            : row.role === "super_admin"
+                              ? "Super Admin"
+                              : row.role === "super_cashier"
+                                ? "سوبر كاشير"
+                                : "Cashier"
+                        }
+                        color={
+                          row.role === "admin" || row.role === "super_admin"
+                            ? "primary"
+                            : row.role === "super_cashier"
+                              ? "info"
+                              : "secondary"
+                        }
                         variant="outlined"
                       />
                     </TableCell>
@@ -826,6 +847,7 @@ export default function StaffPage({ mode, onToggleMode }) {
                 onChange={(e) => setEditForm((p) => ({ ...p, role: e.target.value }))}
               >
                 <MenuItem value="admin">Admin</MenuItem>
+                <MenuItem value="super_admin">Super Admin</MenuItem>
                 <MenuItem value="cashier">Cashier</MenuItem>
                 <MenuItem value="super_cashier">سوبر كاشير</MenuItem>
               </Select>
@@ -996,6 +1018,7 @@ export default function StaffPage({ mode, onToggleMode }) {
                 onChange={(e) => setNewUser((p) => ({ ...p, role: e.target.value }))}
               >
                 <MenuItem value="admin">Admin</MenuItem>
+                <MenuItem value="super_admin">Super Admin</MenuItem>
                 <MenuItem value="cashier">Cashier</MenuItem>
                 <MenuItem value="super_cashier">سوبر كاشير</MenuItem>
               </Select>

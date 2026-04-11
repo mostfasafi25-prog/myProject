@@ -135,7 +135,8 @@ export default function SettingsPage({
   }, []);
   /** تصفير الخزنة / النظام الكامل — للحساب الأساسي admin فقط */
   const isSuperAdminMoneyControls =
-    currentUser?.role === "admin" && String(currentUser?.username || "").toLowerCase() === "admin";
+    (currentUser?.role === "admin" || currentUser?.role === "super_admin") &&
+    String(currentUser?.username || "").toLowerCase() === "admin";
   const isAccountSettings = location.pathname.includes("/settings/account");
   const isAppearanceSettings = location.pathname.includes("/settings/appearance");
   const isMoneySettings = location.pathname.includes("/settings/money");

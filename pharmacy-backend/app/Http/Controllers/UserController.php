@@ -45,7 +45,7 @@ class UserController extends Controller
         $validator = Validator::make($request->all(), [
             'username' => 'required|string|max:50|unique:users,username',
             'password' => 'required|string|min:6',
-            'role' => 'required|in:admin,cashier,super_cashier',
+            'role' => 'required|in:admin,super_admin,cashier,super_cashier',
             'approval_status' => 'nullable|in:approved,pending',
             'is_active' => 'nullable|boolean',
         ]);
@@ -102,7 +102,7 @@ class UserController extends Controller
         
         $validator = Validator::make($request->all(), [
             'username' => 'sometimes|string|max:50|unique:users,username,' . $id,
-            'role' => 'sometimes|in:admin,cashier,super_cashier',
+            'role' => 'sometimes|in:admin,super_admin,cashier,super_cashier',
             'password' => 'sometimes|string|min:4',
             'approval_status' => 'sometimes|in:approved,pending',
             'is_active' => 'sometimes|boolean',
@@ -173,7 +173,8 @@ class UserController extends Controller
         }
         
         // لا يمكن حذف المدير الرئيسي
-        if ($user->role === 'admin' && User::where('role', 'admin')->count() <= 1) {
+        $privilegedCount = User::whereIn('role', ['admin', 'super_admin'])->count();
+        if (in_array($user->role, ['admin', 'super_admin'], true) && $privilegedCount <= 1) {
             return response()->json([
                 'success' => false,
                 'message' => 'لا يمكن حذف المدير الوحيد في النظام'
@@ -204,7 +205,7 @@ class UserController extends Controller
     {
         $stats = [
             'total_users' => User::count(),
-            'admins_count' => User::where('role', 'admin')->count(),
+            'admins_count' => User::whereIn('role', ['admin', 'super_admin'])->count(),
             'managers_count' => User::where('role', 'manager')->count(),
             'users_count' => User::where('role', 'user')->count(),
         ];

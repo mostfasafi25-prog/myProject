@@ -101,7 +101,7 @@ export default function InvoicesPage({ mode, onToggleMode }) {
       return null;
     }
   }, []);
-  const isAdmin = currentUser?.role === "admin";
+  const isAdmin = currentUser?.role === "admin" || currentUser?.role === "super_admin";
 
   const periodLabels = {
     day: "اليوم",

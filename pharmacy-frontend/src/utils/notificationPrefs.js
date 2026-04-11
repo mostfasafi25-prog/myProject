@@ -97,7 +97,7 @@ export function isNotificationAllowedByPrefs(notification) {
   const role = user?.role || "";
   const username = user?.username || "";
 
-  if (role === "admin") {
+  if (role === "admin" || role === "super_admin") {
     const k = ADMIN_PREF_KEY[cat];
     if (!k) return true;
     return getAdminPrefs()[k] !== false;

@@ -101,6 +101,11 @@ function getStoredUser() {
   }
 }
 
+/** مدير النظام أو سوبر أدمن — نفس مسارات لوحة الإدارة */
+function isAdminPanelRole(role) {
+  return role === "admin" || role === "super_admin";
+}
+
 function isAuthenticated() {
   if (TEMP_BYPASS_AUTH_TO_ADMIN) return true;
   const user = getStoredUser();
@@ -112,7 +117,7 @@ function ProtectedRoleRoute({ allowRoles, children }) {
   const user = getStoredUser();
   if (!isAuthenticated()) return <Navigate to="/login" replace />;
   if (!allowRoles.includes(user.role)) {
-    if (user.role === "admin") return <Navigate to="/admin" replace />;
+    if (isAdminPanelRole(user.role)) return <Navigate to="/admin" replace />;
     if (user.role === "super_cashier") return <Navigate to="/cashier" replace />;
     return <Navigate to="/cashier" replace />;
   }
@@ -123,7 +128,7 @@ function RootRedirect() {
   if (TEMP_BYPASS_AUTH_TO_ADMIN) return <Navigate to="/admin" replace />;
   if (!isAuthenticated()) return <Navigate to="/login" replace />;
   const user = getStoredUser();
-  if (user?.role === "admin") return <Navigate to="/admin" replace />;
+  if (isAdminPanelRole(user?.role)) return <Navigate to="/admin" replace />;
   if (user?.role === "cashier" || user?.role === "super_cashier") return <Navigate to="/cashier" replace />;
   return <Navigate to="/login" replace />;
 }
@@ -433,7 +438,7 @@ function App() {
               TEMP_BYPASS_AUTH_TO_ADMIN ? (
                 <Navigate to="/admin" replace />
               ) : isAuthenticated() ? (
-                <Navigate to={getStoredUser()?.role === "admin" ? "/admin" : "/cashier"} replace />
+                <Navigate to={isAdminPanelRole(getStoredUser()?.role) ? "/admin" : "/cashier"} replace />
               ) : (
                 <Login />
               )
@@ -443,7 +448,7 @@ function App() {
           <Route
             path="/admin"
             element={
-              <ProtectedRoleRoute allowRoles={["admin"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
                 <HomeDashboard mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
@@ -451,7 +456,7 @@ function App() {
           <Route
             path="/admin/inventory"
             element={
-              <ProtectedRoleRoute allowRoles={["admin", "super_cashier"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin", "super_cashier"]}>
                 <InventoryPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
@@ -459,7 +464,7 @@ function App() {
           <Route
             path="/admin/categories"
             element={
-              <ProtectedRoleRoute allowRoles={["admin", "super_cashier"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin", "super_cashier"]}>
                 <CategoriesPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
@@ -467,7 +472,7 @@ function App() {
           <Route
             path="/admin/stocktake"
             element={
-              <ProtectedRoleRoute allowRoles={["admin"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
                 <StocktakePage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
@@ -475,7 +480,7 @@ function App() {
           <Route
             path="/admin/debt-customers"
             element={
-              <ProtectedRoleRoute allowRoles={["admin", "super_cashier"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin", "super_cashier"]}>
                 <DebtCustomersPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
@@ -483,7 +488,7 @@ function App() {
           <Route
             path="/admin/invoices"
             element={
-              <ProtectedRoleRoute allowRoles={["admin"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
                 <InvoicesPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
@@ -491,7 +496,7 @@ function App() {
           <Route
             path="/admin/returns"
             element={
-              <ProtectedRoleRoute allowRoles={["admin"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
                 <ReturnsPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
@@ -499,7 +504,7 @@ function App() {
           <Route
             path="/admin/returns/sales"
             element={
-              <ProtectedRoleRoute allowRoles={["admin"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
                 <ReturnsPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
@@ -507,7 +512,7 @@ function App() {
           <Route
             path="/admin/returns/purchases"
             element={
-              <ProtectedRoleRoute allowRoles={["admin", "super_cashier"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin", "super_cashier"]}>
                 <ReturnsPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
@@ -515,7 +520,7 @@ function App() {
           <Route
             path="/admin/reports"
             element={
-              <ProtectedRoleRoute allowRoles={["admin"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
                 <ReportsPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
@@ -523,7 +528,7 @@ function App() {
           <Route
             path="/admin/reports/sales"
             element={
-              <ProtectedRoleRoute allowRoles={["admin"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
                 <ReportsPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
@@ -531,7 +536,7 @@ function App() {
           <Route
             path="/admin/reports/purchases"
             element={
-              <ProtectedRoleRoute allowRoles={["admin"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
                 <ReportsPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
@@ -539,7 +544,7 @@ function App() {
           <Route
             path="/admin/purchases"
             element={
-              <ProtectedRoleRoute allowRoles={["admin", "super_cashier"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin", "super_cashier"]}>
                 <PurchasesPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
@@ -547,7 +552,7 @@ function App() {
           <Route
             path="/admin/staff"
             element={
-              <ProtectedRoleRoute allowRoles={["admin"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
                 <StaffPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
@@ -555,7 +560,7 @@ function App() {
           <Route
             path="/admin/activity-log"
             element={
-              <ProtectedRoleRoute allowRoles={["admin"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
                 <ActivityLogPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
@@ -563,7 +568,7 @@ function App() {
           <Route
             path="/admin/notifications"
             element={
-              <ProtectedRoleRoute allowRoles={["admin", "cashier"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin", "cashier"]}>
                 <NotificationsPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
@@ -571,7 +576,7 @@ function App() {
           <Route
             path="/admin/settings"
             element={
-              <ProtectedRoleRoute allowRoles={["admin"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
                 <Navigate to="/admin/settings/account" replace />
               </ProtectedRoleRoute>
             }
@@ -579,7 +584,7 @@ function App() {
           <Route
             path="/admin/settings/account"
             element={
-              <ProtectedRoleRoute allowRoles={["admin"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
                 <SettingsPage
                   mode={mode}
                   onToggleMode={toggleMode}
@@ -594,7 +599,7 @@ function App() {
           <Route
             path="/admin/settings/appearance"
             element={
-              <ProtectedRoleRoute allowRoles={["admin"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
                 <SettingsPage
                   mode={mode}
                   onToggleMode={toggleMode}
@@ -609,7 +614,7 @@ function App() {
           <Route
             path="/admin/settings/money"
             element={
-              <ProtectedRoleRoute allowRoles={["admin"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
                 <SettingsPage
                   mode={mode}
                   onToggleMode={toggleMode}
@@ -624,7 +629,7 @@ function App() {
           <Route
             path="/admin/settings/notifications"
             element={
-              <ProtectedRoleRoute allowRoles={["admin"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
                 <SettingsPage
                   mode={mode}
                   onToggleMode={toggleMode}
@@ -639,7 +644,7 @@ function App() {
           <Route
             path="/admin/settings/cashier"
             element={
-              <ProtectedRoleRoute allowRoles={["admin"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
                 <SettingsPage
                   mode={mode}
                   onToggleMode={toggleMode}
@@ -654,7 +659,7 @@ function App() {
           <Route
             path="/admin/ai-assistant"
             element={
-              <ProtectedRoleRoute allowRoles={["admin"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
                 <AIAssistantPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
@@ -662,7 +667,7 @@ function App() {
           <Route
             path="/cashier"
             element={
-              <ProtectedRoleRoute allowRoles={["admin", "cashier", "super_cashier"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin", "cashier", "super_cashier"]}>
                 <CashierPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
@@ -686,7 +691,7 @@ function App() {
           <Route
             path="/cashier/notifications"
             element={
-              <ProtectedRoleRoute allowRoles={["admin", "cashier", "super_cashier"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin", "cashier", "super_cashier"]}>
                 <CashierNotificationsPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }

@@ -64,7 +64,8 @@ export function appendCashierShiftEndNotification({
 
 export function appendUserLoginNotification({ username, role }) {
   const at = new Date().toISOString();
-  const roleLabel = role === "admin" ? "مدير" : "كاشير";
+  const roleLabel =
+    role === "admin" ? "مدير" : role === "super_admin" ? "سوبر أدمن" : "كاشير";
   const notification = {
     id: `NTF-LOGIN-${Date.now()}`,
     type: "user_login",

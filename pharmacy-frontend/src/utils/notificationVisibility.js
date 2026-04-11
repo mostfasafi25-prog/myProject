@@ -18,7 +18,7 @@ export function isNotificationVisibleToCurrentUser(notification) {
 
   const recipients = notification?.recipients;
   if (recipients === "admin_only") {
-    if (role !== "admin") return false;
+    if (role !== "admin" && role !== "super_admin") return false;
     return isNotificationAllowedByPrefs(notification);
   }
   if (recipients === "all" || recipients == null) {

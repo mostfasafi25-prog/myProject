@@ -604,7 +604,11 @@ export default function AdminLayout({ mode = "light", onToggleMode, children, em
                     {superCashierUi ? "سوبر كاشير" : headerDisplayName}
                   </Typography>
                   <Typography variant="caption" display="block" color="text.secondary">
-                    {superCashierUi ? "توريد بدون عرض الصندوق" : headerUser?.role === "admin" ? "مدير النظام" : "موظف"}
+                    {superCashierUi
+                      ? "توريد بدون عرض الصندوق"
+                      : headerUser?.role === "admin" || headerUser?.role === "super_admin"
+                        ? "مدير النظام"
+                        : "موظف"}
                   </Typography>
                 </Box>
                 <Avatar src={headerAvatarSrc} sx={{ width: 40, height: 40 }}>

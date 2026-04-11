@@ -510,7 +510,7 @@ export default function PurchasesPage({ mode, onToggleMode }) {
       createdAt: new Date().toISOString(),
       fromManagement: true,
       managementLabel:
-        currentUser?.role === "admin"
+        currentUser?.role === "admin" || currentUser?.role === "super_admin"
           ? "إدارة النظام"
           : currentUser?.role === "super_cashier"
             ? "إدارة التوريد (سوبر كاشير)"

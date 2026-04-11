@@ -625,7 +625,7 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
 
   const todaySalesForCashier = useMemo(() => {
     const me = currentUser?.username || "";
-    const isAdminPreview = currentUser?.role === "admin";
+    const isAdminPreview = currentUser?.role === "admin" || currentUser?.role === "super_admin";
     return [...allSalesInvoices]
       .filter((inv) => {
         if (!isSameLocalDay(inv.soldAt)) return false;
@@ -1682,7 +1682,7 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
               بيع اليوم
             </Typography>
             <Typography component="div" variant="body2" color="text.secondary" sx={{ mt: 0.75, lineHeight: 1.55, fontWeight: 500 }}>
-              {currentUser?.role === "admin"
+              {currentUser?.role === "admin" || currentUser?.role === "super_admin"
                 ? "جميع فواتير اليوم (معاينة المدير)."
                 : "فواتيرك المسجّلة اليوم فقط. إعادة الفاتورة تضيف البنود للسلة وتُسجَّل في مرتجعات المبيعات."}
             </Typography>
@@ -3143,7 +3143,7 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
         </DialogActions>
       </Dialog>
 
-      {currentUser?.role === "admin" ? (
+      {currentUser?.role === "admin" || currentUser?.role === "super_admin" ? (
         <Paper
           elevation={14}
           sx={{
