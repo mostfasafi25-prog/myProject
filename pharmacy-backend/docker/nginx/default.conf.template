@@ -7,6 +7,11 @@ server {
     charset utf-8;
     client_max_body_size 32M;
 
+    # CORS لكل الردود (بدون if داخل location حتى لا تُلغى الوراثة)
+    add_header Access-Control-Allow-Origin $cors_allow_origin always;
+    add_header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS" always;
+    add_header Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With, Accept, X-CSRF-TOKEN" always;
+
     location / {
         try_files $uri $uri/ /index.php?$query_string;
     }
@@ -19,6 +24,11 @@ server {
         fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
         include fastcgi_params;
         fastcgi_hide_header X-Powered-By;
+        fastcgi_hide_header Access-Control-Allow-Origin;
+        fastcgi_hide_header Access-Control-Allow-Methods;
+        fastcgi_hide_header Access-Control-Allow-Headers;
+        fastcgi_hide_header Access-Control-Max-Age;
+        fastcgi_hide_header Access-Control-Expose-Headers;
     }
 
     location ~ /\.(?!well-known).* {

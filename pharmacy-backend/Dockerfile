@@ -20,7 +20,8 @@ COPY . .
 RUN chmod +x docker-entrypoint.sh \
     && mv docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-RUN cp docker/supervisord-main.conf /etc/supervisor/supervisord.conf \
+RUN cp docker/nginx/cors-map.conf /etc/nginx/conf.d/00-cors-map.conf \
+    && cp docker/supervisord-main.conf /etc/supervisor/supervisord.conf \
     && cp docker/supervisor-laravel.conf /etc/supervisor/conf.d/laravel.conf
 
 ENV COMPOSER_ALLOW_SUPERUSER=1
