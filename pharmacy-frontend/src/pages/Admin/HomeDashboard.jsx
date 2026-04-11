@@ -21,6 +21,8 @@ import {
   LinearProgress,
   Paper,
   Stack,
+  ToggleButton,
+  ToggleButtonGroup,
   Tooltip,
   Typography,
   useTheme,
@@ -42,6 +44,7 @@ import { Axios } from "../../Api/Axios";
 import { productDisplayName } from "../../utils/productDisplayName";
 import { daysUntilExpiry } from "../../utils/productExpiry";
 import { adminPageContainerSx } from "../../utils/adminPageLayout";
+import { chipColorForBalance, negativeAmountTextSx } from "../../utils/negativeAmountStyle";
 import { STORE_BALANCE_CHANGED } from "../../utils/storeBalanceSync";
 import AdminLayout from "./AdminLayout";
 const STORE_BALANCE_KEY = "storeBalance";
@@ -326,6 +329,7 @@ export default function HomeDashboard({ mode = "light", onToggleMode }) {
       {
         title: `مبيعات (${kpiValues.label})`,
         value: `${kpiValues.sales.toFixed(1)} شيكل`,
+        amountForColor: kpiValues.sales,
         icon: <PointOfSale />,
         delta: `${kpiValues.orders} طلب`,
         progress: Math.min(100, kpiValues.sales > 0 ? Math.min(100, 12 + (kpiValues.orders % 40)) : 8),
@@ -334,6 +338,7 @@ export default function HomeDashboard({ mode = "light", onToggleMode }) {
       {
         title: "صافي الربح (تقريبي)",
         value: kpiValues.profit != null ? `${kpiValues.profit.toFixed(1)} شيكل` : "— (محلي فقط)",
+        amountForColor: kpiValues.profit != null ? kpiValues.profit : null,
         icon: <TrendingUp />,
         delta: kpiValues.profit != null ? "من الخادم" : "غير متوفر للفترة",
         progress: kpiValues.profit != null ? Math.min(100, 25 + (Number(kpiValues.profit) % 60)) : 12,
@@ -342,6 +347,7 @@ export default function HomeDashboard({ mode = "light", onToggleMode }) {
       {
         title: `مشتريات (${purchasePeriodStats.label})`,
         value: `${purchasePeriodStats.total.toFixed(1)} شيكل`,
+        amountForColor: purchasePeriodStats.total,
         icon: <LocalShipping />,
         delta: `${purchasePeriodStats.count} عملية شراء`,
         progress: Math.min(100, purchasePeriodStats.total > 0 ? 18 + (purchasePeriodStats.count % 45) : 10),
@@ -350,9 +356,10 @@ export default function HomeDashboard({ mode = "light", onToggleMode }) {
       {
         title: "السيولة (الصندوق المحلي)",
         value: `${storeBalance.total.toFixed(1)} شيكل`,
+        amountForColor: storeBalance.total,
         icon: <AccountBalanceWallet />,
         liquiditySplit: true,
-        progress: Math.min(100, 30 + (storeBalance.total % 50)),
+        progress: Math.min(100, 30 + (Math.abs(storeBalance.total) % 50)),
         navigateTo: "/admin/settings/money",
       },
     ],
@@ -462,22 +469,62 @@ export default function HomeDashboard({ mode = "light", onToggleMode }) {
           pb: { xs: 1, md: 0 },
         }}
       >
-        <Stack direction="row" justifyContent="flex-start" sx={{ mt: { xs: 0.5, md: 1.5 }, mb: 1, gap: 1, flexWrap: "wrap" }}>
-          {[
-            { key: "day", label: "يوم" },
-            { key: "week", label: "أسبوع" },
-            { key: "month", label: "شهر" },
-          ].map((period) => (
-            <Button
-              key={period.key}
-              onClick={() => setPeriodView(period.key)}
-              variant={periodView === period.key ? "contained" : "text"}
-              sx={{ minWidth: 84, textTransform: "none", borderRadius: 2, fontWeight: 700 }}
-            >
-              {period.label}
-            </Button>
-          ))}
-        </Stack>
+        <Card
+          sx={{
+            width: "100%",
+            maxWidth: "100%",
+            boxSizing: "border-box",
+            p: { xs: 1.25, sm: 1.5 },
+            mb: { xs: 1.5, md: 2 },
+            mt: { xs: 0.5, md: 1.5 },
+            borderRadius: 3,
+            border: `1px solid ${alpha(theme.palette.primary.main, 0.2)}`,
+            background: `linear-gradient(135deg, ${alpha(theme.palette.primary.main, 0.1)}, ${alpha(
+              theme.palette.secondary.main,
+              0.07,
+            )})`,
+          }}
+        >
+          <Typography variant="caption" color="text.secondary" fontWeight={800} sx={{ display: "block", mb: 1, letterSpacing: 0.2 }}>
+            نطاق عرض المؤشرات والمبيعات والمشتريات
+          </Typography>
+          <ToggleButtonGroup
+            exclusive
+            fullWidth
+            value={periodView}
+            onChange={(_, next) => {
+              if (next != null) setPeriodView(next);
+            }}
+            aria-label="نطاق الوقت"
+            sx={{
+              display: "grid",
+              gridTemplateColumns: "repeat(3, 1fr)",
+              gap: 0.75,
+              bgcolor: alpha(theme.palette.background.paper, 0.55),
+              p: 0.75,
+              borderRadius: 2,
+              border: "none",
+              "& .MuiToggleButtonGroup-grouped": {
+                border: "none !important",
+                borderRadius: "10px !important",
+                mx: 0,
+                py: 1,
+                fontWeight: 800,
+                textTransform: "none",
+              },
+            }}
+          >
+            <ToggleButton value="day" disableRipple>
+              اليوم
+            </ToggleButton>
+            <ToggleButton value="week" disableRipple>
+              آخر 7 أيام
+            </ToggleButton>
+            <ToggleButton value="month" disableRipple>
+              الشهر الحالي
+            </ToggleButton>
+          </ToggleButtonGroup>
+        </Card>
 
         {summaryErr ? (
           <Typography variant="body2" color="warning.main" sx={{ mt: 1 }}>
@@ -529,14 +576,14 @@ export default function HomeDashboard({ mode = "light", onToggleMode }) {
                       <Chip
                         size="small"
                         label={`كاش ${storeBalance.cash.toFixed(0)}`}
-                        color="success"
+                        color={chipColorForBalance(storeBalance.cash, "success")}
                         variant="filled"
                         sx={{ fontWeight: 800 }}
                       />
                       <Chip
                         size="small"
                         label={`تطبيق ${storeBalance.app.toFixed(0)}`}
-                        color="info"
+                        color={chipColorForBalance(storeBalance.app, "info")}
                         variant="filled"
                         sx={{ fontWeight: 800 }}
                       />
@@ -561,7 +608,12 @@ export default function HomeDashboard({ mode = "light", onToggleMode }) {
                 <Typography variant="body2" color="text.secondary">
                   {item.title}
                 </Typography>
-                <Typography variant="h6" fontWeight={800} mb={1}>
+                <Typography
+                  variant="h6"
+                  fontWeight={800}
+                  mb={1}
+                  sx={item.amountForColor != null ? negativeAmountTextSx(item.amountForColor) : undefined}
+                >
                   {item.value}
                 </Typography>
                 <LinearProgress variant="determinate" value={item.progress} sx={{ borderRadius: 99, height: 7 }} />

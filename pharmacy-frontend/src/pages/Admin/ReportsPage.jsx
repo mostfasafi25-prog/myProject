@@ -172,8 +172,9 @@ export default function ReportsPage({ mode, onToggleMode }) {
   }, [filteredSales]);
 
   const purchaseTotals = useMemo(() => {
-    const t = filteredPurchases.reduce((s, r) => s + Number(r.total || 0), 0);
-    return { count: filteredPurchases.length, total: t };
+    const active = filteredPurchases.filter((r) => String(r.status || "") !== "مرجع");
+    const t = active.reduce((s, r) => s + Number(r.total || 0), 0);
+    return { count: active.length, total: t };
   }, [filteredPurchases]);
 
   useEffect(() => {
@@ -208,10 +209,10 @@ export default function ReportsPage({ mode, onToggleMode }) {
   }, [filteredSales.length, salesTotals.total]);
 
   const purchaseAvgAfterFilter = useMemo(() => {
-    const n = filteredPurchases.length;
+    const n = purchaseTotals.count;
     if (!n) return 0;
     return purchaseTotals.total / n;
-  }, [filteredPurchases.length, purchaseTotals.total]);
+  }, [purchaseTotals.count, purchaseTotals.total]);
 
   const salesMonthBest = useMemo(() => {
     let max = 0;

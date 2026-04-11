@@ -18,12 +18,17 @@ import {
   Typography,
   useTheme,
 } from "@mui/material";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import FilterBarRow from "../../components/FilterBarRow";
 import { adminPageContainerSx, adminPageSubtitleSx, adminPageTitleRowSx } from "../../utils/adminPageLayout";
 import AdminLayout from "./AdminLayout";
 import { confirmApp, showAppToast } from "../../utils/appToast";
 import { getStoredUser, isSuperCashier } from "../../utils/userRoles";
+import {
+  fetchAndPersistSalesCategories,
+  PHARMACY_ADMIN_CATEGORIES_SYNCED,
+  readAdminCategoriesFromStorage,
+} from "../../utils/backendCategoriesSync";
 const unifiedToggleSx = {
   direction: "ltr",
   width: 54,
@@ -64,6 +69,8 @@ const initialCategories = [
 ];
 
 function getStoredCategories() {
+  const synced = readAdminCategoriesFromStorage();
+  if (synced?.length) return synced;
   try {
     const raw = JSON.parse(localStorage.getItem(CATEGORIES_KEY));
     if (Array.isArray(raw) && raw.length) return raw;
@@ -77,6 +84,18 @@ export default function CategoriesPage({ mode, onToggleMode }) {
   const theme = useTheme();
   const superCashier = isSuperCashier(getStoredUser());
   const [categories, setCategories] = useState(getStoredCategories);
+  useEffect(() => {
+    const reload = () => setCategories(getStoredCategories());
+    window.addEventListener(PHARMACY_ADMIN_CATEGORIES_SYNCED, reload);
+    let cancelled = false;
+    fetchAndPersistSalesCategories().finally(() => {
+      if (!cancelled) reload();
+    });
+    return () => {
+      cancelled = true;
+      window.removeEventListener(PHARMACY_ADMIN_CATEGORIES_SYNCED, reload);
+    };
+  }, []);
   const [openAddDialog, setOpenAddDialog] = useState(false);
   const [newCategory, setNewCategory] = useState({ name: "", manager: "" });
   const [error, setError] = useState("");

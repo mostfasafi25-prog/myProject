@@ -25,6 +25,7 @@ export const AUDIT_ACTION_LABELS = {
   treasury_deposit: "إيداع خزنة",
   treasury_withdraw: "سحب من الخزنة",
   treasury_reset: "تصفير الخزنة",
+  system_data_reset: "تصفير بيانات من الإعدادات",
 };
 
 export function parseAuditDetailsJson(details) {
@@ -149,6 +150,23 @@ export function AuditDetailsRich({ action, details }) {
         إلغاء <b>{parsed.id}</b> — {Number(parsed.total || 0).toFixed(2)} شيكل —{" "}
         {parsed.paymentMethod === "credit" ? "آجل" : parsed.paymentMethod === "app" ? "تطبيق" : "كاش"}
       </Typography>
+    );
+  }
+
+  if (action === "system_data_reset" && parsed) {
+    const labels = Array.isArray(parsed.doneLabels) ? parsed.doneLabels : [];
+    return (
+      <Stack direction="row" flexWrap="wrap" gap={0.75} sx={{ justifyContent: "flex-end" }}>
+        {labels.length ? (
+          labels.map((t) => (
+            <Chip key={t} size="small" label={t} color="warning" variant="outlined" sx={{ fontWeight: 700 }} />
+          ))
+        ) : (
+          <Typography variant="caption" color="text.secondary">
+            (لا تفاصيل)
+          </Typography>
+        )}
+      </Stack>
     );
   }
 

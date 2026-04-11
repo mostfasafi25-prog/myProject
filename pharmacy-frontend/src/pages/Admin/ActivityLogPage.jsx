@@ -1,30 +1,47 @@
-﻿import { Gavel, History, Visibility } from "@mui/icons-material";
+﻿import {
+  AccessTime,
+  Gavel,
+  History,
+  Person,
+  PointOfSale,
+  Refresh,
+  Timeline,
+  Visibility,
+} from "@mui/icons-material";
 import {
   alpha,
+  Avatar,
   Box,
   Button,
   Card,
+  CardContent,
   Chip,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
+  Grid,
   Pagination,
+  Paper,
   Stack,
+  Tab,
   Table,
   TableBody,
   TableCell,
-  TableContainer,
   TableHead,
   TableRow,
+  TableContainer,
+  Tabs,
   TextField,
   Tooltip,
   Typography,
+  useMediaQuery,
   useTheme,
 } from "@mui/material";
-import { useMemo, useState } from "react";
+import { keyframes } from "@mui/system";
+import { useEffect, useMemo, useState } from "react";
 import FilterBarRow from "../../components/FilterBarRow";
-import { adminPageContainerSx, adminPageSubtitleSx } from "../../utils/adminPageLayout";
+import { adminPageContainerSx } from "../../utils/adminPageLayout";
 import AdminLayout from "./AdminLayout";
 import { readAuditLog } from "../../utils/auditLog";
 import { AUDIT_ACTION_LABELS, AuditDetailsRich } from "../../utils/auditLogDisplay";
@@ -32,16 +49,42 @@ import { readShiftActivityLog } from "../../utils/shiftActivityLog";
 import { displayCashierName } from "./InvoicesPage";
 
 const ROWS_PER_PAGE = 6;
+const AUDIT_ROWS_PER_PAGE = 8;
+
+const shimmer = keyframes`
+  0% { opacity: 0.55; }
+  50% { opacity: 1; }
+  100% { opacity: 0.55; }
+`;
+
+function auditActionColor(action, theme) {
+  const a = String(action || "");
+  if (a.includes("treasury") || a.includes("reset")) return theme.palette.warning.main;
+  if (a.includes("sale") || a.includes("cashier")) return theme.palette.success.main;
+  if (a.includes("void") || a.includes("delete")) return theme.palette.error.main;
+  if (a.includes("price") || a.includes("stocktake")) return theme.palette.info.main;
+  return theme.palette.secondary.main;
+}
 
 export default function ActivityLogPage({ mode, onToggleMode }) {
   const theme = useTheme();
+  const mdUp = useMediaQuery(theme.breakpoints.up("md"));
+  const [dataTick, setDataTick] = useState(0);
+  const [mainTab, setMainTab] = useState(0);
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [detail, setDetail] = useState(null);
   const [auditSearch, setAuditSearch] = useState("");
-  const [auditRefresh, setAuditRefresh] = useState(0);
+  const [auditPage, setAuditPage] = useState(1);
+
+  useEffect(() => {
+    const on = () => setDataTick((t) => t + 1);
+    window.addEventListener("pharmacy-system-data-reset", on);
+    return () => window.removeEventListener("pharmacy-system-data-reset", on);
+  }, []);
 
   const rows = useMemo(() => {
+    void dataTick;
     const q = search.trim().toLowerCase();
     return readShiftActivityLog().filter((r) => {
       if (!q) return true;
@@ -54,7 +97,7 @@ export default function ActivityLogPage({ mode, onToggleMode }) {
           .includes(q)
       );
     });
-  }, [search]);
+  }, [search, dataTick]);
 
   const pageCount = Math.max(1, Math.ceil(rows.length / ROWS_PER_PAGE));
   const safePage = Math.min(page, pageCount);
@@ -64,186 +107,407 @@ export default function ActivityLogPage({ mode, onToggleMode }) {
   }, [rows, safePage]);
 
   const metrics = useMemo(() => {
+    void dataTick;
     const all = readShiftActivityLog();
     const inv = all.reduce((s, r) => s + (r.invoiceCount || 0), 0);
-    return { sessions: all.length, invoices: inv };
-  }, [search, page]);
+    const totalSales = all.reduce((s, r) => s + Number(r.total || 0), 0);
+    return { sessions: all.length, invoices: inv, totalSales };
+  }, [dataTick]);
 
-  const auditRows = useMemo(() => {
-    void auditRefresh;
+  const auditFiltered = useMemo(() => {
+    void dataTick;
     const q = auditSearch.trim().toLowerCase();
     const all = readAuditLog();
-    const filtered = !q
-      ? all
-      : all.filter(
-          (r) =>
-            String(r.action || "")
-              .toLowerCase()
-              .includes(q) ||
-            String(r.username || "")
-              .toLowerCase()
-              .includes(q) ||
-            String(r.details || "")
-              .toLowerCase()
-              .includes(q) ||
-            String(r.role || "")
-              .toLowerCase()
-              .includes(q),
-        );
-    return filtered.slice(0, 100);
-  }, [auditSearch, auditRefresh]);
+    if (!q) return all;
+    return all.filter(
+      (r) =>
+        String(r.action || "")
+          .toLowerCase()
+          .includes(q) ||
+        String(r.username || "")
+          .toLowerCase()
+          .includes(q) ||
+        String(r.details || "")
+          .toLowerCase()
+          .includes(q) ||
+        String(r.role || "")
+          .toLowerCase()
+          .includes(q),
+    );
+  }, [auditSearch, dataTick]);
+
+  const auditPageCount = Math.max(1, Math.ceil(auditFiltered.length / AUDIT_ROWS_PER_PAGE));
+  const safeAuditPage = Math.min(auditPage, auditPageCount);
+  const auditRows = useMemo(() => {
+    const start = (safeAuditPage - 1) * AUDIT_ROWS_PER_PAGE;
+    return auditFiltered.slice(start, start + AUDIT_ROWS_PER_PAGE);
+  }, [auditFiltered, safeAuditPage]);
 
   return (
     <AdminLayout mode={mode} onToggleMode={onToggleMode}>
       <Box sx={adminPageContainerSx}>
-        <Stack direction="row" alignItems="center" sx={{ gap: 1, mb: 2, flexWrap: "wrap" }}>
-          <History color="primary" sx={{ flexShrink: 0 }} />
-          <Box sx={{ minWidth: 0 }}>
-            <Typography variant="h5" fontWeight={900}>
-              سجل النشاط — دوام الكاشير
-            </Typography>
-            <Typography variant="body2" color="text.secondary" sx={adminPageSubtitleSx}>
-              يُسجَّل تلقائياً عند «إنهاء الدوام»: بداية ونهاية الجلسة، الفواتير، والمجاميع
-            </Typography>
-          </Box>
-        </Stack>
-
-        <FilterBarRow
+        <Paper
+          elevation={0}
           sx={{
-            gap: 2,
             mb: 2,
-            flexDirection: { xs: "row", sm: "row" },
-            "& > *": { flex: { xs: "1 1 calc(50% - 8px)", sm: "1 1 0" }, minWidth: { xs: 0, sm: 160 } },
+            p: { xs: 2, sm: 2.5 },
+            borderRadius: 3,
+            overflow: "hidden",
+            position: "relative",
+            border: `1px solid ${alpha(theme.palette.primary.main, 0.2)}`,
+            background: `linear-gradient(125deg, ${alpha(theme.palette.primary.main, 0.14)} 0%, ${alpha(
+              theme.palette.secondary.main,
+              0.1,
+            )} 42%, ${alpha(theme.palette.background.paper, 0.96)} 100%)`,
           }}
         >
-          <Card sx={{ p: { xs: 1.25, sm: 2 }, borderRadius: 3 }}>
-            <Typography variant="caption" color="text.secondary">
-              جلسات مسجّلة
-            </Typography>
-            <Typography variant="h5" fontWeight={900} sx={{ fontSize: { xs: "1.25rem", sm: undefined } }}>
-              {metrics.sessions}
-            </Typography>
-          </Card>
-          <Card sx={{ p: { xs: 1.25, sm: 2 }, borderRadius: 3 }}>
-            <Typography variant="caption" color="text.secondary">
-              فواتير ضمن الجلسات
-            </Typography>
-            <Typography variant="h5" fontWeight={900} sx={{ fontSize: { xs: "1.25rem", sm: undefined } }}>
-              {metrics.invoices}
-            </Typography>
-          </Card>
-        </FilterBarRow>
-
-        <Card sx={{ p: 1.5, mb: 2, borderRadius: 3 }}>
-          <FilterBarRow>
-            <TextField
-              size="small"
-              placeholder="بحث باسم المستخدم أو الاسم المعروض…"
-              value={search}
-              onChange={(e) => {
-                setSearch(e.target.value);
-                setPage(1);
+          <Box
+            sx={{
+              position: "absolute",
+              width: 180,
+              height: 180,
+              borderRadius: "50%",
+              bgcolor: alpha(theme.palette.primary.main, 0.08),
+              top: -60,
+              left: -40,
+              pointerEvents: "none",
+            }}
+          />
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ xs: "stretch", sm: "center" }} sx={{ position: "relative" }}>
+            <Avatar
+              sx={{
+                width: 56,
+                height: 56,
+                bgcolor: alpha(theme.palette.primary.main, 0.2),
+                color: "primary.main",
+                animation: `${shimmer} 3.5s ease-in-out infinite`,
               }}
-              sx={{ flex: "1 1 100%", minWidth: 200 }}
-            />
-          </FilterBarRow>
+            >
+              <Timeline sx={{ fontSize: 32 }} />
+            </Avatar>
+            <Box sx={{ flex: 1, minWidth: 0 }}>
+              <Typography variant="h5" fontWeight={900}>
+                سجل النشاط
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                دوام الكاشير، الفواتير، وسجل التدقيق — يتحدّث تلقائياً بعد تصفير البيانات من الإعدادات
+              </Typography>
+            </Box>
+            <Button
+              variant="outlined"
+              size="small"
+              startIcon={<Refresh />}
+              onClick={() => setDataTick((t) => t + 1)}
+              sx={{ textTransform: "none", fontWeight: 800, flexShrink: 0, alignSelf: { xs: "stretch", sm: "center" } }}
+            >
+              تحديث العرض
+            </Button>
+          </Stack>
+
+          <Grid container spacing={1.5} sx={{ mt: 2 }}>
+            <Grid size={{ xs: 12, sm: 4 }}>
+              <Card variant="outlined" sx={{ borderRadius: 2.5, bgcolor: alpha(theme.palette.background.paper, 0.75) }}>
+                <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
+                  <Typography variant="caption" color="text.secondary" fontWeight={700}>
+                    جلسات دوام
+                  </Typography>
+                  <Typography variant="h4" fontWeight={900} color="primary.main">
+                    {metrics.sessions}
+                  </Typography>
+                </CardContent>
+              </Card>
+            </Grid>
+            <Grid size={{ xs: 12, sm: 4 }}>
+              <Card variant="outlined" sx={{ borderRadius: 2.5, bgcolor: alpha(theme.palette.background.paper, 0.75) }}>
+                <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
+                  <Typography variant="caption" color="text.secondary" fontWeight={700}>
+                    فواتير في الجلسات
+                  </Typography>
+                  <Typography variant="h4" fontWeight={900} color="success.main">
+                    {metrics.invoices}
+                  </Typography>
+                </CardContent>
+              </Card>
+            </Grid>
+            <Grid size={{ xs: 12, sm: 4 }}>
+              <Card variant="outlined" sx={{ borderRadius: 2.5, bgcolor: alpha(theme.palette.background.paper, 0.75) }}>
+                <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
+                  <Typography variant="caption" color="text.secondary" fontWeight={700}>
+                    إجمالي مبيعات الجلسات
+                  </Typography>
+                  <Typography variant="h4" fontWeight={900} color="secondary.main">
+                    {metrics.totalSales.toFixed(0)}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    شيكل تقريباً
+                  </Typography>
+                </CardContent>
+              </Card>
+            </Grid>
+          </Grid>
+        </Paper>
+
+        <Card sx={{ borderRadius: 3, mb: 2, overflow: "hidden" }}>
+          <Tabs
+            value={mainTab}
+            onChange={(_, v) => setMainTab(v)}
+            variant="fullWidth"
+            sx={{
+              minHeight: 48,
+              bgcolor: alpha(theme.palette.primary.main, 0.06),
+              "& .MuiTab-root": { textTransform: "none", fontWeight: 800, py: 1.5 },
+            }}
+          >
+            <Tab icon={<History sx={{ mb: 0.25 }} />} iconPosition="start" label="دوام الكاشير" />
+            <Tab icon={<Gavel sx={{ mb: 0.25 }} />} iconPosition="start" label="سجل التدقيق" />
+          </Tabs>
         </Card>
 
-        <Card sx={{ borderRadius: 3, border: `1px solid ${alpha(theme.palette.primary.main, 0.16)}` }}>
-          <TableContainer>
-            <Table size="small">
-              <TableHead>
-                <TableRow sx={{ bgcolor: alpha(theme.palette.primary.main, 0.06) }}>
-                  <TableCell align="center" sx={{ fontWeight: 800 }}>
-                    الكاشير
-                  </TableCell>
-                  <TableCell align="center" sx={{ fontWeight: 800 }}>
-                    بداية الدوام
-                  </TableCell>
-                  <TableCell align="center" sx={{ fontWeight: 800 }}>
-                    نهاية الدوام
-                  </TableCell>
-                  <TableCell align="center" sx={{ fontWeight: 800 }}>
-                    فواتير
-                  </TableCell>
-                  <TableCell align="center" sx={{ fontWeight: 800 }}>
-                    إجمالي البيع
-                  </TableCell>
-                  <TableCell align="center" sx={{ fontWeight: 800 }}>
-                    كاش / تطبيق
-                  </TableCell>
-                  <TableCell align="center" sx={{ fontWeight: 800 }}>
-                    تفاصيل
-                  </TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {pageRows.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={7} align="center">
-                      <Typography color="text.secondary" sx={{ py: 4 }}>
-                        لا يوجد سجل بعد. يُملأ عند إنهاء دوام من شاشة الكاشير.
-                      </Typography>
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  pageRows.map((r) => (
-                    <TableRow key={r.id} hover>
-                      <TableCell align="center">
-                        <Typography fontWeight={700}>{displayCashierName(r.displayName || r.username)}</Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          {r.username}
-                        </Typography>
-                      </TableCell>
-                      <TableCell align="center" sx={{ whiteSpace: "nowrap" }}>
-                        {r.shiftStartedAt ? new Date(r.shiftStartedAt).toLocaleString("en-GB") : "—"}
-                      </TableCell>
-                      <TableCell align="center" sx={{ whiteSpace: "nowrap" }}>
-                        {r.shiftEndedAt ? new Date(r.shiftEndedAt).toLocaleString("en-GB") : "—"}
-                      </TableCell>
-                      <TableCell align="center">{r.invoiceCount ?? 0}</TableCell>
-                      <TableCell align="center" sx={{ fontWeight: 800 }}>
-                        {Number(r.total || 0).toFixed(1)} شيكل
-                      </TableCell>
-                      <TableCell align="center">
-                        <Typography variant="caption" display="block">
-                          كاش {Number(r.cash || 0).toFixed(1)}
-                        </Typography>
-                        <Typography variant="caption" display="block">
-                          تطبيق {Number(r.app || 0).toFixed(1)}
-                        </Typography>
-                        {Number(r.credit || 0) > 0 ? (
-                          <Typography variant="caption" display="block" color="warning.main" fontWeight={700}>
-                            آجل {Number(r.credit || 0).toFixed(1)}
+        {mainTab === 0 ? (
+          <Stack sx={{ gap: 2 }}>
+            <Card sx={{ p: 1.5, borderRadius: 3 }}>
+              <FilterBarRow>
+                <TextField
+                  size="small"
+                  placeholder="بحث باسم المستخدم أو الاسم المعروض…"
+                  value={search}
+                  onChange={(e) => {
+                    setSearch(e.target.value);
+                    setPage(1);
+                  }}
+                  sx={{ flex: "1 1 100%", minWidth: 0 }}
+                  InputProps={{
+                    startAdornment: (
+                      <Person sx={{ ml: 1, color: "text.secondary", fontSize: 20 }} />
+                    ),
+                  }}
+                />
+              </FilterBarRow>
+            </Card>
+
+            {pageRows.length === 0 ? (
+              <Card sx={{ p: 4, borderRadius: 3, textAlign: "center" }}>
+                <PointOfSale sx={{ fontSize: 48, color: "text.disabled", mb: 1 }} />
+                <Typography color="text.secondary" fontWeight={700}>
+                  لا يوجد سجل بعد
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  يُملأ عند «إنهاء الدوام» من شاشة الكاشير
+                </Typography>
+              </Card>
+            ) : (
+              <Stack sx={{ gap: 1.5 }}>
+                {pageRows.map((r) => (
+                  <Card
+                    key={r.id}
+                    sx={{
+                      borderRadius: 3,
+                      overflow: "hidden",
+                      border: `1px solid ${alpha(theme.palette.primary.main, 0.15)}`,
+                      borderInlineStart: `4px solid ${theme.palette.primary.main}`,
+                      transition: "transform 0.15s, box-shadow 0.15s",
+                      "&:hover": {
+                        boxShadow: `0 8px 28px ${alpha(theme.palette.primary.main, 0.12)}`,
+                        transform: "translateY(-1px)",
+                      },
+                    }}
+                  >
+                    <CardContent sx={{ py: 2 }}>
+                      <Stack
+                        direction={{ xs: "column", sm: "row" }}
+                        spacing={1.5}
+                        alignItems={{ xs: "stretch", sm: "center" }}
+                        justifyContent="space-between"
+                      >
+                        <Stack direction="row" spacing={1.5} alignItems="center" sx={{ minWidth: 0 }}>
+                          <Avatar sx={{ bgcolor: alpha(theme.palette.primary.main, 0.15), color: "primary.main" }}>
+                            {(r.displayName || r.username || "?")[0]}
+                          </Avatar>
+                          <Box sx={{ minWidth: 0 }}>
+                            <Typography fontWeight={900} noWrap>
+                              {displayCashierName(r.displayName || r.username)}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              @{r.username}
+                            </Typography>
+                          </Box>
+                        </Stack>
+                        <Stack direction="row" flexWrap="wrap" gap={0.75} sx={{ justifyContent: { xs: "flex-start", sm: "center" } }}>
+                          <Chip size="small" variant="outlined" label={`${r.invoiceCount ?? 0} فاتورة`} />
+                          <Chip size="small" color="success" variant="outlined" label={`${Number(r.total || 0).toFixed(1)} شيكل`} />
+                        </Stack>
+                        <Stack direction={{ xs: "row", sm: "column" }} spacing={0.5} sx={{ flexShrink: 0, alignItems: { sm: "flex-end" } }}>
+                          <Stack direction="row" spacing={0.5} alignItems="center" color="text.secondary">
+                            <AccessTime fontSize="inherit" />
+                            <Typography variant="caption" noWrap>
+                              {r.shiftStartedAt ? new Date(r.shiftStartedAt).toLocaleString("en-GB") : "—"}
+                            </Typography>
+                          </Stack>
+                          <Button
+                            size="small"
+                            variant="contained"
+                            startIcon={<Visibility />}
+                            onClick={() => setDetail(r)}
+                            sx={{ textTransform: "none", fontWeight: 800 }}
+                          >
+                            تفاصيل الجلسة
+                          </Button>
+                        </Stack>
+                      </Stack>
+                    </CardContent>
+                  </Card>
+                ))}
+              </Stack>
+            )}
+
+            {rows.length > ROWS_PER_PAGE ? (
+              <Stack direction="row" justifyContent="center" sx={{ py: 1 }}>
+                <Pagination count={pageCount} page={safePage} onChange={(_, v) => setPage(v)} color="primary" shape="rounded" />
+              </Stack>
+            ) : null}
+          </Stack>
+        ) : (
+          <Stack sx={{ gap: 2 }}>
+            <Card sx={{ p: 1.5, borderRadius: 3 }}>
+              <FilterBarRow>
+                <TextField
+                  size="small"
+                  placeholder="تصفية: إجراء، مستخدم، تفاصيل…"
+                  value={auditSearch}
+                  onChange={(e) => {
+                    setAuditSearch(e.target.value);
+                    setAuditPage(1);
+                  }}
+                  sx={{ flex: "1 1 100%", minWidth: 0 }}
+                  InputProps={{
+                    startAdornment: <Gavel sx={{ ml: 1, color: "text.secondary", fontSize: 20 }} />,
+                  }}
+                />
+              </FilterBarRow>
+            </Card>
+
+            {auditFiltered.length === 0 ? (
+              <Card sx={{ p: 4, borderRadius: 3, textAlign: "center" }}>
+                <Gavel sx={{ fontSize: 48, color: "text.disabled", mb: 1 }} />
+                <Typography color="text.secondary" fontWeight={700}>
+                  لا سجلات تدقيق
+                </Typography>
+              </Card>
+            ) : mdUp ? (
+              <Card sx={{ borderRadius: 3, border: `1px solid ${alpha(theme.palette.secondary.main, 0.2)}` }}>
+                <TableContainer>
+                  <Table size="small">
+                    <TableHead>
+                      <TableRow sx={{ bgcolor: alpha(theme.palette.secondary.main, 0.1) }}>
+                        <TableCell align="center" sx={{ fontWeight: 800 }}>
+                          الوقت
+                        </TableCell>
+                        <TableCell align="center" sx={{ fontWeight: 800 }}>
+                          الإجراء
+                        </TableCell>
+                        <TableCell align="center" sx={{ fontWeight: 800 }}>
+                          المستخدم
+                        </TableCell>
+                        <TableCell align="center" sx={{ fontWeight: 800 }}>
+                          التفاصيل
+                        </TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {auditRows.map((r) => (
+                        <TableRow key={r.id} hover>
+                          <TableCell align="center" sx={{ whiteSpace: "nowrap", fontSize: 12, verticalAlign: "top" }}>
+                            {r.at ? new Date(r.at).toLocaleString("en-GB") : "—"}
+                          </TableCell>
+                          <TableCell align="center" sx={{ verticalAlign: "top", py: 1.25 }}>
+                            <Tooltip title={r.action} placement="top">
+                              <Chip
+                                size="small"
+                                sx={{
+                                  fontWeight: 800,
+                                  maxWidth: 220,
+                                  borderColor: auditActionColor(r.action, theme),
+                                  color: auditActionColor(r.action, theme),
+                                }}
+                                variant="outlined"
+                                label={AUDIT_ACTION_LABELS[r.action] || r.action}
+                              />
+                            </Tooltip>
+                          </TableCell>
+                          <TableCell align="center" sx={{ verticalAlign: "top", py: 1.25 }}>
+                            <Typography variant="body2">{r.username || "—"}</Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              {r.role || ""}
+                            </Typography>
+                          </TableCell>
+                          <TableCell align="right" sx={{ verticalAlign: "top", py: 1.25, maxWidth: 480 }}>
+                            <AuditDetailsRich action={r.action} details={r.details} />
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              </Card>
+            ) : (
+              <Stack sx={{ gap: 1.25 }}>
+                {auditRows.map((r) => {
+                  const ac = auditActionColor(r.action, theme);
+                  return (
+                    <Card
+                      key={r.id}
+                      sx={{
+                        borderRadius: 3,
+                        borderInlineStart: `4px solid ${ac}`,
+                        bgcolor: alpha(ac, 0.06),
+                      }}
+                    >
+                      <CardContent sx={{ py: 1.5 }}>
+                        <Stack spacing={1}>
+                          <Stack direction="row" justifyContent="space-between" alignItems="flex-start" sx={{ gap: 1 }}>
+                            <Chip
+                              size="small"
+                              label={AUDIT_ACTION_LABELS[r.action] || r.action}
+                              sx={{ fontWeight: 800, borderColor: ac, color: ac }}
+                              variant="outlined"
+                            />
+                            <Typography variant="caption" color="text.secondary" sx={{ textAlign: "left", flexShrink: 0 }}>
+                              {r.at ? new Date(r.at).toLocaleString("en-GB") : "—"}
+                            </Typography>
+                          </Stack>
+                          <Typography variant="body2" fontWeight={700}>
+                            {r.username || "—"}{" "}
+                            <Typography component="span" variant="caption" color="text.secondary">
+                              {r.role ? `· ${r.role}` : ""}
+                            </Typography>
                           </Typography>
-                        ) : null}
-                      </TableCell>
-                      <TableCell align="center">
-                        <Button
-                          size="small"
-                          startIcon={<Visibility />}
-                          variant="outlined"
-                          onClick={() => setDetail(r)}
-                          sx={{ textTransform: "none" }}
-                        >
-                          عرض
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </TableContainer>
-          {rows.length > 0 ? (
-            <Stack direction="row" justifyContent="center" sx={{ p: 1.5 }}>
-              <Pagination count={pageCount} page={safePage} onChange={(_, v) => setPage(v)} color="primary" shape="rounded" />
-            </Stack>
-          ) : null}
-        </Card>
+                          <AuditDetailsRich action={r.action} details={r.details} />
+                        </Stack>
+                      </CardContent>
+                    </Card>
+                  );
+                })}
+              </Stack>
+            )}
+
+            {auditFiltered.length > AUDIT_ROWS_PER_PAGE ? (
+              <Stack direction="row" justifyContent="center" sx={{ py: 1 }}>
+                <Pagination
+                  count={auditPageCount}
+                  page={safeAuditPage}
+                  onChange={(_, v) => setAuditPage(v)}
+                  color="secondary"
+                  shape="rounded"
+                />
+              </Stack>
+            ) : null}
+          </Stack>
+        )}
 
         <Dialog open={Boolean(detail)} onClose={() => setDetail(null)} fullWidth maxWidth="md">
-          <DialogTitle sx={{ textAlign: "right" }}>فواتير الجلسة — {detail?.displayName || detail?.username}</DialogTitle>
+          <DialogTitle sx={{ textAlign: "right", fontWeight: 900 }}>
+            فواتير الجلسة — {detail?.displayName || detail?.username}
+          </DialogTitle>
           <DialogContent dividers sx={{ textAlign: "right" }}>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
               من {detail?.shiftStartedAt ? new Date(detail.shiftStartedAt).toLocaleString("en-GB") : "—"} إلى{" "}
@@ -281,11 +545,7 @@ export default function ActivityLogPage({ mode, onToggleMode }) {
                         {inv.soldAt ? new Date(inv.soldAt).toLocaleString("en-GB") : "—"}
                       </TableCell>
                       <TableCell align="center">
-                        {inv.paymentMethod === "app"
-                          ? "تطبيق"
-                          : inv.paymentMethod === "credit"
-                            ? "آجل"
-                            : "كاش"}
+                        {inv.paymentMethod === "app" ? "تطبيق" : inv.paymentMethod === "credit" ? "آجل" : "كاش"}
                       </TableCell>
                       <TableCell align="center">{Number(inv.total || 0).toFixed(1)} شيكل</TableCell>
                       <TableCell align="right" sx={{ maxWidth: 280 }}>
@@ -309,96 +569,11 @@ export default function ActivityLogPage({ mode, onToggleMode }) {
             </Table>
           </DialogContent>
           <DialogActions sx={{ px: 3, pb: 2 }}>
-            <Button variant="contained" onClick={() => setDetail(null)} sx={{ textTransform: "none" }}>
+            <Button variant="contained" onClick={() => setDetail(null)} sx={{ textTransform: "none", fontWeight: 800 }}>
               إغلاق
             </Button>
           </DialogActions>
         </Dialog>
-
-        <Stack direction="row" alignItems="center" sx={{ gap: 1, mt: 3, mb: 1.5 }}>
-          <Gavel color="secondary" />
-          <Box sx={{ flex: 1 }}>
-            <Typography variant="h6" fontWeight={900}>
-              سجل التدقيق (مدير)
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              إلغاء فواتير، تغيير أسعار، تعليق سلال، مبيعات كاشير، جرد…
-            </Typography>
-          </Box>
-          <Button variant="outlined" size="small" onClick={() => setAuditRefresh((x) => x + 1)} sx={{ textTransform: "none" }}>
-            تحديث
-          </Button>
-        </Stack>
-        <Card sx={{ p: 1.5, mb: 2, borderRadius: 3 }}>
-          <FilterBarRow>
-            <TextField
-              size="small"
-              placeholder="تصفية حسب الإجراء أو المستخدم أو التفاصيل…"
-              value={auditSearch}
-              onChange={(e) => setAuditSearch(e.target.value)}
-              sx={{ flex: "1 1 100%", minWidth: 200 }}
-            />
-          </FilterBarRow>
-        </Card>
-        <Card sx={{ borderRadius: 3, border: `1px solid ${alpha(theme.palette.secondary.main, 0.2)}` }}>
-          <TableContainer sx={{ overflowX: "auto" }}>
-            <Table size="small" sx={{ minWidth: 720 }}>
-              <TableHead>
-                <TableRow sx={{ bgcolor: alpha(theme.palette.secondary.main, 0.08) }}>
-                  <TableCell align="center" sx={{ fontWeight: 800, whiteSpace: "nowrap" }}>
-                    الوقت
-                  </TableCell>
-                  <TableCell align="center" sx={{ fontWeight: 800 }}>
-                    الإجراء
-                  </TableCell>
-                  <TableCell align="center" sx={{ fontWeight: 800 }}>
-                    المستخدم
-                  </TableCell>
-                  <TableCell align="center" sx={{ fontWeight: 800, minWidth: 320 }}>
-                    التفاصيل
-                  </TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {auditRows.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={4} align="center" sx={{ py: 4 }}>
-                      <Typography color="text.secondary">لا سجلات تدقيق بعد</Typography>
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  auditRows.map((r) => (
-                    <TableRow key={r.id} hover>
-                      <TableCell align="center" sx={{ whiteSpace: "nowrap", fontSize: 12, verticalAlign: "top" }}>
-                        {r.at ? new Date(r.at).toLocaleString("en-GB") : "—"}
-                      </TableCell>
-                      <TableCell align="center" sx={{ verticalAlign: "top", py: 1.25 }}>
-                        <Tooltip title={r.action} placement="top">
-                          <Chip
-                            size="small"
-                            color="secondary"
-                            variant="outlined"
-                            label={AUDIT_ACTION_LABELS[r.action] || r.action}
-                            sx={{ fontWeight: 800, maxWidth: 200 }}
-                          />
-                        </Tooltip>
-                      </TableCell>
-                      <TableCell align="center" sx={{ verticalAlign: "top", py: 1.25 }}>
-                        <Typography variant="body2">{r.username || "—"}</Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          {r.role || ""}
-                        </Typography>
-                      </TableCell>
-                      <TableCell align="right" sx={{ verticalAlign: "top", py: 1.25, maxWidth: 520 }}>
-                        <AuditDetailsRich action={r.action} details={r.details} />
-                      </TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </TableContainer>
-        </Card>
       </Box>
     </AdminLayout>
   );

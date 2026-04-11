@@ -7,10 +7,7 @@ use Firebase\JWT\JWT;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Validator;
-use Illuminate\Validation\Rule;
-use Illuminate\Support\Str;
 
 class AuthController extends Controller
 {
@@ -42,104 +39,19 @@ class AuthController extends Controller
         ]);
     }
 
+    /**
+     * التسجيل الذاتي معطّل — يُنشئ المدير المستخدمين من لوحة الموظفين (POST /api/users مع توكن).
+     */
     public function register(Request $request)
     {
-        $v = Validator::make($request->all(), [
-            'username' => 'required|string|max:255|unique:users',
-            'password' => 'required|string|min:6',
-            'role' => ['required', Rule::in(['admin', 'cashier', 'super_cashier'])],
-        ]);
-
-        if ($v->fails()) {
-            return response()->json(['errors' => $v->errors()], 422);
-        }
-
-        if (filter_var(env('REGISTER_SIMPLE_MODE', false), FILTER_VALIDATE_BOOLEAN)) {
-            if ($request->role === 'admin' && ! filter_var(env('REGISTER_SIMPLE_ALLOW_ADMIN', false), FILTER_VALIDATE_BOOLEAN)) {
-                return response()->json([
-                    'error' => 'التسجيل السريع كمدير معطّل. فعّل REGISTER_SIMPLE_ALLOW_ADMIN=true على السيرفر (اختبار فقط)، أو أنشئ أدمن عبر db:seed.',
-                ], 422);
-            }
-
-            User::create([
-                'username' => $request->username,
-                'password' => Hash::make($request->password),
-                'role' => $request->role,
-                'approval_status' => 'approved',
-            ]);
-
-            return response()->json([
-                'message' => 'تم إنشاء الحساب (وضع اختبار: بدون بريد). يمكنك تسجيل الدخول فورًا.',
-                'requires_verification' => false,
-            ], 201);
-        }
-
-        $confirmEmail = env('HOTMAIL_CONFIRM_EMAIL');
-        if (!$confirmEmail) {
-            return response()->json(['error' => 'لم يتم إعداد بريد Hotmail لتأكيد التسجيل'], 500);
-        }
-
-        $challengeId = (string) Str::uuid();
-        $code = str_pad((string) random_int(0, 9999), 4, '0', STR_PAD_LEFT);
-
-        Cache::put("register_otp:{$challengeId}", [
-            'username' => $request->username,
-            'password' => Hash::make($request->password),
-            'role' => $request->role,
-            'code' => $code,
-        ], now()->addMinutes(10));
-
-        Mail::raw("رمز تأكيد التسجيل (4 أرقام): {$code}\nينتهي خلال 10 دقائق.", function ($message) use ($confirmEmail) {
-            $message->to($confirmEmail)->subject('رمز تأكيد التسجيل - نظام الصيدلية');
-        });
-
         return response()->json([
-            'message' => 'تم إرسال رمز التأكيد إلى البريد',
-            'requires_verification' => true,
-            'challenge_id' => $challengeId,
-            'expires_in' => 600,
-            'channel' => $confirmEmail,
-        ]);
+            'error' => 'التسجيل العام معطّل. أنشئ الحسابات من لوحة الإدارة → الموظفين.',
+        ], 403);
     }
 
     public function verifyRegisterOtp(Request $request)
     {
-        $v = Validator::make($request->all(), [
-            'challenge_id' => 'required|string',
-            'code' => 'required|string|size:4',
-        ]);
-
-        if ($v->fails()) {
-            return response()->json(['errors' => $v->errors()], 422);
-        }
-
-        $cached = Cache::get("register_otp:{$request->challenge_id}");
-        if (!$cached) {
-            return response()->json(['error' => 'رمز تأكيد التسجيل منتهي أو غير صالح'], 401);
-        }
-
-        if (($cached['code'] ?? null) !== $request->code) {
-            return response()->json(['error' => 'رمز التأكيد غير صحيح'], 401);
-        }
-
-        if (User::where('username', $cached['username'])->exists()) {
-            Cache::forget("register_otp:{$request->challenge_id}");
-            return response()->json(['error' => 'اسم المستخدم مستخدم مسبقًا'], 409);
-        }
-
-        User::create([
-            'username' => $cached['username'],
-            'password' => $cached['password'],
-            'role' => $cached['role'],
-            'approval_status' => 'pending',
-        ]);
-
-        Cache::forget("register_otp:{$request->challenge_id}");
-
-        return response()->json([
-            'message' => 'تم التحقق من البريد. الحساب بانتظار موافقة الأدمن.',
-            'status' => 'pending_admin_approval',
-        ], 201);
+        return response()->json(['error' => 'معطّل'], 403);
     }
 
     public function login(Request $request)
@@ -161,6 +73,11 @@ class AuthController extends Controller
         if (($user->approval_status ?? 'approved') !== 'approved') {
             return response()->json(['error' => 'الحساب بانتظار موافقة الأدمن'], 403);
         }
+
+        if (!($user->is_active ?? true)) {
+            return response()->json(['error' => 'أنت غير مفعّل. تواصل مع مدير النظام لتفعيل حسابك.'], 403);
+        }
+
         $token = $user->createToken('api_token')->plainTextToken;
         return response()->json([
             'message' => 'تم الدخول بنجاح',
@@ -169,6 +86,7 @@ class AuthController extends Controller
                 'username' => $user->username,
                 'role' => $user->role,
                 'approval_status' => $user->approval_status,
+                'is_active' => (bool) ($user->is_active ?? true),
             ],
             'token' => $token,
             'token_type' => 'Bearer',
@@ -200,12 +118,26 @@ class AuthController extends Controller
             return response()->json(['error' => 'المستخدم غير موجود'], 404);
         }
 
+        if (($user->approval_status ?? 'approved') !== 'approved') {
+            return response()->json(['error' => 'الحساب بانتظار موافقة الأدمن'], 403);
+        }
+
+        if (!($user->is_active ?? true)) {
+            return response()->json(['error' => 'أنت غير مفعّل. تواصل مع مدير النظام لتفعيل حسابك.'], 403);
+        }
+
         Cache::forget("login_otp:{$request->challenge_id}");
         $token = $user->createToken('api_token')->plainTextToken;
 
         return response()->json([
             'message' => 'تم الدخول بنجاح',
-            'user' => ['id' => $user->id, 'username' => $user->username, 'role' => $user->role],
+            'user' => [
+                'id' => $user->id,
+                'username' => $user->username,
+                'role' => $user->role,
+                'approval_status' => $user->approval_status,
+                'is_active' => (bool) ($user->is_active ?? true),
+            ],
             'token' => $token,
             'token_type' => 'Bearer',
         ]);
@@ -229,6 +161,7 @@ class AuthController extends Controller
                 'username' => $user->username,
                 'role' => $user->role,
                 'approval_status' => $user->approval_status,
+                'is_active' => (bool) ($user->is_active ?? true),
             ],
         ]);
     }
@@ -285,6 +218,7 @@ class AuthController extends Controller
         }
 
         $user->approval_status = 'approved';
+        $user->is_active = true;
         $user->save();
 
         return response()->json([
@@ -294,6 +228,7 @@ class AuthController extends Controller
                 'username' => $user->username,
                 'role' => $user->role,
                 'approval_status' => $user->approval_status,
+                'is_active' => (bool) $user->is_active,
             ],
         ]);
     }

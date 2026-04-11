@@ -37,17 +37,40 @@ import {
   useTheme,
 } from "@mui/material";
 import { keyframes } from "@mui/system";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import FilterBarRow from "../../components/FilterBarRow";
 import { adminPageContainerSx, adminPageSubtitleSx, adminPageTitleRowSx } from "../../utils/adminPageLayout";
+import { negativeAmountTextSx } from "../../utils/negativeAmountStyle";
 import AdminLayout from "./AdminLayout";
 import { showAppToast } from "../../utils/appToast";
 import { productDisplayName } from "../../utils/productDisplayName";
 import { appendAudit } from "../../utils/auditLog";
-import { buildInitialDemoProducts, DEMO_CATEGORY_NAMES } from "../../data/pharmacyDemoCatalog";
+import { buildInitialDemoProducts } from "../../data/pharmacyDemoCatalog";
+import { fetchAndPersistSalesCategories, PHARMACY_ADMIN_CATEGORIES_SYNCED } from "../../utils/backendCategoriesSync";
 import { normalizeSaleOptions, productHasSaleOptions } from "../../utils/productSaleOptions";
-import { notifyStoreBalanceChanged } from "../../utils/storeBalanceSync";
+import { debitStoreBalanceForPurchase, notifyStoreBalanceChanged } from "../../utils/storeBalanceSync";
+import { compressImageFileToDataUrl } from "../../utils/imageCompress";
 import { isAdmin, isSuperCashier, purchaserDisplayName } from "../../utils/userRoles";
+
+const inventoryDialogPaperSx = { borderRadius: 3, overflow: "hidden" };
+const inventoryDialogTitleSx = {
+  position: "relative",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  minHeight: 48,
+  px: { xs: 1, sm: 2 },
+  pt: { xs: 2, md: 2.5 },
+  pb: 1.25,
+  borderBottom: "1px solid",
+  borderColor: "divider",
+};
+const inventoryDialogCloseBtnSx = {
+  position: "absolute",
+  insetInlineStart: 8,
+  top: "50%",
+  transform: "translateY(-50%)",
+};
 
 const float = keyframes`
   0%, 100% { transform: translateY(0px); }
@@ -79,6 +102,8 @@ function getStoredProducts() {
 
 export default function InventoryPage({ mode, onToggleMode }) {
   const theme = useTheme();
+  const newItemImageInputRef = useRef(null);
+  const editItemImageInputRef = useRef(null);
   const unifiedToggleSx = useMemo(
     () => ({
       direction: "ltr",
@@ -119,6 +144,19 @@ export default function InventoryPage({ mode, onToggleMode }) {
   }, []);
   const superCashier = isSuperCashier(currentUser);
   const [items, setItems] = useState(getStoredProducts);
+  const [categoriesSyncTick, setCategoriesSyncTick] = useState(0);
+  useEffect(() => {
+    const bump = () => setCategoriesSyncTick((t) => t + 1);
+    window.addEventListener(PHARMACY_ADMIN_CATEGORIES_SYNCED, bump);
+    let cancelled = false;
+    fetchAndPersistSalesCategories().finally(() => {
+      if (!cancelled) bump();
+    });
+    return () => {
+      cancelled = true;
+      window.removeEventListener(PHARMACY_ADMIN_CATEGORIES_SYNCED, bump);
+    };
+  }, []);
   const [openAddDialog, setOpenAddDialog] = useState(false);
   const [page, setPage] = useState(1);
   const [newItem, setNewItem] = useState({
@@ -134,6 +172,9 @@ export default function InventoryPage({ mode, onToggleMode }) {
     barcode: "",
     expiryDate: "",
     saleOptionRows: [],
+    usageHowTo: "",
+    usageFrequency: "",
+    usageTips: "",
   });
   const [purchaseError, setPurchaseError] = useState("");
   const [purchaseSuccess, setPurchaseSuccess] = useState("");
@@ -158,9 +199,12 @@ export default function InventoryPage({ mode, onToggleMode }) {
     barcode: "",
     expiryDate: "",
     saleOptionRows: [],
+    usageHowTo: "",
+    usageFrequency: "",
+    usageTips: "",
   });
   const categoryOptions = useMemo(() => {
-    const names = new Set(DEMO_CATEGORY_NAMES);
+    const names = new Set();
     try {
       const raw = JSON.parse(localStorage.getItem(CATEGORIES_KEY));
       if (Array.isArray(raw) && raw.length) {
@@ -174,7 +218,7 @@ export default function InventoryPage({ mode, onToggleMode }) {
       if (c) names.add(c);
     });
     return [...names].filter(Boolean).sort((a, b) => a.localeCompare(b, "ar"));
-  }, [items]);
+  }, [items, categoriesSyncTick]);
   const normalizeOneDecimal = (value) => {
     const cleaned = String(value ?? "").replace(/[^\d.]/g, "");
     const num = Number(cleaned);
@@ -358,6 +402,9 @@ export default function InventoryPage({ mode, onToggleMode }) {
                 barcode: "",
                 expiryDate: "",
                 saleOptionRows: [],
+                usageHowTo: "",
+                usageFrequency: "",
+                usageTips: "",
               });
               setOpenAddDialog(true);
             }}
@@ -517,6 +564,9 @@ export default function InventoryPage({ mode, onToggleMode }) {
                           barcode: String(item.barcode ?? ""),
                           expiryDate: String(item.expiryDate ?? "").slice(0, 10),
                           saleOptionRows: saleOptionRowsFromProduct(item),
+                          usageHowTo: String(item.usageHowTo ?? ""),
+                          usageFrequency: String(item.usageFrequency ?? ""),
+                          usageTips: String(item.usageTips ?? ""),
                         });
                       }}
                       sx={{ cursor: "pointer" }}
@@ -635,132 +685,223 @@ export default function InventoryPage({ mode, onToggleMode }) {
           </Stack>
         </Card>
 
-        <Dialog open={openAddDialog} onClose={() => setOpenAddDialog(false)} fullWidth maxWidth="sm">
-          <DialogTitle sx={{ textAlign: "right", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <Button size="small" color="inherit" onClick={() => setOpenAddDialog(false)} startIcon={<Close />} sx={{ textTransform: "none" }}>
-              إغلاق
-            </Button>
-            إضافة صنف جديد
+        <Dialog
+          open={openAddDialog}
+          onClose={() => setOpenAddDialog(false)}
+          fullWidth
+          maxWidth="md"
+          slotProps={{ paper: { sx: inventoryDialogPaperSx } }}
+        >
+          <DialogTitle sx={inventoryDialogTitleSx}>
+            <IconButton aria-label="إغلاق" size="small" onClick={() => setOpenAddDialog(false)} sx={inventoryDialogCloseBtnSx}>
+              <Close />
+            </IconButton>
+            <Typography component="div" variant="h6" fontWeight={800} sx={{ textAlign: "center", width: "100%", px: { xs: 4, sm: 8 } }}>
+              إضافة صنف جديد
+            </Typography>
           </DialogTitle>
-          <DialogContent sx={{ textAlign: "right" }}>
-            <Stack sx={{ gap: 1.2, mt: 1 }}>
-              {purchaseError ? <Alert severity="error">{purchaseError}</Alert> : null}
-              {purchaseSuccess ? <Alert severity="success">{purchaseSuccess}</Alert> : null}
-              <TextField
-                label="اسم الصنف (مثال: باراسيتامول)"
-                value={newItem.name}
-                onChange={(e) => setNewItem((p) => ({ ...p, name: e.target.value }))}
-                fullWidth
-                inputProps={{ style: { textAlign: "right" } }}
-              />
-              <TextField
-                label="الفرع / التركيز (اختياري — مثال: 500 مجم، 1000 مجم)"
-                value={newItem.variantLabel}
-                onChange={(e) => setNewItem((p) => ({ ...p, variantLabel: e.target.value }))}
-                fullWidth
-                placeholder="اتركه فارغًا إن لم يكن هناك أكثر من نوع لنفس الاسم"
-                inputProps={{ style: { textAlign: "right" } }}
-              />
-              <TextField
-                label="الباركود (اختياري)"
-                value={newItem.barcode}
-                onChange={(e) => setNewItem((p) => ({ ...p, barcode: e.target.value }))}
-                fullWidth
-                placeholder="للبحث السريع في الكاشير"
-                inputProps={{ style: { textAlign: "right" } }}
-              />
-              <TextField
-                label="تاريخ انتهاء الصلاحية (اختياري)"
-                type="date"
-                value={newItem.expiryDate}
-                onChange={(e) => setNewItem((p) => ({ ...p, expiryDate: e.target.value }))}
-                fullWidth
-                InputLabelProps={{ shrink: true }}
-              />
-              <Select
-                fullWidth
-                value={newItem.category}
-                onChange={(e) => setNewItem((p) => ({ ...p, category: e.target.value }))}
-              >
-                {categoryOptions.map((n) => (
-                  <MenuItem key={n} value={n}>
-                    {n}
-                  </MenuItem>
-                ))}
-              </Select>
-              <Select
-                fullWidth
-                value={newItem.saleType}
-                onChange={(e) => setNewItem((p) => ({ ...p, saleType: e.target.value }))}
-              >
-                <MenuItem value="strip">شريط كامل</MenuItem>
-                <MenuItem value="pill">بالحبة</MenuItem>
-                <MenuItem value="bottle">قزازة</MenuItem>
-                <MenuItem value="box">علبة</MenuItem>
-                <MenuItem value="sachet">كيس</MenuItem>
-              </Select>
-              <TextField
-                label="كمية المشتراة (تُضاف للمخزون وتُحسب تكلفتها من الصندوق)"
-                type="text"
-                inputMode="decimal"
-                value={newItem.qty}
-                onChange={(e) => setNewItem((p) => ({ ...p, qty: normalizeOneDecimal(e.target.value) }))}
-                fullWidth
-                inputProps={{ style: { textAlign: "right" } }}
-              />
-              <TextField
-                label="بونص — كمية مجانية للمخزون (بدون تكلفة)"
-                type="text"
-                inputMode="decimal"
-                value={newItem.bonusQty}
-                onChange={(e) => setNewItem((p) => ({ ...p, bonusQty: normalizeOneDecimal(e.target.value) }))}
-                fullWidth
-                helperText="تُضاف للمخزون دون خصم من الصندوق"
-                inputProps={{ style: { textAlign: "right" } }}
-              />
-              <TextField
-                label="الحد الأدنى للتنبيه"
-                type="text"
-                inputMode="decimal"
-                value={newItem.min}
-                onChange={(e) => setNewItem((p) => ({ ...p, min: normalizeOneDecimal(e.target.value) }))}
-                fullWidth
-                inputProps={{ style: { textAlign: "right" } }}
-              />
-              <TextField
-                label="سعر البيع (شيكل)"
-                type="text"
-                inputMode="decimal"
-                value={newItem.price}
-                onChange={(e) => setNewItem((p) => ({ ...p, price: normalizeOneDecimal(e.target.value) }))}
-                fullWidth
-                inputProps={{ style: { textAlign: "right" } }}
-              />
-              <TextField
-                label="رابط صورة الصنف (اختياري)"
-                value={newItem.imageUrl}
-                onChange={(e) => setNewItem((p) => ({ ...p, imageUrl: e.target.value }))}
-                fullWidth
-                placeholder="https://..."
-                helperText="أو استخدم «رفع من الجهاز» بالأسفل"
-                inputProps={{ style: { textAlign: "right" } }}
-              />
-              <Button variant="outlined" component="label" sx={{ textTransform: "none", alignSelf: "flex-start" }}>
-                رفع صورة من الجهاز
+          <DialogContent dividers sx={{ textAlign: "right", px: { xs: 2, sm: 2.5 }, py: 2 }}>
+            <Grid container spacing={1.5}>
+              {purchaseError ? (
+                <Grid size={{ xs: 12 }}>
+                  <Alert severity="error">{purchaseError}</Alert>
+                </Grid>
+              ) : null}
+              {purchaseSuccess ? (
+                <Grid size={{ xs: 12 }}>
+                  <Alert severity="success">{purchaseSuccess}</Alert>
+                </Grid>
+              ) : null}
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <TextField
+                  label="اسم الصنف (مثال: باراسيتامول)"
+                  value={newItem.name}
+                  onChange={(e) => setNewItem((p) => ({ ...p, name: e.target.value }))}
+                  fullWidth
+                  size="small"
+                  inputProps={{ style: { textAlign: "right" } }}
+                />
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <TextField
+                  label="الباركود (اختياري)"
+                  value={newItem.barcode}
+                  onChange={(e) => setNewItem((p) => ({ ...p, barcode: e.target.value }))}
+                  fullWidth
+                  size="small"
+                  placeholder="للبحث السريع في الكاشير"
+                  inputProps={{ style: { textAlign: "right" } }}
+                />
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <TextField
+                  label="تاريخ انتهاء الصلاحية (اختياري)"
+                  type="date"
+                  value={newItem.expiryDate}
+                  onChange={(e) => setNewItem((p) => ({ ...p, expiryDate: e.target.value }))}
+                  fullWidth
+                  size="small"
+                  InputLabelProps={{ shrink: true }}
+                />
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <Select
+                  fullWidth
+                  size="small"
+                  displayEmpty
+                  value={newItem.category}
+                  onChange={(e) => setNewItem((p) => ({ ...p, category: e.target.value }))}
+                >
+                  {categoryOptions.map((n) => (
+                    <MenuItem key={n} value={n}>
+                      {n}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <Select
+                  fullWidth
+                  size="small"
+                  value={newItem.saleType}
+                  onChange={(e) => setNewItem((p) => ({ ...p, saleType: e.target.value }))}
+                >
+                  <MenuItem value="strip">شريط كامل</MenuItem>
+                  <MenuItem value="pill">بالحبة</MenuItem>
+                  <MenuItem value="bottle">قزازة</MenuItem>
+                  <MenuItem value="box">علبة</MenuItem>
+                  <MenuItem value="sachet">كيس</MenuItem>
+                </Select>
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <TextField
+                  label="كمية المشتراة (تُضاف للمخزون وتُحسب تكلفتها من الصندوق)"
+                  type="text"
+                  inputMode="decimal"
+                  value={newItem.qty}
+                  onChange={(e) => setNewItem((p) => ({ ...p, qty: normalizeOneDecimal(e.target.value) }))}
+                  fullWidth
+                  size="small"
+                  inputProps={{ style: { textAlign: "right" } }}
+                />
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <TextField
+                  label="بونص — كمية مجانية للمخزون (بدون تكلفة)"
+                  type="text"
+                  inputMode="decimal"
+                  value={newItem.bonusQty}
+                  onChange={(e) => setNewItem((p) => ({ ...p, bonusQty: normalizeOneDecimal(e.target.value) }))}
+                  fullWidth
+                  size="small"
+                  helperText="تُضاف للمخزون دون خصم من الصندوق"
+                  inputProps={{ style: { textAlign: "right" } }}
+                />
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <TextField
+                  label="الحد الأدنى للتنبيه"
+                  type="text"
+                  inputMode="decimal"
+                  value={newItem.min}
+                  onChange={(e) => setNewItem((p) => ({ ...p, min: normalizeOneDecimal(e.target.value) }))}
+                  fullWidth
+                  size="small"
+                  inputProps={{ style: { textAlign: "right" } }}
+                />
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <TextField
+                  label="سعر البيع (شيكل)"
+                  type="text"
+                  inputMode="decimal"
+                  value={newItem.price}
+                  onChange={(e) => setNewItem((p) => ({ ...p, price: normalizeOneDecimal(e.target.value) }))}
+                  fullWidth
+                  size="small"
+                  inputProps={{ style: { textAlign: "right" } }}
+                />
+              </Grid>
+              <Grid size={{ xs: 12 }}>
                 <input
+                  ref={newItemImageInputRef}
                   type="file"
-                  hidden
                   accept="image/*"
-                  onChange={(e) => {
+                  style={{ display: "none" }}
+                  onChange={async (e) => {
                     const f = e.target.files?.[0];
-                    if (!f?.type?.startsWith("image/")) return;
-                    const r = new FileReader();
-                    r.onload = () => setNewItem((p) => ({ ...p, imageUrl: String(r.result || "") }));
-                    r.readAsDataURL(f);
                     e.target.value = "";
+                    if (!f?.type?.startsWith("image/")) return;
+                    try {
+                      const dataUrl = await compressImageFileToDataUrl(f);
+                      setNewItem((p) => ({ ...p, imageUrl: dataUrl }));
+                    } catch {
+                      const r = new FileReader();
+                      r.onload = () => setNewItem((p) => ({ ...p, imageUrl: String(r.result || "") }));
+                      r.readAsDataURL(f);
+                    }
                   }}
                 />
-              </Button>
+                <Button
+                  type="button"
+                  variant="outlined"
+                  sx={{ textTransform: "none" }}
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    newItemImageInputRef.current?.click();
+                  }}
+                >
+                  رفع صورة من الجهاز
+                </Button>
+                {newItem.imageUrl && String(newItem.imageUrl).startsWith("data:") ? (
+                  <Typography variant="caption" color="success.main" sx={{ display: "block", mt: 0.75 }}>
+                    تم اختيار صورة من الجهاز
+                  </Typography>
+                ) : null}
+              </Grid>
+              <Grid size={{ xs: 12 }}>
+                <Card variant="outlined" sx={{ p: 1.5, borderRadius: 2.5, borderColor: alpha(theme.palette.info.main, 0.35) }}>
+                  <Typography variant="subtitle2" fontWeight={900} color="info.dark" sx={{ mb: 0.5 }}>
+                    معلومات توجيهية (تظهر للكاشير قبل البيع)
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1.25, lineHeight: 1.5 }}>
+                    تعليمات الاستعمال والجرعة — للإرشاد فقط؛ المريض يتبع وصفة الطبيب.
+                  </Typography>
+                  <Stack spacing={1.25}>
+                    <TextField
+                      label="كيفية الاستعمال"
+                      value={newItem.usageHowTo}
+                      onChange={(e) => setNewItem((p) => ({ ...p, usageHowTo: e.target.value }))}
+                      fullWidth
+                      size="small"
+                      multiline
+                      minRows={2}
+                      inputProps={{ style: { textAlign: "right" } }}
+                    />
+                    <TextField
+                      label="عدد المرات باليوم / التوقيت (مثال: 3 مرات بعد الأكل)"
+                      value={newItem.usageFrequency}
+                      onChange={(e) => setNewItem((p) => ({ ...p, usageFrequency: e.target.value }))}
+                      fullWidth
+                      size="small"
+                      multiline
+                      minRows={2}
+                      inputProps={{ style: { textAlign: "right" } }}
+                    />
+                    <TextField
+                      label="نصائح، تحذيرات، أو تخزين"
+                      value={newItem.usageTips}
+                      onChange={(e) => setNewItem((p) => ({ ...p, usageTips: e.target.value }))}
+                      fullWidth
+                      size="small"
+                      multiline
+                      minRows={2}
+                      inputProps={{ style: { textAlign: "right" } }}
+                    />
+                  </Stack>
+                </Card>
+              </Grid>
+              <Grid size={{ xs: 12 }}>
               <Card variant="outlined" sx={{ p: 1.5, borderRadius: 2, bgcolor: alpha(theme.palette.primary.main, 0.04) }}>
                 <Typography variant="subtitle2" fontWeight={800}>
                   خيارات البيع (اختياري)
@@ -840,16 +981,20 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   إضافة خيار
                 </Button>
               </Card>
+              </Grid>
+              <Grid size={{ xs: 12 }}>
               <Card variant="outlined" sx={{ p: 1.2, borderRadius: 2 }}>
                 {superCashier ? (
                   <Typography variant="body2" color="text.secondary">
-                    يُسجَّل التوريد باسمك. لا يظهر رصيد الصندوق العام على شاشتك؛ في حال رفض النظام العملية يعني الحاجة لتغذية الصندوق من
-                    المدير.
+                    يُسجَّل التوريد باسمك. يُسمح بإتمام الشراء حتى مع عجز مؤقت في الخزنة ليظهر للمدير ويُغذّي الصندوق.
                   </Typography>
                 ) : (
                   <>
                     <Typography variant="body2" color="text.secondary">
-                      رصيد الخزنة الحالي: {treasuryBalance.toFixed(2)} شيكل
+                      رصيد الخزنة الحالي:{" "}
+                      <Box component="span" sx={negativeAmountTextSx(treasuryBalance)}>
+                        {treasuryBalance.toFixed(2)} شيكل
+                      </Box>
                     </Typography>
                     <Typography variant="body2" fontWeight={800} color={purchaseCost > 0 ? "warning.main" : "text.secondary"} sx={{ mt: 0.4 }}>
                       {purchaseCost > 0
@@ -865,9 +1010,10 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   </Typography>
                 ) : null}
               </Card>
-            </Stack>
+              </Grid>
+            </Grid>
           </DialogContent>
-          <DialogActions sx={{ px: 3, pb: 2 }}>
+          <DialogActions sx={{ px: 3, py: 2, gap: 1, flexWrap: "wrap", bgcolor: alpha(theme.palette.action.hover, 0.06) }}>
             <Button onClick={() => setOpenAddDialog(false)} sx={{ textTransform: "none" }}>
               إلغاء
             </Button>
@@ -892,17 +1038,12 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   setPurchaseError("البونص يُضاف مع كمية مشتراة؛ أدخل كمية المشتراة الأساسية");
                   return;
                 }
-                const currentTreasury = treasuryBalance;
                 if (purchaseCost <= 0) {
                   setPurchaseError("قيمة الشراء غير صحيحة");
                   return;
                 }
-                if (currentTreasury < purchaseCost) {
-                  setPurchaseError(
-                    superCashier
-                      ? "لا يمكن إتمام العملية — راجع المدير لتغذية الصندوق."
-                      : "لا يكفي المال في الخزنة لإتمام الشراء",
-                  );
+                if (!superCashier && treasuryBalance < purchaseCost) {
+                  setPurchaseError("لا يكفي المال في الخزنة لإتمام الشراء");
                   return;
                 }
                 const buyerLabel = purchaserDisplayName(currentUser);
@@ -925,6 +1066,11 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   ...(saleOpts.length ? { saleOptions: saleOpts } : {}),
                   ...(String(newItem.barcode || "").trim() ? { barcode: String(newItem.barcode).trim() } : {}),
                   ...(String(newItem.expiryDate || "").trim() ? { expiryDate: String(newItem.expiryDate).trim() } : {}),
+                  ...(String(newItem.usageHowTo || "").trim() ? { usageHowTo: String(newItem.usageHowTo).trim() } : {}),
+                  ...(String(newItem.usageFrequency || "").trim()
+                    ? { usageFrequency: String(newItem.usageFrequency).trim() }
+                    : {}),
+                  ...(String(newItem.usageTips || "").trim() ? { usageTips: String(newItem.usageTips).trim() } : {}),
                 };
                 const next = [newRow, ...items];
                 persistProducts(next);
@@ -941,18 +1087,11 @@ export default function InventoryPage({ mode, onToggleMode }) {
                 } catch {
                   // ignore malformed value
                 }
-                const remainingAfterCash = Math.max(0, purchaseCost - balance.cash);
-                const nextCash = Math.max(0, balance.cash - purchaseCost);
-                const nextApp = Math.max(0, balance.app - remainingAfterCash);
-                const nextBalance = {
-                  ...balance,
-                  total: Math.max(0, balance.total - purchaseCost),
-                  cash: nextCash,
-                  app: nextApp,
-                  lastOperation: "purchase",
-                  updatedAt: new Date().toISOString(),
-                };
+                const { nextBalance, paidFromCash, paidFromApp } = debitStoreBalanceForPurchase(balance, purchaseCost, {
+                  allowNegativeTreasury: superCashier,
+                });
                 localStorage.setItem(STORE_BALANCE_KEY, JSON.stringify(nextBalance));
+                notifyStoreBalanceChanged();
                 const currentUser = (() => {
                   try {
                     return JSON.parse(localStorage.getItem("user")) || null;
@@ -967,9 +1106,14 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   purchasedByRole: currentUser?.role || "admin",
                   supplier: "مورد عام",
                   status: "مكتمل",
-                  paymentMethod: "cash",
+                  paymentMethod: paidFromApp > 0 ? "mixed" : "cash",
                   purchasedAt: new Date().toISOString(),
                   total: Number(purchaseCost.toFixed(2)),
+                  treasuryDebit: {
+                    total: Number(purchaseCost.toFixed(2)),
+                    cash: paidFromCash,
+                    app: paidFromApp,
+                  },
                   bonusQty: bonusStockQty > 0 ? bonusStockQty : undefined,
                   items: [
                     {
@@ -1036,6 +1180,9 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   barcode: "",
                   expiryDate: "",
                   saleOptionRows: [],
+                  usageHowTo: "",
+                  usageFrequency: "",
+                  usageTips: "",
                 });
                 setPurchaseSuccess(
                   superCashier
@@ -1063,93 +1210,125 @@ export default function InventoryPage({ mode, onToggleMode }) {
             setRestockSuccess("");
           }}
           fullWidth
-          maxWidth="sm"
+          maxWidth="md"
+          slotProps={{ paper: { sx: inventoryDialogPaperSx } }}
         >
-          <DialogTitle sx={{ textAlign: "right", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <Button
+          <DialogTitle sx={inventoryDialogTitleSx}>
+            <IconButton
+              aria-label="إغلاق"
               size="small"
-              color="inherit"
               onClick={() => {
                 setRestockTarget(null);
                 setRestockError("");
                 setRestockSuccess("");
               }}
-              startIcon={<Close />}
-              sx={{ textTransform: "none" }}
+              sx={inventoryDialogCloseBtnSx}
             >
-              إغلاق
-            </Button>
-            تزويد مخزون — صنف موجود
+              <Close />
+            </IconButton>
+            <Typography component="div" variant="h6" fontWeight={800} sx={{ textAlign: "center", width: "100%", px: { xs: 4, sm: 8 } }}>
+              تزويد مخزون — صنف موجود
+            </Typography>
           </DialogTitle>
-          <DialogContent sx={{ textAlign: "right" }}>
-            <Stack sx={{ gap: 1.2, mt: 1 }}>
-              {restockError ? <Alert severity="error">{restockError}</Alert> : null}
-              {restockSuccess ? <Alert severity="success">{restockSuccess}</Alert> : null}
-              <Typography variant="body2" color="text.secondary">
-                الصنف: <b>{restockTarget ? productDisplayName(restockTarget) : ""}</b> — الكمية الحالية:{" "}
-                <b>{Number(restockTarget?.qty || 0).toFixed(1)}</b>
-              </Typography>
-              <TextField
-                label="كمية المشتراة (تُخصم من الخزنة حسب السعر)"
-                type="text"
-                inputMode="decimal"
-                value={restockForm.paidQty}
-                onChange={(e) => setRestockForm((p) => ({ ...p, paidQty: normalizeOneDecimal(e.target.value) }))}
-                fullWidth
-                inputProps={{ style: { textAlign: "right" } }}
-              />
-              <TextField
-                label="بونص (وحدات مجانية، بدون خصم)"
-                type="text"
-                inputMode="decimal"
-                value={restockForm.bonusQty}
-                onChange={(e) => setRestockForm((p) => ({ ...p, bonusQty: normalizeOneDecimal(e.target.value) }))}
-                fullWidth
-                inputProps={{ style: { textAlign: "right" } }}
-              />
-              <TextField
-                label="سعر شراء الوحدة (شيكل)"
-                type="text"
-                inputMode="decimal"
-                value={restockForm.unitPrice}
-                onChange={(e) => setRestockForm((p) => ({ ...p, unitPrice: normalizeOneDecimal(e.target.value) }))}
-                fullWidth
-                helperText="يُستخدم لحساب ما يُخصم من الخزنة فقط؛ سعر البيع يبقى كما في تعديل الصنف"
-                inputProps={{ style: { textAlign: "right" } }}
-              />
-              <Card variant="outlined" sx={{ p: 1.2, borderRadius: 2 }}>
-                {superCashier ? (
-                  <Typography variant="body2" color="text.secondary">
-                    يُسجَّل التوريد باسمك. لا يظهر رصيد الصندوق العام على شاشتك؛ في حال رفض النظام العملية يعني الحاجة لتغذية الصندوق من
-                    المدير.
+          <DialogContent dividers sx={{ textAlign: "right", px: { xs: 2, sm: 2.5 }, py: 1.5 }}>
+            <Grid container spacing={1.25}>
+              {restockError ? (
+                <Grid size={12}>
+                  <Alert severity="error" sx={{ py: 0.25 }}>
+                    {restockError}
+                  </Alert>
+                </Grid>
+              ) : null}
+              {restockSuccess ? (
+                <Grid size={12}>
+                  <Alert severity="success" sx={{ py: 0.25 }}>
+                    {restockSuccess}
+                  </Alert>
+                </Grid>
+              ) : null}
+              <Grid size={12}>
+                <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.45 }}>
+                  <b>{restockTarget ? productDisplayName(restockTarget) : ""}</b>
+                  <Typography component="span" variant="caption" color="text.secondary" sx={{ mr: 0.75 }}>
+                    — مخزون حالي {Number(restockTarget?.qty || 0).toFixed(1)}
                   </Typography>
-                ) : (
-                  <>
-                    <Typography variant="body2" color="text.secondary">
-                      رصيد الخزنة الحالي: {treasuryBalance.toFixed(2)} شيكل
+                </Typography>
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <TextField
+                  label="كمية المشتراة"
+                  type="text"
+                  inputMode="decimal"
+                  size="small"
+                  fullWidth
+                  value={restockForm.paidQty}
+                  onChange={(e) => setRestockForm((p) => ({ ...p, paidQty: normalizeOneDecimal(e.target.value) }))}
+                  helperText="تُخصم الخزنة حسب السعر"
+                  inputProps={{ style: { textAlign: "right" } }}
+                />
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <TextField
+                  label="بونص (مجاني)"
+                  type="text"
+                  inputMode="decimal"
+                  size="small"
+                  fullWidth
+                  value={restockForm.bonusQty}
+                  onChange={(e) => setRestockForm((p) => ({ ...p, bonusQty: normalizeOneDecimal(e.target.value) }))}
+                  helperText="بدون خصم من الخزنة"
+                  inputProps={{ style: { textAlign: "right" } }}
+                />
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <TextField
+                  label="سعر شراء الوحدة (شيكل)"
+                  type="text"
+                  inputMode="decimal"
+                  size="small"
+                  fullWidth
+                  value={restockForm.unitPrice}
+                  onChange={(e) => setRestockForm((p) => ({ ...p, unitPrice: normalizeOneDecimal(e.target.value) }))}
+                  helperText="للخصم من الخزنة فقط — سعر البيع من تعديل الصنف"
+                  inputProps={{ style: { textAlign: "right" } }}
+                />
+              </Grid>
+              <Grid size={12}>
+                <Card variant="outlined" sx={{ p: 1, borderRadius: 2 }}>
+                  {superCashier ? (
+                    <Typography variant="caption" color="text.secondary" display="block">
+                      يُسجَّل التوريد باسمك. يُسمح بعجز مؤقت في الخزنة ليظهر للمدير.
                     </Typography>
-                    <Typography
-                      variant="body2"
-                      fontWeight={800}
-                      color={restockPurchaseCost > 0 ? "warning.main" : "text.secondary"}
-                      sx={{ mt: 0.4 }}
-                    >
-                      {restockPurchaseCost > 0
-                        ? `هذا التزويد سيخصم من الخزنة: ${restockPurchaseCost.toFixed(2)} شيكل`
-                        : "أدخل كمية مشتراة وسعر الشراء لحساب الخصم"}
+                  ) : (
+                    <Stack spacing={0.35}>
+                      <Typography variant="caption" color="text.secondary">
+                        رصيد الخزنة:{" "}
+                        <Box component="span" sx={negativeAmountTextSx(treasuryBalance)}>
+                          {treasuryBalance.toFixed(2)} شيكل
+                        </Box>
+                      </Typography>
+                      <Typography
+                        variant="caption"
+                        fontWeight={800}
+                        color={restockPurchaseCost > 0 ? "warning.main" : "text.secondary"}
+                      >
+                        {restockPurchaseCost > 0
+                          ? `خصم متوقع: ${restockPurchaseCost.toFixed(2)} شيكل`
+                          : "أدخل كمية وسعر الشراء"}
+                      </Typography>
+                    </Stack>
+                  )}
+                  {restockStockTotal > 0 ? (
+                    <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+                      +{restockStockTotal.toFixed(1)} للمخزون (مشتراة {restockPaidQty.toFixed(1)}
+                      {restockBonusQty > 0 ? ` + بونص ${restockBonusQty.toFixed(1)}` : ""})
                     </Typography>
-                  </>
-                )}
-                {restockStockTotal > 0 ? (
-                  <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.75 }}>
-                    إجمالي ما يُضاف للمخزون: {restockStockTotal.toFixed(1)} (مشتراة {restockPaidQty.toFixed(1)}
-                    {restockBonusQty > 0 ? ` + بونص ${restockBonusQty.toFixed(1)}` : ""})
-                  </Typography>
-                ) : null}
-              </Card>
-            </Stack>
+                  ) : null}
+                </Card>
+              </Grid>
+            </Grid>
           </DialogContent>
-          <DialogActions sx={{ px: 3, pb: 2 }}>
+          <DialogActions sx={{ px: 3, py: 2, gap: 1, flexWrap: "wrap", bgcolor: alpha(theme.palette.action.hover, 0.06) }}>
             <Button
               onClick={() => {
                 setRestockTarget(null);
@@ -1178,13 +1357,8 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   setRestockError("قيمة الشراء غير صحيحة");
                   return;
                 }
-                const currentTreasury = treasuryBalance;
-                if (currentTreasury < restockPurchaseCost) {
-                  setRestockError(
-                    superCashier
-                      ? "لا يمكن إتمام العملية — راجع المدير لتغذية الصندوق."
-                      : "لا يكفي المال في الخزنة لإتمام الشراء",
-                  );
+                if (!superCashier && treasuryBalance < restockPurchaseCost) {
+                  setRestockError("لا يكفي المال في الخزنة لإتمام الشراء");
                   return;
                 }
                 const buyerLabel = purchaserDisplayName(currentUser);
@@ -1207,18 +1381,11 @@ export default function InventoryPage({ mode, onToggleMode }) {
                 } catch {
                   // ignore malformed value
                 }
-                const remainingAfterCash = Math.max(0, restockPurchaseCost - balance.cash);
-                const nextCash = Math.max(0, balance.cash - restockPurchaseCost);
-                const nextApp = Math.max(0, balance.app - remainingAfterCash);
-                const nextBalance = {
-                  ...balance,
-                  total: Math.max(0, balance.total - restockPurchaseCost),
-                  cash: nextCash,
-                  app: nextApp,
-                  lastOperation: "purchase",
-                  updatedAt: new Date().toISOString(),
-                };
+                const { nextBalance, paidFromCash, paidFromApp } = debitStoreBalanceForPurchase(balance, restockPurchaseCost, {
+                  allowNegativeTreasury: superCashier,
+                });
                 localStorage.setItem(STORE_BALANCE_KEY, JSON.stringify(nextBalance));
+                notifyStoreBalanceChanged();
                 const purchaseInvoice = {
                   id: `PO-${Date.now()}`,
                   purchasedBy: buyerLabel,
@@ -1226,9 +1393,14 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   purchasedByRole: currentUser?.role || "admin",
                   supplier: "مورد عام",
                   status: "مكتمل",
-                  paymentMethod: "cash",
+                  paymentMethod: paidFromApp > 0 ? "mixed" : "cash",
                   purchasedAt: new Date().toISOString(),
                   total: Number(restockPurchaseCost.toFixed(2)),
+                  treasuryDebit: {
+                    total: Number(restockPurchaseCost.toFixed(2)),
+                    cash: paidFromCash,
+                    app: paidFromApp,
+                  },
                   bonusQty: restockBonusQty > 0 ? restockBonusQty : undefined,
                   items: [
                     {
@@ -1302,15 +1474,23 @@ export default function InventoryPage({ mode, onToggleMode }) {
           </DialogActions>
         </Dialog>
 
-        <Dialog open={Boolean(deleteDialogProduct)} onClose={() => setDeleteDialogProduct(null)} fullWidth maxWidth="sm">
-          <DialogTitle sx={{ textAlign: "right", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <Button size="small" color="inherit" onClick={() => setDeleteDialogProduct(null)} startIcon={<Close />} sx={{ textTransform: "none" }}>
-              إغلاق
-            </Button>
-            حذف صنف من المخزون
+        <Dialog
+          open={Boolean(deleteDialogProduct)}
+          onClose={() => setDeleteDialogProduct(null)}
+          fullWidth
+          maxWidth="sm"
+          slotProps={{ paper: { sx: inventoryDialogPaperSx } }}
+        >
+          <DialogTitle sx={inventoryDialogTitleSx}>
+            <IconButton aria-label="إغلاق" size="small" onClick={() => setDeleteDialogProduct(null)} sx={inventoryDialogCloseBtnSx}>
+              <Close />
+            </IconButton>
+            <Typography component="div" variant="h6" fontWeight={800} sx={{ textAlign: "center", width: "100%", px: { xs: 4, sm: 8 } }}>
+              حذف صنف من المخزون
+            </Typography>
           </DialogTitle>
-          <DialogContent sx={{ textAlign: "right" }}>
-            <Stack sx={{ gap: 1.5, mt: 1 }}>
+          <DialogContent dividers sx={{ textAlign: "right", px: { xs: 2, sm: 3 }, py: 2 }}>
+            <Stack sx={{ gap: 1.5 }}>
               <Typography variant="body1">
                 هل تريد حذف{" "}
                 <strong>{deleteDialogProduct ? productDisplayName(deleteDialogProduct) : ""}</strong>؟
@@ -1330,7 +1510,16 @@ export default function InventoryPage({ mode, onToggleMode }) {
               </Typography>
             </Stack>
           </DialogContent>
-          <DialogActions sx={{ px: 3, pb: 2, flexWrap: "wrap", gap: 1, justifyContent: "flex-start" }}>
+          <DialogActions
+            sx={{
+              px: 3,
+              py: 2,
+              flexWrap: "wrap",
+              gap: 1,
+              justifyContent: "flex-start",
+              bgcolor: alpha(theme.palette.action.hover, 0.06),
+            }}
+          >
             <Button onClick={() => setDeleteDialogProduct(null)} sx={{ textTransform: "none" }}>
               إلغاء
             </Button>
@@ -1343,116 +1532,197 @@ export default function InventoryPage({ mode, onToggleMode }) {
           </DialogActions>
         </Dialog>
 
-        <Dialog open={Boolean(editTarget)} onClose={() => setEditTarget(null)} fullWidth maxWidth="sm">
-          <DialogTitle sx={{ textAlign: "right", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <Button size="small" color="inherit" onClick={() => setEditTarget(null)} startIcon={<Close />} sx={{ textTransform: "none" }}>
-              إغلاق
-            </Button>
-            تعديل الصنف
+        <Dialog
+          open={Boolean(editTarget)}
+          onClose={() => setEditTarget(null)}
+          fullWidth
+          maxWidth="md"
+          slotProps={{ paper: { sx: inventoryDialogPaperSx } }}
+        >
+          <DialogTitle sx={inventoryDialogTitleSx}>
+            <IconButton aria-label="إغلاق" size="small" onClick={() => setEditTarget(null)} sx={inventoryDialogCloseBtnSx}>
+              <Close />
+            </IconButton>
+            <Typography component="div" variant="h6" fontWeight={800} sx={{ textAlign: "center", width: "100%", px: { xs: 4, sm: 8 } }}>
+              تعديل الصنف
+            </Typography>
           </DialogTitle>
-          <DialogContent sx={{ textAlign: "right" }}>
-            <Stack sx={{ gap: 1.2, mt: 1 }}>
-              <TextField
-                label="اسم الصنف"
-                value={editForm.name}
-                onChange={(e) => setEditForm((p) => ({ ...p, name: e.target.value }))}
-                fullWidth
-                inputProps={{ style: { textAlign: "right" } }}
-              />
-              <TextField
-                label="الفرع / التركيز (اختياري)"
-                value={editForm.variantLabel}
-                onChange={(e) => setEditForm((p) => ({ ...p, variantLabel: e.target.value }))}
-                fullWidth
-                placeholder="مثال: 500 مجم"
-                inputProps={{ style: { textAlign: "right" } }}
-              />
-              <TextField
-                label="الباركود"
-                value={editForm.barcode}
-                onChange={(e) => setEditForm((p) => ({ ...p, barcode: e.target.value }))}
-                fullWidth
-                inputProps={{ style: { textAlign: "right" } }}
-              />
-              <TextField
-                label="تاريخ انتهاء الصلاحية"
-                type="date"
-                value={editForm.expiryDate}
-                onChange={(e) => setEditForm((p) => ({ ...p, expiryDate: e.target.value }))}
-                fullWidth
-                InputLabelProps={{ shrink: true }}
-              />
-              <Select
-                fullWidth
-                value={editForm.category}
-                onChange={(e) => setEditForm((p) => ({ ...p, category: e.target.value }))}
-              >
-                {categoryOptions.map((n) => (
-                  <MenuItem key={n} value={n}>
-                    {n}
-                  </MenuItem>
-                ))}
-              </Select>
-              <Select
-                fullWidth
-                value={editForm.saleType}
-                onChange={(e) => setEditForm((p) => ({ ...p, saleType: e.target.value }))}
-              >
-                <MenuItem value="strip">شريط كامل</MenuItem>
-                <MenuItem value="pill">بالحبة</MenuItem>
-                <MenuItem value="bottle">قزازة</MenuItem>
-                <MenuItem value="box">علبة</MenuItem>
-                <MenuItem value="sachet">كيس</MenuItem>
-              </Select>
-              <TextField
-                label="الكمية في المخزون"
-                type="number"
-                value={editForm.qty}
-                onChange={(e) => setEditForm((p) => ({ ...p, qty: normalizeOneDecimal(e.target.value) }))}
-                fullWidth
-                inputProps={{ style: { textAlign: "right" }, step: "0.1", min: "0" }}
-              />
-              <TextField
-                label="الحد الأدنى"
-                type="number"
-                value={editForm.min}
-                onChange={(e) => setEditForm((p) => ({ ...p, min: normalizeOneDecimal(e.target.value) }))}
-                fullWidth
-                inputProps={{ style: { textAlign: "right" }, step: "0.1", min: "0" }}
-              />
-              <TextField
-                label="سعر البيع"
-                type="number"
-                value={editForm.price}
-                onChange={(e) => setEditForm((p) => ({ ...p, price: normalizeOneDecimal(e.target.value) }))}
-                fullWidth
-                disabled={!isAdmin(currentUser)}
-                helperText={!isAdmin(currentUser) ? "تعديل السعر للمدير فقط — راجع المدير" : ""}
-                inputProps={{ style: { textAlign: "right" }, step: "0.1", min: "0" }}
-              />
-              <TextField
-                label="رابط صورة (اختياري)"
-                value={editForm.imageUrl}
-                onChange={(e) => setEditForm((p) => ({ ...p, imageUrl: e.target.value }))}
-                fullWidth
-                inputProps={{ style: { textAlign: "right" } }}
-              />
-              <Button variant="outlined" component="label" sx={{ textTransform: "none", alignSelf: "flex-start" }}>
-                رفع صورة من الجهاز
+          <DialogContent dividers sx={{ textAlign: "right", px: { xs: 2, sm: 2.5 }, py: 2 }}>
+            <Grid container spacing={1.5}>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <TextField
+                  label="اسم الصنف"
+                  value={editForm.name}
+                  onChange={(e) => setEditForm((p) => ({ ...p, name: e.target.value }))}
+                  fullWidth
+                  size="small"
+                  inputProps={{ style: { textAlign: "right" } }}
+                />
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <TextField
+                  label="الباركود"
+                  value={editForm.barcode}
+                  onChange={(e) => setEditForm((p) => ({ ...p, barcode: e.target.value }))}
+                  fullWidth
+                  size="small"
+                  inputProps={{ style: { textAlign: "right" } }}
+                />
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <TextField
+                  label="تاريخ انتهاء الصلاحية"
+                  type="date"
+                  value={editForm.expiryDate}
+                  onChange={(e) => setEditForm((p) => ({ ...p, expiryDate: e.target.value }))}
+                  fullWidth
+                  size="small"
+                  InputLabelProps={{ shrink: true }}
+                />
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <Select
+                  fullWidth
+                  size="small"
+                  value={editForm.category}
+                  onChange={(e) => setEditForm((p) => ({ ...p, category: e.target.value }))}
+                >
+                  {categoryOptions.map((n) => (
+                    <MenuItem key={n} value={n}>
+                      {n}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <Select
+                  fullWidth
+                  size="small"
+                  value={editForm.saleType}
+                  onChange={(e) => setEditForm((p) => ({ ...p, saleType: e.target.value }))}
+                >
+                  <MenuItem value="strip">شريط كامل</MenuItem>
+                  <MenuItem value="pill">بالحبة</MenuItem>
+                  <MenuItem value="bottle">قزازة</MenuItem>
+                  <MenuItem value="box">علبة</MenuItem>
+                  <MenuItem value="sachet">كيس</MenuItem>
+                </Select>
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <TextField
+                  label="الكمية في المخزون"
+                  type="number"
+                  value={editForm.qty}
+                  onChange={(e) => setEditForm((p) => ({ ...p, qty: normalizeOneDecimal(e.target.value) }))}
+                  fullWidth
+                  size="small"
+                  inputProps={{ style: { textAlign: "right" }, step: "0.1", min: "0" }}
+                />
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <TextField
+                  label="الحد الأدنى"
+                  type="number"
+                  value={editForm.min}
+                  onChange={(e) => setEditForm((p) => ({ ...p, min: normalizeOneDecimal(e.target.value) }))}
+                  fullWidth
+                  size="small"
+                  inputProps={{ style: { textAlign: "right" }, step: "0.1", min: "0" }}
+                />
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <TextField
+                  label="سعر البيع"
+                  type="number"
+                  value={editForm.price}
+                  onChange={(e) => setEditForm((p) => ({ ...p, price: normalizeOneDecimal(e.target.value) }))}
+                  fullWidth
+                  size="small"
+                  disabled={!isAdmin(currentUser)}
+                  helperText={!isAdmin(currentUser) ? "تعديل السعر للمدير فقط — راجع المدير" : ""}
+                  inputProps={{ style: { textAlign: "right" }, step: "0.1", min: "0" }}
+                />
+              </Grid>
+              <Grid size={{ xs: 12 }}>
                 <input
+                  ref={editItemImageInputRef}
                   type="file"
-                  hidden
                   accept="image/*"
-                  onChange={(e) => {
+                  style={{ display: "none" }}
+                  onChange={async (e) => {
                     const f = e.target.files?.[0];
-                    if (!f?.type?.startsWith("image/")) return;
-                    const r = new FileReader();
-                    r.onload = () => setEditForm((p) => ({ ...p, imageUrl: String(r.result || "") }));
-                    r.readAsDataURL(f);
                     e.target.value = "";
+                    if (!f?.type?.startsWith("image/")) return;
+                    try {
+                      const dataUrl = await compressImageFileToDataUrl(f);
+                      setEditForm((p) => ({ ...p, imageUrl: dataUrl }));
+                    } catch {
+                      const r = new FileReader();
+                      r.onload = () => setEditForm((p) => ({ ...p, imageUrl: String(r.result || "") }));
+                      r.readAsDataURL(f);
+                    }
                   }}
                 />
-              </Button>
+                <Button
+                  type="button"
+                  variant="outlined"
+                  sx={{ textTransform: "none" }}
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    editItemImageInputRef.current?.click();
+                  }}
+                >
+                  رفع صورة من الجهاز
+                </Button>
+                {editForm.imageUrl && String(editForm.imageUrl).startsWith("data:") ? (
+                  <Typography variant="caption" color="success.main" sx={{ display: "block", mt: 0.75 }}>
+                    تم اختيار صورة من الجهاز
+                  </Typography>
+                ) : null}
+              </Grid>
+              <Grid size={{ xs: 12 }}>
+                <Card variant="outlined" sx={{ p: 1.5, borderRadius: 2.5, borderColor: alpha(theme.palette.info.main, 0.35) }}>
+                  <Typography variant="subtitle2" fontWeight={900} color="info.dark" sx={{ mb: 0.5 }}>
+                    معلومات توجيهية (تظهر للكاشير قبل البيع)
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1.25, lineHeight: 1.5 }}>
+                    تعليمات الاستعمال والجرعة — للإرشاد فقط؛ المريض يتبع وصفة الطبيب.
+                  </Typography>
+                  <Stack spacing={1.25}>
+                    <TextField
+                      label="كيفية الاستعمال"
+                      value={editForm.usageHowTo}
+                      onChange={(e) => setEditForm((p) => ({ ...p, usageHowTo: e.target.value }))}
+                      fullWidth
+                      size="small"
+                      multiline
+                      minRows={2}
+                      inputProps={{ style: { textAlign: "right" } }}
+                    />
+                    <TextField
+                      label="عدد المرات باليوم / التوقيت"
+                      value={editForm.usageFrequency}
+                      onChange={(e) => setEditForm((p) => ({ ...p, usageFrequency: e.target.value }))}
+                      fullWidth
+                      size="small"
+                      multiline
+                      minRows={2}
+                      inputProps={{ style: { textAlign: "right" } }}
+                    />
+                    <TextField
+                      label="نصائح، تحذيرات، أو تخزين"
+                      value={editForm.usageTips}
+                      onChange={(e) => setEditForm((p) => ({ ...p, usageTips: e.target.value }))}
+                      fullWidth
+                      size="small"
+                      multiline
+                      minRows={2}
+                      inputProps={{ style: { textAlign: "right" } }}
+                    />
+                  </Stack>
+                </Card>
+              </Grid>
+              <Grid size={{ xs: 12 }}>
               <Card variant="outlined" sx={{ p: 1.5, borderRadius: 2, bgcolor: alpha(theme.palette.primary.main, 0.04) }}>
                 <Typography variant="subtitle2" fontWeight={800}>
                   خيارات البيع (اختياري)
@@ -1531,9 +1801,10 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   إضافة خيار
                 </Button>
               </Card>
-            </Stack>
+              </Grid>
+            </Grid>
           </DialogContent>
-          <DialogActions sx={{ px: 3, pb: 2 }}>
+          <DialogActions sx={{ px: 3, py: 2, gap: 1, flexWrap: "wrap", bgcolor: alpha(theme.palette.action.hover, 0.06) }}>
             <Button onClick={() => setEditTarget(null)} sx={{ textTransform: "none" }}>
               إلغاء
             </Button>
@@ -1556,6 +1827,9 @@ export default function InventoryPage({ mode, onToggleMode }) {
                 const saleOpts = buildPersistedSaleOptions(editForm.saleOptionRows, editTarget.id);
                 const barcodeTrim = String(editForm.barcode || "").trim();
                 const expTrim = String(editForm.expiryDate || "").trim().slice(0, 10);
+                const usageHowTrim = String(editForm.usageHowTo || "").trim();
+                const usageFreqTrim = String(editForm.usageFrequency || "").trim();
+                const usageTipsTrim = String(editForm.usageTips || "").trim();
                 const next = items.map((it) => {
                   if (it.id !== editTarget.id) return it;
                   const row = {
@@ -1576,6 +1850,12 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   else delete row.barcode;
                   if (expTrim) row.expiryDate = expTrim;
                   else delete row.expiryDate;
+                  if (usageHowTrim) row.usageHowTo = usageHowTrim;
+                  else delete row.usageHowTo;
+                  if (usageFreqTrim) row.usageFrequency = usageFreqTrim;
+                  else delete row.usageFrequency;
+                  if (usageTipsTrim) row.usageTips = usageTipsTrim;
+                  else delete row.usageTips;
                   return row;
                 });
                 if (isAdmin(currentUser) && Number(editTarget.price) !== Number(pr)) {

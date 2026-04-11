@@ -28,7 +28,7 @@ class UserController extends Controller
             $query->where('username', 'LIKE', "%{$search}%");
         }
         
-        $users = $query->orderBy('created_at', 'desc')->get(['id', 'username', 'role', 'approval_status', 'created_at']);
+        $users = $query->orderBy('created_at', 'desc')->get(['id', 'username', 'role', 'approval_status', 'is_active', 'created_at']);
         
         return response()->json([
             'success' => true,
@@ -47,6 +47,7 @@ class UserController extends Controller
             'password' => 'required|string|min:6',
             'role' => 'required|in:admin,cashier,super_cashier',
             'approval_status' => 'nullable|in:approved,pending',
+            'is_active' => 'nullable|boolean',
         ]);
         
         if ($validator->fails()) {
@@ -63,6 +64,7 @@ class UserController extends Controller
                 'password' => Hash::make($request->password),
                 'role' => $request->role,
                 'approval_status' => $request->approval_status ?: 'approved',
+                'is_active' => $request->boolean('is_active', true),
             ]);
             
             return response()->json([
@@ -103,6 +105,7 @@ class UserController extends Controller
             'role' => 'sometimes|in:admin,cashier,super_cashier',
             'password' => 'sometimes|string|min:4',
             'approval_status' => 'sometimes|in:approved,pending',
+            'is_active' => 'sometimes|boolean',
         ]);
         
         if ($validator->fails()) {
@@ -114,14 +117,25 @@ class UserController extends Controller
         }
         
         try {
-            $updateData = $request->only(['username', 'role', 'approval_status']);
+            if ($request->has('is_active') && !$request->boolean('is_active') && strtolower((string) $user->username) === 'admin') {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'لا يمكن تعطيل حساب المدير الأساسي (admin)',
+                ], 400);
+            }
+
+            $updateData = $request->only(['username', 'role', 'approval_status', 'is_active']);
             
             // إذا كان هناك كلمة مرور جديدة
-            if ($request->has('password')) {
+            if ($request->has('password') && $request->filled('password')) {
                 $updateData['password'] = Hash::make($request->password);
             }
             
             $user->update($updateData);
+
+            if (array_key_exists('is_active', $updateData) && !$user->is_active) {
+                $user->tokens()->delete();
+            }
             
             return response()->json([
                 'success' => true,
@@ -130,6 +144,8 @@ class UserController extends Controller
                     'id' => $user->id,
                     'username' => $user->username,
                     'role' => $user->role,
+                    'approval_status' => $user->approval_status,
+                    'is_active' => (bool) ($user->is_active ?? true),
                 ]
             ]);
             

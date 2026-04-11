@@ -45,3 +45,11 @@ export function readShiftActivityLog() {
     return [];
   }
 }
+
+export function clearShiftActivityLog() {
+  try {
+    localStorage.setItem(SHIFT_ACTIVITY_LOG_KEY, "[]");
+  } catch {
+    // ignore
+  }
+}

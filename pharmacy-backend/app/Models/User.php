@@ -19,11 +19,16 @@ class User extends Authenticatable
         'password',
         'role', // أضف role هنا
         'approval_status',
+        'is_active',
     ];
 
     protected $hidden = [
         'password',
         'remember_token',
+    ];
+
+    protected $casts = [
+        'is_active' => 'boolean',
     ];
 
     // دالة للتحقق إذا المستخدم admin

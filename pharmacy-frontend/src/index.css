@@ -104,6 +104,11 @@ a:hover {
   color: #006a63;
 }
 
+/* روابط عامة على خلفية داكنة — يتزامن مع data-theme-mode من App.jsx */
+:root[data-theme-mode="dark"] a:hover {
+  color: #7dd3c8;
+}
+
 /* القوائم */
 ul,
 ol {
@@ -462,4 +467,29 @@ body {
 
 .swal2-icon.swal2-success [class^="swal2-success-line"] {
   background-color: #2e7d32 !important;
+}
+
+/* SweetAlert2 على الدارك مود */
+:root[data-theme-mode="dark"] .app-swal-popup {
+  border: 1px solid rgba(126, 214, 200, 0.22) !important;
+  background: linear-gradient(165deg, #1a2226 0%, #141a1d 100%) !important;
+  box-shadow: 0 22px 48px rgba(0, 0, 0, 0.55) !important;
+}
+
+:root[data-theme-mode="dark"] .app-swal-title {
+  color: #e8f4f2 !important;
+}
+
+:root[data-theme-mode="dark"] .app-swal-html {
+  color: #b9c9cc !important;
+}
+
+:root[data-theme-mode="dark"] .app-swal-toast {
+  border: 1px solid rgba(126, 214, 200, 0.18) !important;
+  background: #1a2226 !important;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.45) !important;
+}
+
+:root[data-theme-mode="dark"] .app-swal-toast-title {
+  color: #e8f4f2 !important;
 }

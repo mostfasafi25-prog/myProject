@@ -31,20 +31,24 @@ import {
   Typography,
   useTheme,
 } from "@mui/material";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import FilterBarRow from "../../components/FilterBarRow";
 import { adminPageContainerSx, adminPageSubtitleSx } from "../../utils/adminPageLayout";
+import { negativeAmountTextSx } from "../../utils/negativeAmountStyle";
 import AdminLayout from "./AdminLayout";
 import { confirmApp, showAppToast } from "../../utils/appToast";
 import { productDisplayName } from "../../utils/productDisplayName";
 import { getStoredUser, isSuperCashier, purchaserDisplayName } from "../../utils/userRoles";
-import { notifyStoreBalanceChanged } from "../../utils/storeBalanceSync";
+import { appendAudit } from "../../utils/auditLog";
+import { debitStoreBalanceForPurchase, notifyStoreBalanceChanged } from "../../utils/storeBalanceSync";
+import { fetchAndPersistSalesCategories, PHARMACY_ADMIN_CATEGORIES_SYNCED } from "../../utils/backendCategoriesSync";
 
 const ROWS_PER_PAGE = 5;
 const PURCHASE_INVOICES_KEY = "purchaseInvoices";
 const PRODUCTS_KEY = "adminProducts";
 const STORE_BALANCE_KEY = "storeBalance";
 const NOTIFICATIONS_KEY = "systemNotifications";
+const ADMIN_CATEGORIES_KEY = "adminCategories";
 
 function normalizeOneDecimal(value) {
   const cleaned = String(value ?? "").replace(/[^\d.]/g, "");
@@ -71,6 +75,19 @@ export default function PurchasesPage({ mode, onToggleMode }) {
   const theme = useTheme();
   const superCashier = isSuperCashier(getStoredUser());
   const currentUser = getStoredUser();
+  const [catalogCatsTick, setCatalogCatsTick] = useState(0);
+  useEffect(() => {
+    const bump = () => setCatalogCatsTick((t) => t + 1);
+    window.addEventListener(PHARMACY_ADMIN_CATEGORIES_SYNCED, bump);
+    let cancelled = false;
+    fetchAndPersistSalesCategories().finally(() => {
+      if (!cancelled) bump();
+    });
+    return () => {
+      cancelled = true;
+      window.removeEventListener(PHARMACY_ADMIN_CATEGORIES_SYNCED, bump);
+    };
+  }, []);
   const [page, setPage] = useState(1);
   const [purchaseSearch, setPurchaseSearch] = useState("");
   const [dateFilter, setDateFilter] = useState("all");
@@ -199,8 +216,25 @@ export default function PurchasesPage({ mode, onToggleMode }) {
           status: "مرجع",
           returnedAt: new Date().toISOString(),
           returnedBy: purchaserDisplayName(currentUser),
+          refundTreasury: {
+            total: refundTotal,
+            cash: refundCash,
+            app: refundApp,
+          },
         };
         localStorage.setItem(PURCHASE_INVOICES_KEY, JSON.stringify(list));
+        appendAudit({
+          action: "purchase_return",
+          details: JSON.stringify({
+            purchaseId: inv.id,
+            total: refundTotal,
+            cash: refundCash,
+            app: refundApp,
+            items: (inv.items || []).length,
+          }),
+          username: currentUser?.username || "",
+          role: currentUser?.role || "",
+        });
         setListVersion((v) => v + 1);
         setDetailPurchase(null);
         showAppToast(
@@ -256,12 +290,23 @@ export default function PurchasesPage({ mode, onToggleMode }) {
 
   const catalogCategories = useMemo(() => {
     const s = new Set();
+    try {
+      const raw = JSON.parse(localStorage.getItem(ADMIN_CATEGORIES_KEY));
+      if (Array.isArray(raw)) {
+        raw.filter((c) => c.active !== false).forEach((c) => {
+          const n = String(c.name || "").trim();
+          if (n) s.add(n);
+        });
+      }
+    } catch {
+      // ignore
+    }
     catalogProducts.forEach((p) => {
       const c = String(p.category || "").trim();
       if (c) s.add(c);
     });
     return [...s].sort((a, b) => a.localeCompare(b, "ar"));
-  }, [catalogProducts]);
+  }, [catalogProducts, catalogCatsTick]);
 
   const filteredCatalog = useMemo(() => {
     const q = catalogSearch.trim().toLowerCase();
@@ -393,12 +438,8 @@ export default function PurchasesPage({ mode, onToggleMode }) {
       setNewPurchaseError("إجمالي الشراء غير صالح");
       return;
     }
-    if (newPurchaseTreasury < totalCost) {
-      setNewPurchaseError(
-        superCashier
-          ? "لا يمكن إتمام العملية — راجع المدير لتغذية الصندوق."
-          : "لا يكفي المال في الخزنة لإتمام الشراء",
-      );
+    if (!superCashier && newPurchaseTreasury < totalCost) {
+      setNewPurchaseError("لا يكفي المال في الخزنة لإتمام الشراء");
       return;
     }
     const buyerLabel = purchaserDisplayName(currentUser);
@@ -426,19 +467,9 @@ export default function PurchasesPage({ mode, onToggleMode }) {
     } catch {
       // ignore
     }
-    const remainingAfterCash = Math.max(0, totalCost - balance.cash);
-    const nextCash = Math.max(0, balance.cash - totalCost);
-    const nextApp = Math.max(0, balance.app - remainingAfterCash);
-    const paidFromCash = Number((balance.cash - nextCash).toFixed(2));
-    const paidFromApp = Number((balance.app - nextApp).toFixed(2));
-    const nextBalance = {
-      ...balance,
-      total: Math.max(0, balance.total - totalCost),
-      cash: nextCash,
-      app: nextApp,
-      lastOperation: "purchase",
-      updatedAt: new Date().toISOString(),
-    };
+    const { nextBalance, paidFromCash, paidFromApp } = debitStoreBalanceForPurchase(balance, totalCost, {
+      allowNegativeTreasury: superCashier,
+    });
     localStorage.setItem(STORE_BALANCE_KEY, JSON.stringify(nextBalance));
     notifyStoreBalanceChanged();
 
@@ -845,12 +876,19 @@ export default function PurchasesPage({ mode, onToggleMode }) {
             )}
             {superCashier ? (
               <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1.5 }}>
-                يُتحقق من الصندوق تلقائيًا. إذا رُفضت العملية فالمطلوب تغذية الصندوق من المدير.
+                يُسمح بإتمام الشراء حتى مع عجز مؤقت في الخزنة؛ يظهر العجز للمدير لتغذية الصندوق.
               </Typography>
             ) : (
               <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5 }}>
-                رصيد الخزنة الحالي: <b>{newPurchaseTreasury.toFixed(2)}</b> شيكل — إجمالي هذا الشراء:{" "}
-                <b>{newPurchaseTotalCost.toFixed(2)}</b> شيكل
+                رصيد الخزنة الحالي:{" "}
+                <Box component="span" fontWeight={700} sx={negativeAmountTextSx(newPurchaseTreasury)}>
+                  {newPurchaseTreasury.toFixed(2)}
+                </Box>{" "}
+                شيكل — إجمالي هذا الشراء:{" "}
+                <Box component="span" fontWeight={700}>
+                  {newPurchaseTotalCost.toFixed(2)}
+                </Box>{" "}
+                شيكل
               </Typography>
             )}
           </DialogContent>

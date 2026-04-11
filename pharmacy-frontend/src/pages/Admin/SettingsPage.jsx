@@ -9,13 +9,23 @@
   Campaign,
   ColorLens,
   DarkMode,
+  FilterList,
   DeleteForever,
   FontDownload,
+  Gavel,
+  History,
+  Inventory2,
   LightMode,
   Lock,
+  NotificationsActive,
   Payments,
   PhotoCamera,
   PointOfSale,
+  ReceiptLong,
+  Replay,
+  ShoppingCart,
+  SyncDisabled,
+  WarningAmber,
   RemoveCircleOutline,
   RestartAlt,
   Save,
@@ -31,10 +41,12 @@ import {
   Box,
   Button,
   Card,
+  Checkbox,
   Chip,
   Divider,
   FormControl,
   FormControlLabel,
+  FormGroup,
   Grid,
   IconButton,
   InputAdornment,
@@ -66,8 +78,15 @@ import {
   setCashierPrefs,
 } from "../../utils/notificationPrefs";
 import { appendAudit } from "../../utils/auditLog";
-import { confirmApp } from "../../utils/appToast";
+import { confirmApp, showAppToast } from "../../utils/appToast";
+import {
+  applySystemDangerResets,
+  CONFIRM_DANGER_PHRASE,
+  DANGER_TRIM_KEEP,
+  dangerPhraseUnlocked,
+} from "../../utils/systemDangerReset";
 import { THEME_PRESETS } from "../../utils/themePresets";
+import { chipColorForBalance, negativeAmountTextSx } from "../../utils/negativeAmountStyle";
 import { notifyStoreBalanceChanged } from "../../utils/storeBalanceSync";
 import {
   getCashierSystemSettings,
@@ -114,6 +133,9 @@ export default function SettingsPage({
       return null;
     }
   }, []);
+  /** تصفير الخزنة / النظام الكامل — للحساب الأساسي admin فقط */
+  const isSuperAdminMoneyControls =
+    currentUser?.role === "admin" && String(currentUser?.username || "").toLowerCase() === "admin";
   const isAccountSettings = location.pathname.includes("/settings/account");
   const isAppearanceSettings = location.pathname.includes("/settings/appearance");
   const isMoneySettings = location.pathname.includes("/settings/money");
@@ -126,6 +148,27 @@ export default function SettingsPage({
   const [moneyWithdrawAmount, setMoneyWithdrawAmount] = useState("");
   const [moneyWithdrawMethod, setMoneyWithdrawMethod] = useState("cash");
   const [moneyMsg, setMoneyMsg] = useState({ type: "", text: "" });
+  const emptyResetSelection = () => ({
+    treasury: false,
+    sales: false,
+    trimSales: false,
+    purchases: false,
+    trimPurchases: false,
+    catalog: false,
+    shiftLog: false,
+    auditLog: false,
+    returns: false,
+    trimReturns: false,
+    notifications: false,
+    stocktake: false,
+    offlinePending: false,
+    cartDrafts: false,
+    debtCustomers: false,
+    staffProfileExtras: false,
+  });
+  const [resetSelection, setResetSelection] = useState(emptyResetSelection);
+  const [dangerPhrase, setDangerPhrase] = useState("");
+  const [resetBusy, setResetBusy] = useState(false);
   const [storeBalance, setStoreBalance] = useState({ total: 0, cash: 0, app: 0 });
   const [notifyForm, setNotifyForm] = useState({
     title: "",
@@ -325,32 +368,43 @@ export default function SettingsPage({
     });
   };
 
-  const handleMoneyResetAll = async () => {
+  const anyResetSelected = useMemo(
+    () => Object.values(resetSelection).some(Boolean),
+    [resetSelection],
+  );
+  const phraseOk = dangerPhraseUnlocked(dangerPhrase);
+
+  const handleDangerZoneExecute = async () => {
     setMoneyMsg({ type: "", text: "" });
+    if (!phraseOk || !anyResetSelected) {
+      showAppToast("حدد خياراً واحداً على الأقل واكتب جملة التأكيد بالضبط", "error");
+      return;
+    }
     const ok = await confirmApp({
-      title: "تصفير الخزنة بالكامل",
-      message:
-        "سيتم تصفير إجمالي الخزنة ورصيد الكاش ورصيد التطبيق إلى صفر. لا يمكن التراجع تلقائياً عن هذا الإجراء.",
-      confirmText: "نعم، صفّر كل الرصيد",
+      title: "تنفيذ تصفير البيانات",
+      message: `سيتم تنفيذ العمليات المحددة ولا يمكن التراجع. هل أنت متأكد؟`,
+      confirmText: "تنفيذ نهائي",
     });
     if (!ok) return;
-    const next = {
-      total: 0,
-      cash: 0,
-      app: 0,
-      lastOperation: "reset",
-      updatedAt: new Date().toISOString(),
-    };
-    localStorage.setItem(STORE_BALANCE_KEY, JSON.stringify(next));
-    notifyStoreBalanceChanged();
-    setStoreBalance(next);
-    setMoneyMsg({ type: "success", text: "تم تصفير الخزنة بالكامل" });
-    appendAudit({
-      action: "treasury_reset",
-      details: "full balance zeroed",
-      username: currentUser?.username || "",
-      role: currentUser?.role || "",
-    });
+    setResetBusy(true);
+    try {
+      const done = applySystemDangerResets(resetSelection, {
+        username: currentUser?.username || "",
+        role: currentUser?.role || "",
+      });
+      if (resetSelection.treasury) {
+        setStoreBalance({ total: 0, cash: 0, app: 0 });
+      }
+      setResetSelection(emptyResetSelection());
+      setDangerPhrase("");
+      setMoneyMsg({
+        type: "success",
+        text: done.length ? `تم: ${done.join(" — ")}` : "لم يُنفَّذ شيء",
+      });
+      showAppToast("اكتمل التصفير. يُفضّل تحديث الصفحات المفتوحة (كاشير / مخزون).", "success");
+    } finally {
+      setResetBusy(false);
+    }
   };
 
   const applyThemePreset = (preset, nextMode) => {
@@ -492,7 +546,7 @@ export default function SettingsPage({
       }}
     >
       <Stack direction="row" alignItems="center" flexWrap="wrap" gap={1}>
-        <IconButton onClick={() => navigate("/cashier")} aria-label="العودة للكاشير" size="small">
+        <IconButton onClick={() => navigate("/cashier")} aria-label="العودة لصفحة البيع" size="small" title="العودة لصفحة البيع">
           <ArrowBack />
         </IconButton>
         <Typography fontWeight={900}>إعداداتي</Typography>
@@ -817,7 +871,7 @@ export default function SettingsPage({
                 </Stack>
                 <Chip
                   label={`الإجمالي: ${storeBalance.total.toFixed(2)} شيكل`}
-                  color="success"
+                  color={chipColorForBalance(storeBalance.total, "success")}
                   sx={{ fontWeight: 800, px: 0.5 }}
                 />
               </Stack>
@@ -839,7 +893,11 @@ export default function SettingsPage({
                         <Typography variant="caption" color="text.secondary" fontWeight={700}>
                           الإجمالي
                         </Typography>
-                        <Typography variant="h6" fontWeight={900} color="success.main" sx={{ mt: 0.3 }}>
+                        <Typography
+                          variant="h6"
+                          fontWeight={900}
+                          sx={{ mt: 0.3, ...negativeAmountTextSx(storeBalance.total, { color: "success.main" }) }}
+                        >
                           {storeBalance.total.toFixed(2)}
                         </Typography>
                         <Typography variant="caption" color="text.secondary">
@@ -868,7 +926,11 @@ export default function SettingsPage({
                         <Typography variant="caption" color="text.secondary" fontWeight={700}>
                           الكاش
                         </Typography>
-                        <Typography variant="h6" fontWeight={900} color="primary.main" sx={{ mt: 0.3 }}>
+                        <Typography
+                          variant="h6"
+                          fontWeight={900}
+                          sx={{ mt: 0.3, ...negativeAmountTextSx(storeBalance.cash, { color: "primary.main" }) }}
+                        >
                           {storeBalance.cash.toFixed(2)}
                         </Typography>
                         <Typography variant="caption" color="text.secondary">
@@ -897,7 +959,11 @@ export default function SettingsPage({
                         <Typography variant="caption" color="text.secondary" fontWeight={700}>
                           التطبيق
                         </Typography>
-                        <Typography variant="h6" fontWeight={900} color="secondary.main" sx={{ mt: 0.3 }}>
+                        <Typography
+                          variant="h6"
+                          fontWeight={900}
+                          sx={{ mt: 0.3, ...negativeAmountTextSx(storeBalance.app, { color: "secondary.main" }) }}
+                        >
                           {storeBalance.app.toFixed(2)}
                         </Typography>
                         <Typography variant="caption" color="text.secondary">
@@ -1060,37 +1126,319 @@ export default function SettingsPage({
                 </Card>
               </Grid>
               <Grid size={{ xs: 12 }}>
+                {isSuperAdminMoneyControls ? (
                 <Card
                   sx={{
-                    p: 2.2,
+                    p: { xs: 1.75, sm: 2.5 },
                     borderRadius: 3,
-                    border: `1px dashed ${alpha(theme.palette.primary.main, 0.35)}`,
-                    bgcolor: alpha(theme.palette.primary.main, 0.03),
+                    border: `2px solid ${alpha(theme.palette.error.main, 0.35)}`,
+                    bgcolor: alpha(theme.palette.error.main, 0.04),
+                    overflow: "hidden",
                   }}
                 >
-                  <Stack direction={{ xs: "column", sm: "row" }} alignItems={{ xs: "flex-start", sm: "center" }} justifyContent="space-between" sx={{ gap: 2 }}>
-                    <Stack direction="row" alignItems="center" sx={{ gap: 1 }}>
-                      <Avatar sx={{ bgcolor: alpha(theme.palette.primary.main, 0.12), color: "primary.main", width: 40, height: 40 }}>
-                        <DeleteForever />
-                      </Avatar>
-                      <Box>
-                        <Typography fontWeight={900}>تصفير الخزنة بالكامل</Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          يصفّر الكاش والتطبيق والإجمالي — للطوارئ فقط
-                        </Typography>
+                  <Stack direction="row" alignItems="flex-start" sx={{ gap: 1.25, mb: 2 }}>
+                    <Avatar sx={{ bgcolor: alpha(theme.palette.error.main, 0.15), color: "error.main", width: 44, height: 44 }}>
+                      <WarningAmber />
+                    </Avatar>
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <Typography fontWeight={900} color="error.dark">
+                        منطقة خطرة — تصفير النظام والبيانات المحلية
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                        اختر ما تريد مسحه أو إعادته. لا يؤثر على حسابات الموظفين على الخادم. للأمان: اكتب الجملة الإنجليزية بالأحرف
+                        الكبيرة كما هي، ثم أكّد من النافذة المنبثقة.
+                      </Typography>
+                    </Box>
+                  </Stack>
+
+                  <Alert severity="warning" sx={{ mb: 2, textAlign: "right" }}>
+                    «تصفير بالكامل» يحذف كل السجل. «تقليص» يحتفظ بأحدث {DANGER_TRIM_KEEP} سجلًا فقط (حسب التاريخ). إن اخترت التصفير والتقليص معًا يُنفَّذ التصفير فقط. إعادة
+                    الأقسام والأصناف تستبدل المخزون بتجريبي جاهز لتجنّب كسر الكاشير.
+                  </Alert>
+
+                  <Typography variant="subtitle2" fontWeight={900} sx={{ mb: 1 }}>
+                    أهم التصفيرات (اختر اختصاراً ثم راجع الخانات أو نفّذ مباشرة بعد جملة التأكيد)
+                  </Typography>
+                  <Grid container spacing={1.25} sx={{ mb: 2 }}>
+                    <Grid size={{ xs: 12, md: 4 }}>
+                      <Button
+                        fullWidth
+                        variant="outlined"
+                        color="error"
+                        startIcon={<Payments />}
+                        onClick={() => {
+                          const base = emptyResetSelection();
+                          setResetSelection({ ...base, treasury: true });
+                        }}
+                        sx={{ textTransform: "none", fontWeight: 800, py: 1.25, alignItems: "flex-start", textAlign: "right" }}
+                      >
+                        <Box component="span" sx={{ display: "block", width: "100%" }}>
+                          <Box component="span" sx={{ display: "block", fontWeight: 900 }}>
+                            ١ — تصفير الخزنة
+                          </Box>
+                          <Box component="span" sx={{ display: "block", fontSize: 12, fontWeight: 600, opacity: 0.9, mt: 0.35 }}>
+                            كاش وتطبيق وإجمالي إلى صفر
+                          </Box>
+                        </Box>
+                      </Button>
+                    </Grid>
+                    <Grid size={{ xs: 12, md: 4 }}>
+                      <Button
+                        fullWidth
+                        variant="outlined"
+                        color="error"
+                        startIcon={<ReceiptLong />}
+                        onClick={() => {
+                          const base = emptyResetSelection();
+                          setResetSelection({
+                            ...base,
+                            treasury: true,
+                            sales: true,
+                            purchases: true,
+                            returns: true,
+                          });
+                        }}
+                        sx={{ textTransform: "none", fontWeight: 800, py: 1.25, alignItems: "flex-start", textAlign: "right" }}
+                      >
+                        <Box component="span" sx={{ display: "block", width: "100%" }}>
+                          <Box component="span" sx={{ display: "block", fontWeight: 900 }}>
+                            ٢ — تصفير المال والسجلات المالية
+                          </Box>
+                          <Box component="span" sx={{ display: "block", fontSize: 12, fontWeight: 600, opacity: 0.9, mt: 0.35 }}>
+                            خزنة + مبيعات + مشتريات + مرتجعات (بالكامل)
+                          </Box>
+                        </Box>
+                      </Button>
+                    </Grid>
+                    <Grid size={{ xs: 12, md: 4 }}>
+                      <Button
+                        fullWidth
+                        variant="contained"
+                        color="error"
+                        startIcon={<DeleteForever />}
+                        onClick={() => {
+                          const all = emptyResetSelection();
+                          Object.keys(all).forEach((k) => {
+                            all[k] = true;
+                          });
+                          setResetSelection(all);
+                        }}
+                        sx={{ textTransform: "none", fontWeight: 900, py: 1.25, alignItems: "flex-start", textAlign: "right" }}
+                      >
+                        <Box component="span" sx={{ display: "block", width: "100%" }}>
+                          <Box component="span" sx={{ display: "block" }}>
+                            ٣ — تصفير النظام بالكامل
+                          </Box>
+                          <Box component="span" sx={{ display: "block", fontSize: 12, fontWeight: 700, opacity: 0.95, mt: 0.35 }}>
+                            تفعيل كل خيارات التصفير أدناه (من الصفر)
+                          </Box>
+                        </Box>
+                      </Button>
+                    </Grid>
+                  </Grid>
+
+                  <FormGroup sx={{ mb: 2 }}>
+                    <Grid container spacing={1.25}>
+                      {[
+                        {
+                          key: "sales",
+                          label: "تصفير المبيعات بالكامل",
+                          hint: "حذف كل فواتير المبيعات من التخزين المحلي",
+                          icon: <ReceiptLong fontSize="small" />,
+                        },
+                        {
+                          key: "trimSales",
+                          label: "تقليص سجل المبيعات",
+                          hint: `الإبقاء على أحدث ${DANGER_TRIM_KEEP} فاتورة فقط`,
+                          icon: <FilterList fontSize="small" />,
+                        },
+                        {
+                          key: "purchases",
+                          label: "تصفير المشتريات بالكامل",
+                          hint: "حذف كل فواتير الشراء والتوريد",
+                          icon: <ShoppingCart fontSize="small" />,
+                        },
+                        {
+                          key: "trimPurchases",
+                          label: "تقليص سجل المشتريات",
+                          hint: `الإبقاء على أحدث ${DANGER_TRIM_KEEP} عملية شراء`,
+                          icon: <FilterList fontSize="small" />,
+                        },
+                        {
+                          key: "returns",
+                          label: "تصفير المرتجعات بالكامل",
+                          hint: "مسح كل مرتجعات المبيعات المسجّلة",
+                          icon: <Replay fontSize="small" />,
+                        },
+                        {
+                          key: "trimReturns",
+                          label: "تقليص المرتجعات",
+                          hint: `الإبقاء على أحدث ${DANGER_TRIM_KEEP} مرتجعًا`,
+                          icon: <FilterList fontSize="small" />,
+                        },
+                        {
+                          key: "catalog",
+                          label: "إعادة الأقسام والأصناف (تجريبي)",
+                          hint: "استبدال المخزون والأقسام بنسخة افتراضية",
+                          icon: <Inventory2 fontSize="small" />,
+                        },
+                        {
+                          key: "shiftLog",
+                          label: "تصفير سجل دوام الكاشير",
+                          hint: "جلسات بداية/نهاية الدوام والملخصات",
+                          icon: <History fontSize="small" />,
+                        },
+                        {
+                          key: "auditLog",
+                          label: "تصفير سجل التدقيق",
+                          hint: "يُضاف بعد التنفيذ سطر واحد يوثّق العملية",
+                          icon: <Gavel fontSize="small" />,
+                        },
+                        {
+                          key: "notifications",
+                          label: "تصفير الإشعارات",
+                          hint: "كل الإشعارات في الصندوق",
+                          icon: <NotificationsActive fontSize="small" />,
+                        },
+                        {
+                          key: "stocktake",
+                          label: "تصفير جلسة الجرد",
+                          hint: "جرد معلّق غير مُطبَّق",
+                          icon: <Inventory2 fontSize="small" />,
+                        },
+                        {
+                          key: "offlinePending",
+                          label: "تصفير فواتير غير متصلة",
+                          hint: "قائمة انتظار مزامنة الكاشير",
+                          icon: <SyncDisabled fontSize="small" />,
+                        },
+                        {
+                          key: "cartDrafts",
+                          label: "تصفير السلال المعلّقة",
+                          hint: "سلال محفوظة من الكاشير",
+                          icon: <PointOfSale fontSize="small" />,
+                        },
+                        {
+                          key: "debtCustomers",
+                          label: "تصفير زبائن الآجل",
+                          hint: "الزبائن وسجل حركات الدين",
+                          icon: <AccountBalanceWallet fontSize="small" />,
+                        },
+                        {
+                          key: "staffProfileExtras",
+                          label: "مسح إضافات الموظفين المحلية",
+                          hint: "أسماء ظاهرة وصور رفعت للهيدر (محلي فقط)",
+                          icon: <AdminPanelSettings fontSize="small" />,
+                        },
+                      ].map((row) => (
+                        <Grid key={row.key} size={{ xs: 12, sm: 6, md: 4 }}>
+                          <Card
+                            variant="outlined"
+                            onClick={() =>
+                              setResetSelection((p) => ({ ...p, [row.key]: !p[row.key] }))
+                            }
+                            sx={{
+                              p: 1.25,
+                              height: "100%",
+                              cursor: "pointer",
+                              borderRadius: 2,
+                              borderColor: resetSelection[row.key] ? "error.main" : "divider",
+                              bgcolor: resetSelection[row.key] ? alpha(theme.palette.error.main, 0.08) : "background.paper",
+                              transition: "border-color 0.15s, background 0.15s",
+                            }}
+                          >
+                            <FormControlLabel
+                              sx={{ m: 0, alignItems: "flex-start", width: "100%" }}
+                              control={
+                                <Checkbox
+                                  checked={Boolean(resetSelection[row.key])}
+                                  onChange={(e) =>
+                                    setResetSelection((p) => ({ ...p, [row.key]: e.target.checked }))
+                                  }
+                                  color="error"
+                                  size="small"
+                                  onClick={(e) => e.stopPropagation()}
+                                />
+                              }
+                              label={
+                                <Stack sx={{ gap: 0.25, pr: 0.5 }}>
+                                  <Stack direction="row" alignItems="center" sx={{ gap: 0.75 }}>
+                                    <Box sx={{ color: "error.main", display: "flex" }}>{row.icon}</Box>
+                                    <Typography fontWeight={800} variant="body2">
+                                      {row.label}
+                                    </Typography>
+                                  </Stack>
+                                  <Typography variant="caption" color="text.secondary" display="block">
+                                    {row.hint}
+                                  </Typography>
+                                </Stack>
+                              }
+                            />
+                          </Card>
+                        </Grid>
+                      ))}
+                    </Grid>
+                  </FormGroup>
+
+                  <Divider sx={{ my: 2 }} />
+
+                  <Stack sx={{ gap: 1.5 }}>
+                    <Typography variant="subtitle2" fontWeight={800}>
+                      جملة التأكيد (بالإنجليزية، أحرف كبيرة)
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary" component="div">
+                      انسخها كما هي في الحقل، ثم يتفعّل زر التنفيذ:
+                      <Box
+                        component="code"
+                        sx={{
+                          display: "block",
+                          mt: 0.75,
+                          p: 1,
+                          borderRadius: 1,
+                          bgcolor: alpha(theme.palette.common.black, 0.06),
+                          fontFamily: "ui-monospace, monospace",
+                          letterSpacing: 0.5,
+                          fontWeight: 800,
+                        }}
+                      >
+                        {CONFIRM_DANGER_PHRASE}
                       </Box>
-                    </Stack>
+                    </Typography>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      placeholder={CONFIRM_DANGER_PHRASE}
+                      value={dangerPhrase}
+                      onChange={(e) => setDangerPhrase(e.target.value)}
+                      autoComplete="off"
+                      inputProps={{
+                        dir: "ltr",
+                        style: { fontFamily: "ui-monospace, monospace", letterSpacing: 0.5 },
+                      }}
+                      error={dangerPhrase.length > 0 && !phraseOk}
+                      helperText={
+                        phraseOk
+                          ? "جاهز للتنفيذ بعد الضغط على الزر والتأكيد في النافذة"
+                          : "اكتب الجملة أعلاه حرفياً (أحرف إنجليزية كبيرة)"
+                      }
+                    />
                     <Button
-                      variant="outlined"
+                      variant="contained"
                       color="error"
-                      startIcon={<RestartAlt />}
-                      onClick={() => void handleMoneyResetAll()}
-                      sx={{ textTransform: "none", fontWeight: 800, flexShrink: 0 }}
+                      disabled={!phraseOk || !anyResetSelected || resetBusy}
+                      onClick={() => void handleDangerZoneExecute()}
+                      startIcon={<DeleteForever />}
+                      sx={{ textTransform: "none", fontWeight: 900, alignSelf: { xs: "stretch", sm: "flex-start" }, py: 1.1 }}
                     >
-                      تصفير كل الرصيد
+                      {resetBusy ? "جاري التنفيذ…" : "تنفيذ التصفير المحدد"}
                     </Button>
                   </Stack>
                 </Card>
+                ) : (
+                  <Alert severity="info" sx={{ borderRadius: 2, py: 1.5 }}>
+                    تصفير الخزنة أو النظام بالكامل يظهر هنا للمدير الأساسي فقط (اسم المستخدم <b>admin</b>).
+                  </Alert>
+                )}
               </Grid>
             </Grid>
           </Stack>

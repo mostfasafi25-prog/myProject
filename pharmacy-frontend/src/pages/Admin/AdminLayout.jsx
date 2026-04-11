@@ -1,6 +1,7 @@
 import {
   Category,
   DarkMode,
+  Dashboard,
   FactCheck,
   Groups,
   Inventory,
@@ -100,8 +101,9 @@ const ADMIN_SIDE_MENU = [
   },
 ];
 
-/** سوبر كاشير: مخزون + مشتريات فقط (بدون تقارير مالية عامة في القائمة) */
+/** سوبر كاشير: لوحة توريد + مخزون + مشتريات */
 const SUPER_CASHIER_SIDE_MENU = [
+  { label: "لوحة التحكم", icon: <Dashboard fontSize="small" />, path: "/cashier/dashboard", type: "item" },
   {
     label: "المخزون",
     key: "inventory",
@@ -110,6 +112,7 @@ const SUPER_CASHIER_SIDE_MENU = [
     children: [
       { label: "الاصناف", path: "/admin/inventory" },
       { label: "الاقسام", path: "/admin/categories", icon: <Category fontSize="inherit" /> },
+      { label: "زبائن الآجل", path: "/admin/debt-customers" },
     ],
   },
   {
@@ -124,13 +127,31 @@ const SUPER_CASHIER_SIDE_MENU = [
   },
 ];
 
-function AdminSidebarNav({ menuItems, openSections, setOpenSections, onItemNavigate, onLogout }) {
+function AdminSidebarNav({
+  menuItems,
+  openSections,
+  setOpenSections,
+  onItemNavigate,
+  onLogout,
+  /** false = يتمدد الشريط بكل البنود دون تمرير داخلي (سطح المكتب) */
+  scrollable = true,
+  /** على سطح المكتب يُعرض الخروج من الشريط العلوي فقط */
+  showSidebarLogout = true,
+}) {
   const theme = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
   const isActivePath = (path) => location.pathname === path;
   const hasActiveChild = (children = []) => children.some((child) => isActivePath(child.path));
-  const bottomMenu = { label: "معاينة الكاشير", icon: <PointOfSale fontSize="small" />, path: "/cashier" };
+  const cashierLike = (() => {
+    const r = getStoredUser()?.role;
+    return r === "cashier" || r === "super_cashier";
+  })();
+  const bottomMenu = {
+    label: cashierLike ? "العودة لصفحة البيع" : "معاينة الكاشير",
+    icon: <PointOfSale fontSize="small" />,
+    path: "/cashier",
+  };
 
   const go = (path) => {
     navigate(path);
@@ -140,13 +161,11 @@ function AdminSidebarNav({ menuItems, openSections, setOpenSections, onItemNavig
   return (
     <Stack
       sx={{
-        flex: 1,
-        minHeight: 0,
-        height: "100%",
         width: "100%",
         maxWidth: "100%",
-        display: "flex",
-        flexDirection: "column",
+        minHeight: scrollable ? 0 : "auto",
+        flex: scrollable ? 1 : "none",
+        minWidth: 0,
       }}
     >
       <Stack direction="row" alignItems="center" mb={2} sx={{ gap: 1.5, flexShrink: 0 }}>
@@ -154,7 +173,7 @@ function AdminSidebarNav({ menuItems, openSections, setOpenSections, onItemNavig
           <LocalPharmacy fontSize="small" />
         </Avatar>
         <Box sx={{ minWidth: 0 }}>
-          <Typography fontWeight={800} fontSize={14} noWrap>
+          <Typography fontWeight={800} fontSize={14} noWrap color="text.primary">
             {PHARMACY_DISPLAY_NAME}
           </Typography>
           <Typography variant="caption" color="text.secondary">
@@ -166,11 +185,14 @@ function AdminSidebarNav({ menuItems, openSections, setOpenSections, onItemNavig
       <Stack
         sx={{
           gap: 1,
-          flex: 1,
-          minHeight: 0,
+          flex: scrollable ? 1 : "none",
+          minHeight: scrollable ? 0 : "auto",
           overflowX: "hidden",
-          overflowY: "auto",
-          overscrollBehavior: "contain",
+          overflowY: scrollable ? "auto" : "visible",
+          overscrollBehavior: scrollable ? "contain" : undefined,
+          scrollbarWidth: scrollable ? "none" : undefined,
+          msOverflowStyle: scrollable ? "none" : undefined,
+          ...(scrollable ? { "&::-webkit-scrollbar": { display: "none" } } : {}),
         }}
       >
         {menuItems.map((item) => {
@@ -261,14 +283,7 @@ function AdminSidebarNav({ menuItems, openSections, setOpenSections, onItemNavig
         })}
       </Stack>
 
-      <Box
-        sx={{
-          pt: 1.5,
-          flexShrink: 0,
-          mt: "auto",
-          bgcolor: "background.paper",
-        }}
-      >
+      <Box sx={{ pt: 1.5, flexShrink: 0, mt: scrollable ? "auto" : 1.5 }}>
         <Divider sx={{ mb: 1.5 }} />
         <Button
           fullWidth
@@ -291,31 +306,33 @@ function AdminSidebarNav({ menuItems, openSections, setOpenSections, onItemNavig
         >
           {bottomMenu.label}
         </Button>
-        <Button
-          fullWidth
-          startIcon={<Logout fontSize="small" />}
-          onClick={() => {
-            onLogout();
-            onItemNavigate?.();
-          }}
-          color="error"
-          variant="outlined"
-          sx={{
-            justifyContent: "center",
-            textTransform: "none",
-            borderRadius: 2,
-            py: 1,
-            mt: 1,
-            fontWeight: 700,
-            textAlign: "center",
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            "& .MuiButton-startIcon": { marginInlineStart: 0, marginInlineEnd: 6 },
-          }}
-        >
-          تسجيل الخروج
-        </Button>
+        {showSidebarLogout ? (
+          <Button
+            fullWidth
+            startIcon={<Logout fontSize="small" />}
+            onClick={() => {
+              onLogout();
+              onItemNavigate?.();
+            }}
+            color="error"
+            variant="outlined"
+            sx={{
+              justifyContent: "center",
+              textTransform: "none",
+              borderRadius: 2,
+              py: 1,
+              mt: 1,
+              fontWeight: 700,
+              textAlign: "center",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              "& .MuiButton-startIcon": { marginInlineStart: 0, marginInlineEnd: 6 },
+            }}
+          >
+            تسجيل الخروج
+          </Button>
+        ) : null}
       </Box>
     </Stack>
   );
@@ -491,7 +508,7 @@ export default function AdminLayout({ mode = "light", onToggleMode, children, em
                 flexShrink: 0,
                 bgcolor: alpha(theme.palette.primary.main, 0.14),
                 border: `1px solid ${alpha(theme.palette.primary.main, 0.28)}`,
-                color: "primary.dark",
+                color: "primary.main",
                 "&:hover": { bgcolor: alpha(theme.palette.primary.main, 0.22) },
               }}
             >
@@ -527,6 +544,15 @@ export default function AdminLayout({ mode = "light", onToggleMode, children, em
                   </Badge>
                 </IconButton>
               ) : null}
+              <IconButton
+                size="small"
+                color="error"
+                aria-label="تسجيل الخروج"
+                onClick={handleLogout}
+                sx={{ border: `1px solid ${alpha(theme.palette.error.main, 0.35)}` }}
+              >
+                <Logout fontSize="small" />
+              </IconButton>
               <Avatar
                 src={headerAvatarSrc}
                 sx={{
@@ -568,6 +594,9 @@ export default function AdminLayout({ mode = "light", onToggleMode, children, em
                   </Badge>
                 </IconButton>
               ) : null}
+              <IconButton color="error" aria-label="تسجيل الخروج" onClick={handleLogout}>
+                <Logout />
+              </IconButton>
               <Divider orientation="vertical" flexItem />
               <Stack direction="row" alignItems="center" sx={{ gap: 1 }}>
                 <Box textAlign="right" sx={{ display: { xs: "none", sm: "block" } }}>
@@ -612,90 +641,47 @@ export default function AdminLayout({ mode = "light", onToggleMode, children, em
           },
         }}
       >
-        <Box sx={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-          <AdminSidebarNav
-            menuItems={effectiveMenu}
-            openSections={openSections}
-            setOpenSections={setOpenSections}
-            onItemNavigate={() => setMobileNavOpen(false)}
-            onLogout={handleLogout}
-          />
-        </Box>
+        <AdminSidebarNav
+          menuItems={effectiveMenu}
+          openSections={openSections}
+          setOpenSections={setOpenSections}
+          onItemNavigate={() => setMobileNavOpen(false)}
+          onLogout={handleLogout}
+        />
       </Drawer>
 
-      <Stack direction="row" alignItems="stretch" sx={{ gap: { xs: 0, sm: 1.5, md: 2 } }}>
+      <Stack direction="row" alignItems="flex-start" sx={{ gap: { xs: 0, sm: 1.5, md: 2 } }}>
         <Paper
           elevation={0}
           sx={{
             width: { md: 248 },
             flexShrink: 0,
+            alignSelf: "flex-start",
             p: 2,
             borderRadius: 4,
             border: `1px solid ${alpha(theme.palette.primary.main, 0.16)}`,
             background: `linear-gradient(180deg, ${alpha(theme.palette.primary.main, 0.10)}, ${alpha(theme.palette.primary.main, 0.03)})`,
             display: { xs: "none", md: "flex" },
             flexDirection: "column",
-            minHeight: "calc(100vh - 112px)",
-            maxHeight: "calc(100vh - 112px)",
+            position: { md: "sticky" },
+            top: { md: 12 },
+            maxHeight: { md: "calc(100vh - 96px)" },
+            minHeight: 0,
             overflow: "hidden",
           }}
         >
-          <Box sx={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-            <AdminSidebarNav
-              menuItems={effectiveMenu}
-              openSections={openSections}
-              setOpenSections={setOpenSections}
-              onLogout={handleLogout}
-            />
-          </Box>
+          <AdminSidebarNav
+            menuItems={effectiveMenu}
+            openSections={openSections}
+            setOpenSections={setOpenSections}
+            onLogout={handleLogout}
+            scrollable
+            showSidebarLogout={false}
+          />
         </Paper>
 
-        <Box sx={adminMainContentSx}>{children}</Box>
+        <Box sx={{ ...adminMainContentSx, minHeight: { md: "calc(100vh - 112px)" } }}>{children}</Box>
       </Stack>
-
-      {isMdDown && location.pathname.startsWith("/admin") ? (
-        <Paper
-          elevation={14}
-          sx={{
-            position: "fixed",
-            bottom: "max(12px, env(safe-area-inset-bottom))",
-            insetInlineStart: 12,
-            zIndex: theme.zIndex.snackbar,
-            p: 1,
-            borderRadius: 2.5,
-            display: "flex",
-            flexDirection: "column",
-            gap: 0.75,
-            minWidth: 0,
-            maxWidth: "min(280px, calc(100vw - 24px))",
-            bgcolor: alpha(theme.palette.background.paper, 0.98),
-            backdropFilter: "blur(10px)",
-            border: `1px solid ${alpha(theme.palette.primary.main, 0.22)}`,
-            boxShadow: `0 8px 32px ${alpha(theme.palette.common.black, 0.16)}`,
-          }}
-        >
-          <Button
-            variant="contained"
-            color="primary"
-            size="small"
-            startIcon={<PointOfSale fontSize="small" />}
-            onClick={() => navigate("/cashier")}
-            sx={{ textTransform: "none", fontWeight: 800 }}
-          >
-            معاينة الكاشير
-          </Button>
-          <Button
-            variant="outlined"
-            color="error"
-            size="small"
-            startIcon={<Logout fontSize="small" />}
-            onClick={handleLogout}
-            sx={{ textTransform: "none", fontWeight: 700 }}
-          >
-            تسجيل الخروج
-          </Button>
-        </Paper>
-      ) : null}
     </Box>
   );
 }

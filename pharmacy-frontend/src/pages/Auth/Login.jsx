@@ -1,11 +1,10 @@
-﻿import { useState } from "react";
+﻿import { useEffect, useState } from "react";
 import {
   Alert,
   alpha,
   Avatar,
   Box,
   Button,
-  Card,
   CircularProgress,
   IconButton,
   InputAdornment,
@@ -28,14 +27,41 @@ import {
   LocalPharmacy,
   Person,
   PointOfSale,
+  AutoAwesome,
 } from "@mui/icons-material";
-import { Link, useNavigate } from "react-router-dom";
+import { keyframes } from "@mui/system";
+import { AnimatePresence, motion } from "framer-motion";
+import { useNavigate } from "react-router-dom";
 import Cookies from "universal-cookie";
 import { Axios } from "../../Api/Axios";
 import { PHARMACY_DISPLAY_NAME } from "../../config/appBranding";
+import { SITE_OG_DESCRIPTION } from "../../config/siteSeo";
 import { appendUserLoginNotification } from "../../utils/cashierShiftNotification";
 import { mergeUserWithProfileExtras } from "../../utils/staffProfileExtras";
 import { formatLoginCatchError, loginFailureUserMessage } from "../../utils/formatApiError";
+
+const welcomeContainer = {
+  hidden: { opacity: 0 },
+  show: {
+    opacity: 1,
+    transition: { staggerChildren: 0.14, delayChildren: 0.12 },
+  },
+};
+
+const welcomeItem = {
+  hidden: { opacity: 0, y: 28, filter: "blur(8px)" },
+  show: {
+    opacity: 1,
+    y: 0,
+    filter: "blur(0px)",
+    transition: { type: "spring", stiffness: 380, damping: 28 },
+  },
+};
+
+const loginRingPulse = keyframes`
+  0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 0.35; }
+  50% { transform: translate(-50%, -50%) scale(1.07); opacity: 0.82; }
+`;
 
 export default function Login() {
   const theme = useTheme();
@@ -45,8 +71,16 @@ export default function Login() {
   const [error, setError] = useState("");
   const [roleView, setRoleView] = useState("admin");
   const [showPassword, setShowPassword] = useState(false);
+  const [welcomeOpen, setWelcomeOpen] = useState(true);
   const navigate = useNavigate();
   const cookies = new Cookies();
+
+  useEffect(() => {
+    const t = setTimeout(() => setWelcomeOpen(false), 3400);
+    return () => clearTimeout(t);
+  }, []);
+
+  const dismissWelcome = () => setWelcomeOpen(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -158,6 +192,164 @@ export default function Login() {
         bgcolor: "background.default",
       }}
     >
+      <AnimatePresence>
+        {welcomeOpen ? (
+          <motion.div
+            key="welcome-overlay"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0, scale: 1.02, transition: { duration: 0.45, ease: [0.4, 0, 0.2, 1] } }}
+            style={{
+              position: "fixed",
+              inset: 0,
+              zIndex: 30,
+              display: "grid",
+              placeItems: "center",
+              padding: 16,
+            }}
+          >
+            <Box
+              onClick={dismissWelcome}
+              sx={{
+                position: "absolute",
+                inset: 0,
+                cursor: "pointer",
+                background: `linear-gradient(145deg, ${alpha(theme.palette.primary.dark, 0.92)} 0%, ${alpha(
+                  theme.palette.secondary.dark,
+                  0.88,
+                )} 45%, ${alpha("#0f766e", 0.9)} 100%)`,
+              }}
+            />
+            <Box
+              sx={{
+                position: "absolute",
+                inset: 0,
+                opacity: 0.35,
+                background:
+                  "radial-gradient(circle at 20% 30%, rgba(255,255,255,0.25) 0%, transparent 45%), radial-gradient(circle at 80% 70%, rgba(167,243,208,0.35) 0%, transparent 40%)",
+                pointerEvents: "none",
+              }}
+            />
+            {[0, 1, 2].map((i) => (
+              <Box
+                key={i}
+                sx={{
+                  position: "absolute",
+                  left: "50%",
+                  top: "50%",
+                  width: 280 + i * 120,
+                  height: 280 + i * 120,
+                  borderRadius: "50%",
+                  border: `1px solid ${alpha("#fff", 0.12 - i * 0.03)}`,
+                  animation: `${loginRingPulse} ${4 + i * 0.7}s ease-in-out infinite`,
+                  animationDelay: `${i * 0.4}s`,
+                  pointerEvents: "none",
+                }}
+              />
+            ))}
+
+            <motion.div
+              variants={welcomeContainer}
+              initial="hidden"
+              animate="show"
+              style={{
+                position: "relative",
+                zIndex: 2,
+                maxWidth: 520,
+                textAlign: "center",
+                pointerEvents: "none",
+              }}
+            >
+              <motion.div variants={welcomeItem}>
+                <AutoAwesome sx={{ fontSize: 40, color: alpha("#fef9c3", 0.95), mb: 1, filter: "drop-shadow(0 4px 12px rgba(0,0,0,0.25))" }} />
+              </motion.div>
+              <motion.div variants={welcomeItem}>
+                <Typography
+                  sx={{
+                    fontSize: { xs: "1.85rem", sm: "2.35rem" },
+                    fontWeight: 900,
+                    lineHeight: 1.25,
+                    letterSpacing: "-0.02em",
+                    background: `linear-gradient(110deg, #ecfdf5 0%, #a7f3d0 35%, #fef9c3 70%, #fff 100%)`,
+                    WebkitBackgroundClip: "text",
+                    WebkitTextFillColor: "transparent",
+                    backgroundClip: "text",
+                    textShadow: "0 8px 32px rgba(0,0,0,0.15)",
+                  }}
+                >
+                  مرحباً بكم
+                </Typography>
+              </motion.div>
+              <motion.div variants={welcomeItem}>
+                <Typography
+                  sx={{
+                    mt: 1.25,
+                    fontSize: { xs: "1.05rem", sm: "1.2rem" },
+                    fontWeight: 800,
+                    color: alpha("#fff", 0.95),
+                    lineHeight: 1.65,
+                    textShadow: "0 2px 16px rgba(0,0,0,0.2)",
+                  }}
+                >
+                  في نظام {PHARMACY_DISPLAY_NAME}
+                </Typography>
+              </motion.div>
+              <motion.div variants={welcomeItem}>
+                <Typography
+                  sx={{
+                    mt: 2,
+                    fontSize: { xs: "0.9rem", sm: "0.98rem" },
+                    fontWeight: 600,
+                    color: alpha("#fff", 0.88),
+                    lineHeight: 1.75,
+                    maxWidth: 440,
+                    mx: "auto",
+                    px: 1,
+                  }}
+                >
+                  {SITE_OG_DESCRIPTION}
+                </Typography>
+              </motion.div>
+            </motion.div>
+
+            <Box
+              sx={{
+                position: "absolute",
+                bottom: { xs: 28, sm: 40 },
+                left: 0,
+                right: 0,
+                zIndex: 3,
+                display: "flex",
+                justifyContent: "center",
+                pointerEvents: "auto",
+              }}
+            >
+              <Button
+                variant="contained"
+                size="large"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  dismissWelcome();
+                }}
+                sx={{
+                  textTransform: "none",
+                  fontWeight: 900,
+                  px: 4,
+                  py: 1.25,
+                  borderRadius: 99,
+                  bgcolor: alpha("#fff", 0.98),
+                  color: "primary.dark",
+                  boxShadow: `0 12px 40px ${alpha("#000", 0.25)}`,
+                  "&:hover": { bgcolor: "#fff" },
+                }}
+              >
+                متابعة إلى تسجيل الدخول
+              </Button>
+            </Box>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+
       <Box
         sx={{
           position: "absolute",
@@ -328,23 +520,22 @@ export default function Login() {
               type="submit"
               variant="contained"
               disabled={loading}
-              endIcon={!loading ? <LoginIcon /> : null}
+              endIcon={!loading ? <LoginIcon sx={{ fontSize: 22 }} /> : null}
               sx={{
                 py: 1.35,
                 textTransform: "none",
                 fontWeight: 800,
                 borderRadius: 2,
                 boxShadow: `0 10px 24px ${alpha(theme.palette.primary.main, 0.28)}`,
+                columnGap: "3px",
+                "& .MuiButton-endIcon": {
+                  marginInlineStart: "3px",
+                  marginInlineEnd: 0,
+                },
               }}
             >
               {loading ? <CircularProgress size={22} color="inherit" /> : "تسجيل الدخول"}
             </Button>
-            <Typography variant="body2" color="text.secondary" textAlign="center">
-              لا تملك حسابًا؟{" "}
-              <Button component={Link} to="/register" sx={{ p: 0, minWidth: 0, textTransform: "none", fontWeight: 800 }}>
-                إنشاء حساب جديد
-              </Button>
-            </Typography>
             <Typography variant="caption" color="text.disabled" textAlign="center" sx={{ display: "block", mt: 0.5 }}>
               نشر الواجهة: {__APP_DEPLOY_REF__}
             </Typography>

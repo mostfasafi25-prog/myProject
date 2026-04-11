@@ -9,6 +9,7 @@ use App\Http\Controllers\ProductController;
 use App\Http\Controllers\OrderController;
 use App\Http\Controllers\UserController;
 use App\Http\Controllers\AdminDashboardController;
+use App\Http\Controllers\CategoryController;
 
 /*
 |--------------------------------------------------------------------------
@@ -52,7 +53,9 @@ Route::get('/login', function () {
     ]);
 });
 
-$apiAuthMiddleware = config('app.skip_api_auth') ? [ActAsAdminForOpenApi::class] : ['auth:sanctum'];
+$apiAuthMiddleware = config('app.skip_api_auth')
+    ? [ActAsAdminForOpenApi::class, 'active']
+    : ['auth:sanctum', 'active'];
 
 Route::middleware($apiAuthMiddleware)->get('/user', function (Request $request) {
     return $request->user();
@@ -76,6 +79,8 @@ Route::middleware($apiAuthMiddleware)->group(function () {
     Route::delete('/users/{id}', [UserController::class, 'destroy']);
 
     Route::apiResource('products', ProductController::class);
+    /** أقسام المبيعات/المشتريات للكاشير والواجهات — بيانات حقيقية من الجدول */
+    Route::get('/categories/main', [CategoryController::class, 'getMainCategoriesSimple']);
     Route::get('/orders/stats/summary', [OrderController::class, 'stats']);
     Route::get('/dashboard/summary', [AdminDashboardController::class, 'summary']);
     Route::apiResource('orders', OrderController::class)->only(['index', 'store', 'show']);

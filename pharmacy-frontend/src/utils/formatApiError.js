@@ -114,6 +114,7 @@ export function loginFailureUserMessage(status, rawData) {
     }
     if (errStr === "يجب إدخال اسم المستخدم وكلمة المرور") return errStr;
     if (errStr.includes("موافقة الأدمن")) return errStr;
+    if (errStr.includes("غير مفعّل")) return errStr;
     if (errStr) return errStr;
 
     if (p.errors && typeof p.errors === "object") {
@@ -139,7 +140,18 @@ export function formatLoginCatchError(err) {
     return loginFailureUserMessage(res.status ?? 0, res.data);
   }
   if (err?.message === "Network Error" || err?.code === "ERR_NETWORK") {
-    return "لا يوجد اتصال بالسيرفر. تحقق من الإنترنت.";
+    return "لا يوجد اتصال بالسيرفر. تحقق من الإنترنت، من تشغيل الخادم، ومن ضبط عنوان الـ API (مثل VITE_API_BASE_URL) إن كنت على الإنتاج.";
+  }
+  const code = err?.code;
+  const msg = typeof err?.message === "string" ? err.message.trim() : "";
+  if (code === "ECONNABORTED" || /timeout/i.test(msg)) {
+    return "انتهت مهلة الاتصال بالسيرفر. حاول مرة أخرى.";
+  }
+  if (msg) {
+    return `تعذر تسجيل الدخول: ${msg}`;
+  }
+  if (code) {
+    return `تعذر تسجيل الدخول (رمز: ${code}). تحقق من أن الخادم يعمل وعنوان الـ API صحيح.`;
   }
   return "تعذر تسجيل الدخول. حاول مرة أخرى.";
 }

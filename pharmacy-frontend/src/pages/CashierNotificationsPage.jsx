@@ -135,7 +135,7 @@ export default function CashierNotificationsPage({ mode, onToggleMode }) {
             onClick={() => navigate("/cashier")}
             sx={{ textTransform: "none", fontWeight: 800 }}
           >
-            العودة إلى صفحة البيع
+            العودة لصفحة البيع
           </Button>
 
           <Stack direction="row" alignItems="center" sx={{ gap: 0.5 }}>

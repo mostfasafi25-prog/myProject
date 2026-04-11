@@ -1,4 +1,12 @@
-﻿import { CheckCircle, DeleteOutline, HourglassTop, ToggleOff, Visibility, VisibilityOff } from "@mui/icons-material";
+﻿import {
+  CheckCircle,
+  Close,
+  DeleteOutline,
+  HourglassTop,
+  ToggleOff,
+  Visibility,
+  VisibilityOff,
+} from "@mui/icons-material";
 import {
   alpha,
   Avatar,
@@ -17,19 +25,27 @@ import {
   InputAdornment,
   MenuItem,
   Pagination,
+  Paper,
   Select,
   Switch,
   Stack,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
   TextField,
   Typography,
   useTheme,
 } from "@mui/material";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import FilterBarRow from "../../components/FilterBarRow";
 import { adminPageContainerSx, adminPageSubtitleSx, adminPageTitleRowSx } from "../../utils/adminPageLayout";
 import AdminLayout from "./AdminLayout";
 import { Axios } from "../../Api/Axios";
 import { showAppToast } from "../../utils/appToast";
+import { compressImageFileToDataUrl } from "../../utils/imageCompress";
 import { readStaffProfileExtras, writeStaffProfileExtras } from "../../utils/staffProfileExtras";
 
 const ROWS_PER_PAGE = 5;
@@ -41,7 +57,7 @@ const initialStaff = [
     id: 1,
     name: "أحمد الشامي",
     username: "admin",
-    email: "admin@hotmail.com",
+    email: "",
     password: "admin123",
     role: "admin",
     status: "active",
@@ -51,7 +67,7 @@ const initialStaff = [
     id: 2,
     name: "محمود زكي",
     username: "cashier",
-    email: "cashier@hotmail.com",
+    email: "",
     password: "cashier123",
     role: "cashier",
     status: "active",
@@ -61,7 +77,7 @@ const initialStaff = [
     id: 5,
     name: "سوبر كاشير",
     username: "cashier_special",
-    email: "special@hotmail.com",
+    email: "",
     password: "special123",
     role: "super_cashier",
     status: "active",
@@ -71,7 +87,7 @@ const initialStaff = [
     id: 3,
     name: "سارة عمر",
     username: "cashier2",
-    email: "cashier2@hotmail.com",
+    email: "",
     password: "cashier2123",
     role: "cashier",
     status: "pending",
@@ -81,7 +97,7 @@ const initialStaff = [
     id: 4,
     name: "ليث خالد",
     username: "admin2",
-    email: "admin2@hotmail.com",
+    email: "",
     password: "admin2123",
     role: "admin",
     status: "inactive",
@@ -110,6 +126,12 @@ function loadStaffFromStorage() {
 }
 
 function mapApiUserToStaff(user) {
+  const pending = user.approval_status === "pending";
+  const inactive = !pending && (user.is_active === false || user.is_active === 0);
+  let status = "active";
+  if (pending) status = "pending";
+  else if (inactive) status = "inactive";
+
   return {
     id: user.id,
     name: user.username,
@@ -118,7 +140,7 @@ function mapApiUserToStaff(user) {
     password: "",
     role:
       user.role === "admin" ? "admin" : user.role === "super_cashier" ? "super_cashier" : "cashier",
-    status: user.approval_status === "pending" ? "pending" : "active",
+    status,
     createdAt: user.created_at || new Date().toISOString(),
   };
 }
@@ -126,7 +148,6 @@ function mapApiUserToStaff(user) {
 const emptyEditForm = () => ({
   name: "",
   username: "",
-  email: "",
   password: "",
   role: "cashier",
   status: "active",
@@ -135,13 +156,14 @@ const emptyEditForm = () => ({
 
 export default function StaffPage({ mode, onToggleMode }) {
   const theme = useTheme();
+  const newUserAvatarInputRef = useRef(null);
+  const editUserAvatarInputRef = useRef(null);
   const [staff, setStaff] = useState(loadStaffFromStorage);
   const [newUser, setNewUser] = useState({
     name: "",
     username: "",
     role: "cashier",
     password: "",
-    email: "",
     avatarDataUrl: "",
   });
   const [error, setError] = useState("");
@@ -151,6 +173,8 @@ export default function StaffPage({ mode, onToggleMode }) {
   const [editForm, setEditForm] = useState(emptyEditForm);
   const [editError, setEditError] = useState("");
   const [showEditPassword, setShowEditPassword] = useState(false);
+  const [showNewUserPassword, setShowNewUserPassword] = useState(false);
+  const [addSaving, setAddSaving] = useState(false);
   const [editSaving, setEditSaving] = useState(false);
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
@@ -195,22 +219,46 @@ export default function StaffPage({ mode, onToggleMode }) {
     loadUsersFromApi();
   }, []);
 
-  const setActiveState = (id, isActive) => {
-    setStaff((prev) => prev.map((u) => (u.id === id ? { ...u, status: isActive ? "active" : "inactive" } : u)));
-  };
-
-  const approveUser = (id) => {
-    setStaff((prev) => prev.map((u) => (u.id === id ? { ...u, status: "active" } : u)));
-  };
-
-  const addUser = () => {
-    setError("");
-    if (!newUser.name || !newUser.username || !newUser.password || !newUser.email) {
-      setError("يرجى تعبئة جميع الحقول");
+  const setActiveState = async (id, isActive) => {
+    const row = staff.find((u) => u.id === id);
+    if (!row) return;
+    if (String(row.username || "").toLowerCase() === SUPER_ADMIN_USERNAME) {
+      showAppToast("لا يمكن تعطيل حساب المدير الأساسي", "error");
       return;
     }
-    if (!newUser.email.includes("@")) {
-      setError("يرجى إدخال بريد صحيح (Hotmail)");
+    if (row.status === "pending") return;
+
+    const prevStaff = staff;
+    const nextStatus = isActive ? "active" : "inactive";
+    setStaff((p) => p.map((u) => (u.id === id ? { ...u, status: nextStatus } : u)));
+
+    try {
+      await Axios.put(`users/${id}`, { is_active: isActive });
+      showAppToast(isActive ? "تم تفعيل الحساب" : "تم إيقاف الحساب — لن يستطيع تسجيل الدخول", "success");
+    } catch (err) {
+      setStaff(prevStaff);
+      showAppToast(err?.response?.data?.message || err?.response?.data?.error || "فشل تحديث حالة التفعيل", "error");
+    }
+  };
+
+  const approveUser = async (id) => {
+    try {
+      await Axios.post(`users/${id}/approve`);
+      setStaff((prev) => prev.map((u) => (u.id === id ? { ...u, status: "active" } : u)));
+      showAppToast("تمت الموافقة على الدخول", "success");
+    } catch (err) {
+      showAppToast(err?.response?.data?.message || err?.response?.data?.error || "فشلت الموافقة", "error");
+    }
+  };
+
+  const addUser = async () => {
+    setError("");
+    if (!newUser.name || !newUser.username || !newUser.password) {
+      setError("يرجى تعبئة الاسم واسم المستخدم وكلمة المرور");
+      return;
+    }
+    if (String(newUser.password).length < 6) {
+      setError("كلمة المرور يجب أن تكون 6 أحرف على الأقل");
       return;
     }
     if (staff.some((u) => u.username.toLowerCase() === newUser.username.toLowerCase())) {
@@ -218,42 +266,72 @@ export default function StaffPage({ mode, onToggleMode }) {
       return;
     }
     const uname = newUser.username.trim();
-    const extras = readStaffProfileExtras();
-    extras[uname] = {
-      ...extras[uname],
-      name: newUser.name.trim(),
-      ...(newUser.avatarDataUrl ? { avatarDataUrl: newUser.avatarDataUrl } : {}),
-    };
-    writeStaffProfileExtras(extras);
-
-    const next = [
-      {
-        id: Date.now(),
-        name: newUser.name.trim(),
+    setAddSaving(true);
+    try {
+      const { data } = await Axios.post("users", {
         username: uname,
-        email: newUser.email.trim(),
         password: newUser.password,
         role: newUser.role,
-        status: "pending",
+        approval_status: "approved",
+      });
+      const created = data?.data;
+      if (!created?.id) {
+        setError("استجابة غير متوقعة من الخادم");
+        return;
+      }
+      const extras = readStaffProfileExtras();
+      extras[uname] = {
+        ...extras[uname],
+        name: newUser.name.trim(),
+        ...(newUser.avatarDataUrl ? { avatarDataUrl: newUser.avatarDataUrl } : {}),
+      };
+      writeStaffProfileExtras(extras);
+
+      const row = {
+        id: created.id,
+        name: newUser.name.trim(),
+        username: created.username,
+        email: "",
+        password: "",
+        role: created.role,
+        status: "active",
         createdAt: new Date().toISOString(),
         avatarDataUrl: newUser.avatarDataUrl || "",
-      },
-      ...staff,
-    ];
-    setStaff(next);
-    setNewUser({ name: "", username: "", password: "", email: "", role: "cashier", avatarDataUrl: "" });
-    setOpenAddDialog(false);
+      };
+      setStaff((prev) => [row, ...prev.filter((u) => u.id !== created.id)]);
+      setNewUser({ name: "", username: "", password: "", role: "cashier", avatarDataUrl: "" });
+      setShowNewUserPassword(false);
+      setOpenAddDialog(false);
+      showAppToast(data?.message || "تم إنشاء الحساب", "success");
+    } catch (err) {
+      const msg =
+        err?.response?.data?.errors?.username?.[0] ||
+        err?.response?.data?.message ||
+        err?.response?.data?.error ||
+        "فشل إنشاء الحساب";
+      setError(msg);
+      showAppToast("فشل إنشاء الحساب", "error");
+    } finally {
+      setAddSaving(false);
+    }
   };
 
-  const confirmDeleteUser = () => {
+  const confirmDeleteUser = async () => {
     if (!deleteTarget) return;
     if (String(deleteTarget.username || "").toLowerCase() === SUPER_ADMIN_USERNAME) {
       showAppToast("لا يمكن حذف حساب مدير النظام الأساسي", "error");
       setDeleteTarget(null);
       return;
     }
-    setStaff((prev) => prev.filter((u) => u.id !== deleteTarget.id));
-    setDeleteTarget(null);
+    try {
+      await Axios.delete(`users/${deleteTarget.id}`);
+      setStaff((prev) => prev.filter((u) => u.id !== deleteTarget.id));
+      showAppToast("تم حذف الحساب", "success");
+    } catch (err) {
+      showAppToast(err?.response?.data?.message || err?.response?.data?.error || "فشل حذف الحساب", "error");
+    } finally {
+      setDeleteTarget(null);
+    }
   };
 
   const openEditEmployee = (row) => {
@@ -261,7 +339,6 @@ export default function StaffPage({ mode, onToggleMode }) {
     setEditForm({
       name: row.name || "",
       username: row.username || "",
-      email: row.email || "",
       password: row.password || "",
       role: row.role || "cashier",
       status: row.status || "active",
@@ -282,13 +359,8 @@ export default function StaffPage({ mode, onToggleMode }) {
     setEditError("");
     const name = editForm.name.trim();
     const username = editForm.username.trim();
-    const email = editForm.email.trim();
     if (!name || !username) {
       setEditError("الاسم واسم المستخدم مطلوبان");
-      return;
-    }
-    if (email && !email.includes("@")) {
-      setEditError("يرجى إدخال بريد صحيح");
       return;
     }
     const dup = staff.some(
@@ -310,6 +382,7 @@ export default function StaffPage({ mode, onToggleMode }) {
         password: nextPassword,
         role: editForm.role,
         approval_status: editForm.status === "pending" ? "pending" : "approved",
+        is_active: editForm.status !== "inactive",
       });
 
       const extras = readStaffProfileExtras();
@@ -328,7 +401,7 @@ export default function StaffPage({ mode, onToggleMode }) {
                 ...u,
                 name,
                 username,
-                email,
+                email: "",
                 password: nextPassword,
                 role: editForm.role,
                 status: editForm.status,
@@ -511,182 +584,195 @@ export default function StaffPage({ mode, onToggleMode }) {
         </Grid>
 
         <Card sx={{ mt: 2, borderRadius: 3, overflow: "hidden" }}>
-          <Box sx={{ ...adminPageContainerSx, bgcolor: alpha(theme.palette.primary.main, 0.06) }}>
+          <Box sx={{ px: { xs: 1.5, sm: 2 }, py: 1.5, bgcolor: alpha(theme.palette.primary.main, 0.06) }}>
             <Typography fontWeight={800}>جدول الموظفين</Typography>
-            <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: { xs: "none", sm: "block" } }}>
-              انقر على صف الموظف لعرض بيانات الحساب وتعديلها (الاسم، البريد، كلمة المرور، الدور، الحالة)
+            <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: "block" }}>
+              انقر على صف الموظف للتعديل — التمرير الأفقي على الشاشة الضيقة
             </Typography>
           </Box>
           <Divider />
-
-          <Box sx={{ p: 1.2 }}>
-            <Grid
-              container
-              alignItems="center"
-              sx={{
-                px: 1,
-                py: 1,
-                mb: 0.5,
-                bgcolor: alpha(theme.palette.primary.main, 0.06),
-                borderRadius: 2,
-              }}
-            >
-              <Grid size={{ xs: 12, md: 3 }}>
-                <Typography variant="caption" fontWeight={800} color="text.secondary">
-                  الموظف
-                </Typography>
-              </Grid>
-              <Grid size={{ xs: 12, md: 2 }}>
-                <Typography variant="caption" fontWeight={800} color="text.secondary">
-                  الدور
-                </Typography>
-              </Grid>
-              <Grid size={{ xs: 12, md: 2.2 }}>
-                <Typography variant="caption" fontWeight={800} color="text.secondary">
-                  الحالة
-                </Typography>
-              </Grid>
-              <Grid size={{ xs: 12, md: 2.8 }}>
-                <Typography variant="caption" fontWeight={800} color="text.secondary">
-                  التفعيل
-                </Typography>
-              </Grid>
-              <Grid size={{ xs: 12, md: 0.6 }}>
-                <Typography variant="caption" fontWeight={800} color="text.secondary">
-                  حذف
-                </Typography>
-              </Grid>
-            </Grid>
-
-            {paginatedStaff.map((row, idx) => (
-              <Box key={row.id}>
-                <Grid
-                  container
-                  alignItems="center"
-                  onClick={() => openEditEmployee(row)}
-                  sx={{
-                    px: 1,
-                    py: 1.2,
-                    cursor: "pointer",
-                    borderRadius: 2,
-                    transition: "background-color 0.15s ease",
-                    "&:hover": { bgcolor: alpha(theme.palette.primary.main, 0.06) },
-                  }}
-                >
-                  <Grid size={{ xs: 12, md: 3 }}>
-                    <Typography fontWeight={700}>{row.name}</Typography>
-                    <Typography variant="caption" color="text.secondary">@{row.username}</Typography>
-                  </Grid>
-
-                  <Grid size={{ xs: 12, md: 2 }}>
-                    <Chip
-                      size="small"
-                      label={
-                        row.role === "admin" ? "Admin" : row.role === "super_cashier" ? "سوبر كاشير" : "Cashier"
-                      }
-                      color={
-                        row.role === "admin" ? "primary" : row.role === "super_cashier" ? "info" : "secondary"
-                      }
-                      variant="outlined"
-                    />
-                  </Grid>
-
-                  <Grid size={{ xs: 12, md: 2.2 }}>
-                    <Chip
-                      size="small"
-                      icon={
-                        row.status === "active" ? <CheckCircle fontSize="small" /> : row.status === "inactive" ? <ToggleOff fontSize="small" /> : <HourglassTop fontSize="small" />
-                      }
-                      label={row.status === "active" ? "مفعل" : row.status === "inactive" ? "غير مفعل" : "بانتظار الموافقة"}
-                      color={row.status === "active" ? "success" : row.status === "inactive" ? "warning" : "info"}
-                      variant="outlined"
-                    />
-                  </Grid>
-
-                  <Grid size={{ xs: 12, md: 2.8 }} onClick={(e) => e.stopPropagation()}>
-                    {row.status === "pending" ? (
+          <TableContainer
+            component={Paper}
+            elevation={0}
+            sx={{
+              maxWidth: "100%",
+              overflowX: "auto",
+              WebkitOverflowScrolling: "touch",
+              borderRadius: 0,
+            }}
+          >
+            <Table size="small" stickyHeader sx={{ minWidth: 720, tableLayout: "fixed" }}>
+              <TableHead>
+                <TableRow>
+                  <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary", width: "26%" }}>
+                    الموظف
+                  </TableCell>
+                  <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary", width: "14%" }}>
+                    الدور
+                  </TableCell>
+                  <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary", width: "18%" }}>
+                    الحالة
+                  </TableCell>
+                  <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary", width: "26%" }}>
+                    التفعيل
+                  </TableCell>
+                  <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary", width: "16%" }}>
+                    حذف
+                  </TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {paginatedStaff.map((row) => (
+                  <TableRow
+                    key={row.id}
+                    hover
+                    onClick={() => openEditEmployee(row)}
+                    sx={{ cursor: "pointer", "&:last-child td": { borderBottom: 0 } }}
+                  >
+                    <TableCell align="center" sx={{ verticalAlign: "middle" }}>
+                      <Typography fontWeight={700} sx={{ wordBreak: "break-word" }}>
+                        {row.name}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary" display="block">
+                        @{row.username}
+                      </Typography>
+                    </TableCell>
+                    <TableCell align="center" sx={{ verticalAlign: "middle" }}>
+                      <Chip
+                        size="small"
+                        label={row.role === "admin" ? "Admin" : row.role === "super_cashier" ? "سوبر كاشير" : "Cashier"}
+                        color={row.role === "admin" ? "primary" : row.role === "super_cashier" ? "info" : "secondary"}
+                        variant="outlined"
+                      />
+                    </TableCell>
+                    <TableCell align="center" sx={{ verticalAlign: "middle" }}>
+                      <Chip
+                        size="small"
+                        icon={
+                          row.status === "active" ? (
+                            <CheckCircle fontSize="small" />
+                          ) : row.status === "inactive" ? (
+                            <ToggleOff fontSize="small" />
+                          ) : (
+                            <HourglassTop fontSize="small" />
+                          )
+                        }
+                        label={row.status === "active" ? "مفعل" : row.status === "inactive" ? "غير مفعل" : "بانتظار الموافقة"}
+                        color={row.status === "active" ? "success" : row.status === "inactive" ? "warning" : "info"}
+                        variant="outlined"
+                      />
+                    </TableCell>
+                    <TableCell align="center" sx={{ verticalAlign: "middle" }} onClick={(e) => e.stopPropagation()}>
+                      {row.status === "pending" ? (
+                        <Button
+                          size="small"
+                          variant="contained"
+                          onClick={() => approveUser(row.id)}
+                          sx={{ textTransform: "none", fontWeight: 800 }}
+                        >
+                          موافقة
+                        </Button>
+                      ) : (
+                        <Stack direction="row" alignItems="center" justifyContent="center" sx={{ gap: 0.75, flexWrap: "wrap" }}>
+                          <Switch
+                            checked={row.status === "active"}
+                            disabled={String(row.username || "").toLowerCase() === SUPER_ADMIN_USERNAME}
+                            onChange={(e) => setActiveState(row.id, e.target.checked)}
+                            sx={{
+                              direction: "ltr",
+                              width: 54,
+                              height: 30,
+                              p: 0.5,
+                              "& .MuiSwitch-switchBase": {
+                                p: 0.5,
+                                transform: "translateX(0px)",
+                              },
+                              "& .MuiSwitch-switchBase.Mui-checked": {
+                                transform: "translateX(24px)",
+                                color: "#fff",
+                              },
+                              "& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track": {
+                                backgroundColor: "#2e7d32",
+                                opacity: 1,
+                              },
+                              "& .MuiSwitch-track": {
+                                borderRadius: 30,
+                                backgroundColor: "#9e9e9e",
+                                opacity: 1,
+                              },
+                              "& .MuiSwitch-thumb": {
+                                width: 22,
+                                height: 22,
+                                boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
+                              },
+                            }}
+                          />
+                          <Typography variant="caption" fontWeight={700} color={row.status === "active" ? "success.main" : "text.secondary"}>
+                            {row.status === "active" ? "مفعل" : "غير مفعل"}
+                          </Typography>
+                        </Stack>
+                      )}
+                    </TableCell>
+                    <TableCell align="center" sx={{ verticalAlign: "middle" }} onClick={(e) => e.stopPropagation()}>
                       <Button
                         size="small"
-                        variant="contained"
-                        onClick={() => approveUser(row.id)}
-                        sx={{ textTransform: "none", fontWeight: 800 }}
+                        color="error"
+                        variant="outlined"
+                        startIcon={<DeleteOutline fontSize="small" />}
+                        disabled={String(row.username || "").toLowerCase() === SUPER_ADMIN_USERNAME}
+                        onClick={() => setDeleteTarget(row)}
+                        sx={{ textTransform: "none", minWidth: 0, px: 1 }}
                       >
-                        موافقة على الدخول
+                        حذف
                       </Button>
-                    ) : (
-                      <Stack direction="row" alignItems="center" sx={{ gap: 1 }}>
-                        <Switch
-                          checked={row.status === "active"}
-                          onChange={(e) => setActiveState(row.id, e.target.checked)}
-                          sx={{
-                            direction: "ltr",
-                            width: 54,
-                            height: 30,
-                            p: 0.5,
-                            "& .MuiSwitch-switchBase": {
-                              p: 0.5,
-                              transform: "translateX(0px)",
-                            },
-                            "& .MuiSwitch-switchBase.Mui-checked": {
-                              transform: "translateX(24px)",
-                              color: "#fff",
-                            },
-                            "& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track": {
-                              backgroundColor: "#2e7d32",
-                              opacity: 1,
-                            },
-                            "& .MuiSwitch-track": {
-                              borderRadius: 30,
-                              backgroundColor: "#9e9e9e",
-                              opacity: 1,
-                            },
-                            "& .MuiSwitch-thumb": {
-                              width: 22,
-                              height: 22,
-                              boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
-                            },
-                          }}
-                        />
-                        <Typography variant="caption" fontWeight={700} color={row.status === "active" ? "success.main" : "text.secondary"}>
-                          {row.status === "active" ? "مفعل" : "غير مفعل"}
-                        </Typography>
-                      </Stack>
-                    )}
-                  </Grid>
-
-                  <Grid size={{ xs: 12, md: 0.6 }} onClick={(e) => e.stopPropagation()}>
-                    <Button
-                      size="small"
-                      color="error"
-                      variant="outlined"
-                      startIcon={<DeleteOutline fontSize="small" />}
-                      disabled={String(row.username || "").toLowerCase() === SUPER_ADMIN_USERNAME}
-                      onClick={() => setDeleteTarget(row)}
-                      sx={{ textTransform: "none", minWidth: 88 }}
-                    >
-                      حذف
-                    </Button>
-                  </Grid>
-                </Grid>
-                {idx !== paginatedStaff.length - 1 && <Divider />}
-              </Box>
-            ))}
-            <Stack direction="row" justifyContent="center" sx={{ mt: 1.5 }}>
-              <Pagination
-                count={pageCount}
-                page={safePage}
-                onChange={(_, value) => setPage(value)}
-                color="primary"
-                shape="rounded"
-              />
-            </Stack>
-          </Box>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+          <Stack direction="row" justifyContent="center" sx={{ py: 1.5 }}>
+            <Pagination
+              count={pageCount}
+              page={safePage}
+              onChange={(_, value) => setPage(value)}
+              color="primary"
+              shape="rounded"
+            />
+          </Stack>
         </Card>
 
-        <Dialog open={Boolean(editTarget)} onClose={closeEditEmployee} fullWidth maxWidth="sm">
-          <DialogTitle sx={{ textAlign: "right" }}>تعديل حساب الموظف</DialogTitle>
-          <DialogContent sx={{ textAlign: "right" }}>
-            <Stack sx={{ gap: 1.2, mt: 1 }}>
+        <Dialog
+          open={Boolean(editTarget)}
+          onClose={closeEditEmployee}
+          fullWidth
+          maxWidth="sm"
+          slotProps={{ paper: { sx: { borderRadius: 3, overflow: "hidden" } } }}
+        >
+          <DialogTitle
+            sx={{
+              position: "relative",
+              textAlign: "center",
+              borderBottom: "1px solid",
+              borderColor: "divider",
+              pt: 2.5,
+              pb: 1.5,
+            }}
+          >
+            <IconButton
+              aria-label="إغلاق"
+              size="small"
+              onClick={closeEditEmployee}
+              sx={{ position: "absolute", insetInlineStart: 8, top: "50%", transform: "translateY(-50%)" }}
+            >
+              <Close />
+            </IconButton>
+            <Typography variant="h6" fontWeight={800} sx={{ px: { xs: 5, sm: 7 } }}>
+              تعديل حساب الموظف
+            </Typography>
+          </DialogTitle>
+          <DialogContent dividers sx={{ textAlign: "right", px: { xs: 2, sm: 3 }, py: 2 }}>
+            <Stack sx={{ gap: 1.4 }}>
               {editError ? (
                 <Typography variant="body2" color="error.main">
                   {editError}
@@ -707,13 +793,6 @@ export default function StaffPage({ mode, onToggleMode }) {
                 label="اسم المستخدم (لتسجيل الدخول)"
                 value={editForm.username}
                 onChange={(e) => setEditForm((p) => ({ ...p, username: e.target.value }))}
-                fullWidth
-                inputProps={{ style: { textAlign: "right" } }}
-              />
-              <TextField
-                label="البريد الإلكتروني"
-                value={editForm.email}
-                onChange={(e) => setEditForm((p) => ({ ...p, email: e.target.value }))}
                 fullWidth
                 inputProps={{ style: { textAlign: "right" } }}
               />
@@ -756,28 +835,47 @@ export default function StaffPage({ mode, onToggleMode }) {
                 onChange={(e) => setEditForm((p) => ({ ...p, status: e.target.value }))}
               >
                 <MenuItem value="active">مفعل</MenuItem>
-                <MenuItem value="inactive">غير مفعل</MenuItem>
+                <MenuItem
+                  value="inactive"
+                  disabled={String(editTarget?.username || "").toLowerCase() === SUPER_ADMIN_USERNAME}
+                >
+                  غير مفعل
+                </MenuItem>
                 <MenuItem value="pending">بانتظار الموافقة</MenuItem>
               </Select>
               <Typography variant="caption" color="text.secondary">
                 صورة تظهر في هيدر لوحة الأدمن عند تسجيل دخول هذا الحساب
               </Typography>
               <Stack direction="row" alignItems="center" sx={{ gap: 1, flexWrap: "wrap" }}>
-                <Button variant="outlined" component="label" sx={{ textTransform: "none" }}>
-                  رفع صورة من الجهاز
-                  <input
-                    type="file"
-                    hidden
-                    accept="image/*"
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (!f?.type?.startsWith("image/")) return;
+                <input
+                  ref={editUserAvatarInputRef}
+                  type="file"
+                  accept="image/*"
+                  style={{ display: "none" }}
+                  onChange={async (e) => {
+                    const f = e.target.files?.[0];
+                    e.target.value = "";
+                    if (!f?.type?.startsWith("image/")) return;
+                    try {
+                      const dataUrl = await compressImageFileToDataUrl(f);
+                      setEditForm((p) => ({ ...p, avatarDataUrl: dataUrl }));
+                    } catch {
                       const r = new FileReader();
                       r.onload = () => setEditForm((p) => ({ ...p, avatarDataUrl: String(r.result || "") }));
                       r.readAsDataURL(f);
-                      e.target.value = "";
-                    }}
-                  />
+                    }
+                  }}
+                />
+                <Button
+                  type="button"
+                  variant="outlined"
+                  sx={{ textTransform: "none" }}
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    editUserAvatarInputRef.current?.click();
+                  }}
+                >
+                  رفع صورة من الجهاز
                 </Button>
                 {editForm.avatarDataUrl ? (
                   <Avatar src={editForm.avatarDataUrl} sx={{ width: 48, height: 48 }} variant="rounded" />
@@ -790,7 +888,7 @@ export default function StaffPage({ mode, onToggleMode }) {
               </Stack>
             </Stack>
           </DialogContent>
-          <DialogActions sx={{ px: 3, pb: 2 }}>
+          <DialogActions sx={{ px: 3, py: 2, gap: 1, bgcolor: (t) => alpha(t.palette.action.hover, 0.06) }}>
             <Button onClick={closeEditEmployee} sx={{ textTransform: "none" }}>
               إلغاء
             </Button>
@@ -812,10 +910,45 @@ export default function StaffPage({ mode, onToggleMode }) {
           </DialogActions>
         </Dialog>
 
-        <Dialog open={openAddDialog} onClose={() => setOpenAddDialog(false)} fullWidth maxWidth="sm">
-          <DialogTitle sx={{ textAlign: "right" }}>إضافة موظف جديد</DialogTitle>
-          <DialogContent sx={{ textAlign: "right" }}>
-            <Stack sx={{ gap: 1.2, mt: 1 }}>
+        <Dialog
+          open={openAddDialog}
+          onClose={() => {
+            setOpenAddDialog(false);
+            setError("");
+            setShowNewUserPassword(false);
+          }}
+          fullWidth
+          maxWidth="sm"
+          slotProps={{ paper: { sx: { borderRadius: 3, overflow: "hidden" } } }}
+        >
+          <DialogTitle
+            sx={{
+              position: "relative",
+              textAlign: "center",
+              borderBottom: "1px solid",
+              borderColor: "divider",
+              pt: 2.5,
+              pb: 1.5,
+            }}
+          >
+            <IconButton
+              aria-label="إغلاق"
+              size="small"
+              onClick={() => {
+                setOpenAddDialog(false);
+                setError("");
+                setShowNewUserPassword(false);
+              }}
+              sx={{ position: "absolute", insetInlineStart: 8, top: "50%", transform: "translateY(-50%)" }}
+            >
+              <Close />
+            </IconButton>
+            <Typography variant="h6" fontWeight={800} sx={{ px: { xs: 5, sm: 7 } }}>
+              إضافة موظف جديد
+            </Typography>
+          </DialogTitle>
+          <DialogContent dividers sx={{ textAlign: "right", px: { xs: 2, sm: 3 }, py: 2 }}>
+            <Stack sx={{ gap: 1.4 }}>
               {error ? (
                 <Typography variant="body2" color="error.main">
                   {error}
@@ -836,19 +969,26 @@ export default function StaffPage({ mode, onToggleMode }) {
                 inputProps={{ style: { textAlign: "right" } }}
               />
               <TextField
-                label="البريد الإلكتروني (Hotmail)"
-                value={newUser.email || ""}
-                onChange={(e) => setNewUser((p) => ({ ...p, email: e.target.value }))}
-                fullWidth
-                inputProps={{ style: { textAlign: "right" } }}
-              />
-              <TextField
                 label="كلمة المرور"
-                type="password"
+                type={showNewUserPassword ? "text" : "password"}
                 value={newUser.password || ""}
                 onChange={(e) => setNewUser((p) => ({ ...p, password: e.target.value }))}
                 fullWidth
                 inputProps={{ style: { textAlign: "right" } }}
+                InputProps={{
+                  endAdornment: (
+                    <InputAdornment position="end">
+                      <IconButton
+                        aria-label="إظهار كلمة المرور"
+                        onClick={() => setShowNewUserPassword((v) => !v)}
+                        edge="end"
+                        size="small"
+                      >
+                        {showNewUserPassword ? <VisibilityOff fontSize="small" /> : <Visibility fontSize="small" />}
+                      </IconButton>
+                    </InputAdornment>
+                  ),
+                }}
               />
               <Select
                 fullWidth
@@ -863,21 +1003,35 @@ export default function StaffPage({ mode, onToggleMode }) {
                 صورة اختيارية تظهر في الهيدر بعد تفعيل الحساب وتسجيل الدخول
               </Typography>
               <Stack direction="row" alignItems="center" sx={{ gap: 1, flexWrap: "wrap" }}>
-                <Button variant="outlined" component="label" sx={{ textTransform: "none" }}>
-                  رفع صورة من الجهاز
-                  <input
-                    type="file"
-                    hidden
-                    accept="image/*"
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (!f?.type?.startsWith("image/")) return;
+                <input
+                  ref={newUserAvatarInputRef}
+                  type="file"
+                  accept="image/*"
+                  style={{ display: "none" }}
+                  onChange={async (e) => {
+                    const f = e.target.files?.[0];
+                    e.target.value = "";
+                    if (!f?.type?.startsWith("image/")) return;
+                    try {
+                      const dataUrl = await compressImageFileToDataUrl(f);
+                      setNewUser((p) => ({ ...p, avatarDataUrl: dataUrl }));
+                    } catch {
                       const r = new FileReader();
                       r.onload = () => setNewUser((p) => ({ ...p, avatarDataUrl: String(r.result || "") }));
                       r.readAsDataURL(f);
-                      e.target.value = "";
-                    }}
-                  />
+                    }
+                  }}
+                />
+                <Button
+                  type="button"
+                  variant="outlined"
+                  sx={{ textTransform: "none" }}
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    newUserAvatarInputRef.current?.click();
+                  }}
+                >
+                  رفع صورة من الجهاز
                 </Button>
                 {newUser.avatarDataUrl ? (
                   <Avatar src={newUser.avatarDataUrl} sx={{ width: 48, height: 48 }} variant="rounded" />
@@ -890,12 +1044,31 @@ export default function StaffPage({ mode, onToggleMode }) {
               </Stack>
             </Stack>
           </DialogContent>
-          <DialogActions sx={{ px: 3, pb: 2 }}>
-            <Button onClick={() => setOpenAddDialog(false)} sx={{ textTransform: "none" }}>
+          <DialogActions sx={{ px: 3, py: 2, gap: 1, bgcolor: (t) => alpha(t.palette.action.hover, 0.06) }}>
+            <Button
+              onClick={() => {
+                setOpenAddDialog(false);
+                setError("");
+                setShowNewUserPassword(false);
+              }}
+              sx={{ textTransform: "none" }}
+            >
               إلغاء
             </Button>
-            <Button onClick={addUser} variant="contained" sx={{ textTransform: "none", fontWeight: 800 }}>
-              إضافة الحساب
+            <Button
+              onClick={addUser}
+              variant="contained"
+              disabled={addSaving}
+              sx={{ textTransform: "none", fontWeight: 800, minWidth: 140 }}
+            >
+              {addSaving ? (
+                <Stack direction="row" alignItems="center" sx={{ gap: 1 }}>
+                  <CircularProgress size={16} color="inherit" />
+                  <span>جاري الإنشاء...</span>
+                </Stack>
+              ) : (
+                "إضافة الحساب"
+              )}
             </Button>
           </DialogActions>
         </Dialog>

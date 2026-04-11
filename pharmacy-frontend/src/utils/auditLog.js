@@ -14,6 +14,14 @@ export function readAuditLog() {
 /**
  * @param {{ action: string, details?: string, username?: string, role?: string }} entry
  */
+export function clearAuditLog() {
+  try {
+    localStorage.removeItem(KEY);
+  } catch {
+    // ignore
+  }
+}
+
 export function appendAudit(entry) {
   const row = {
     id: `AUD-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,

@@ -29,6 +29,7 @@ const LEDGER_TYPE_AR = {
   adjust: "حركة",
 };
 import { adminPageContainerSx, adminPageSubtitleSx, adminPageTitleRowSx } from "../../utils/adminPageLayout";
+import { negativeAmountTextSx } from "../../utils/negativeAmountStyle";
 import AdminLayout from "./AdminLayout";
 import { appendAudit } from "../../utils/auditLog";
 import {
@@ -210,7 +211,10 @@ export default function DebtCustomersPage({ mode, onToggleMode }) {
                       {c.name}
                     </TableCell>
                     <TableCell align="center">{c.phone || "—"}</TableCell>
-                    <TableCell align="center" sx={{ fontWeight: 800 }}>
+                    <TableCell
+                      align="center"
+                      sx={{ fontWeight: 800, ...negativeAmountTextSx(Number(c.balance || 0)) }}
+                    >
                       {Number(c.balance || 0).toFixed(2)} شيكل
                     </TableCell>
                     <TableCell align="center">{Number(c.creditLimit || 0).toFixed(2)}</TableCell>
@@ -328,7 +332,14 @@ export default function DebtCustomersPage({ mode, onToggleMode }) {
           <DialogContent dividers sx={{ textAlign: "right" }}>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
               الرصيد الحالي (دين):{" "}
-              <b>{ledgerCustomer ? Number(ledgerCustomer.balance || 0).toFixed(2) : "—"} شيكل</b> — السقف:{" "}
+              <Box
+                component="span"
+                fontWeight={700}
+                sx={ledgerCustomer ? negativeAmountTextSx(Number(ledgerCustomer.balance || 0)) : {}}
+              >
+                {ledgerCustomer ? Number(ledgerCustomer.balance || 0).toFixed(2) : "—"} شيكل
+              </Box>{" "}
+              — السقف:{" "}
               <b>{ledgerCustomer ? Number(ledgerCustomer.creditLimit || 0).toFixed(2) : "—"}</b>
             </Typography>
             <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1.5 }}>
@@ -385,7 +396,10 @@ export default function DebtCustomersPage({ mode, onToggleMode }) {
                         >
                           {row.delta > 0 ? `+${Number(row.delta).toFixed(2)}` : Number(row.delta).toFixed(2)} شيكل
                         </TableCell>
-                        <TableCell align="center" sx={{ fontWeight: 800 }}>
+                        <TableCell
+                          align="center"
+                          sx={{ fontWeight: 800, ...negativeAmountTextSx(Number(row.balanceAfter || 0)) }}
+                        >
                           {Number(row.balanceAfter || 0).toFixed(2)}
                         </TableCell>
                         <TableCell align="center" sx={{ fontSize: 12 }}>

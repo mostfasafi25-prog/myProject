@@ -1,11 +1,12 @@
-import { CssBaseline, ThemeProvider, createTheme } from "@mui/material";
+import { CssBaseline, ThemeProvider, createTheme, alpha } from "@mui/material";
+import { darken, getContrastRatio, lighten } from "@mui/material/styles";
 import { useEffect, useMemo, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import Cookies from "universal-cookie";
 import { Axios } from "./Api/Axios";
 import { logHealthResult } from "./Api/apiDebugLog";
+import SiteSeo from "./components/SiteSeo";
 import Login from "./pages/Auth/Login";
-import Register from "./pages/Auth/Register";
 import HomeDashboard from "./pages/Admin/HomeDashboard";
 import CashierPage from "./pages/CashierPage";
 import CashierNotificationsPage from "./pages/CashierNotificationsPage";
@@ -22,7 +23,7 @@ import PurchasesPage from "./pages/Admin/PurchasesPage";
 import DebtCustomersPage from "./pages/Admin/DebtCustomersPage";
 import StocktakePage from "./pages/Admin/StocktakePage";
 import NotificationsPage from "./pages/Admin/NotificationsPage";
-import SuperCashierSupplyPage from "./pages/SuperCashierSupplyPage";
+import SuperCashierDashboardPage from "./pages/SuperCashierDashboardPage";
 
 /** true = دخول مباشر للإدارة بدون تسجيل دخول. عطّل للإنتاج: false */
 const TEMP_BYPASS_AUTH_TO_ADMIN = false;
@@ -43,6 +44,43 @@ const fontFamilyMap = {
   tajawal: '"Tajawal","Cairo","Arial",sans-serif',
   inter: '"Inter","Tajawal","Cairo","Arial",sans-serif',
 };
+
+function hexLuminance(hex) {
+  const h = String(hex).replace("#", "");
+  if (h.length !== 6) return 0;
+  const r = parseInt(h.slice(0, 2), 16) / 255;
+  const g = parseInt(h.slice(2, 4), 16) / 255;
+  const b = parseInt(h.slice(4, 6), 16) / 255;
+  const lin = (c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+}
+
+/** لون العلامة على الخلفيات الداكنة: يفتّح اللون الأصلي حتى يُقرأ النص والأيقونات */
+function brandPaletteForMode(hex, mode) {
+  const raw = typeof hex === "string" && hex.startsWith("#") ? hex : "#00464d";
+  try {
+    if (mode === "light") {
+      const main = raw;
+      return {
+        main,
+        light: lighten(main, 0.16),
+        dark: darken(main, 0.18),
+        contrastText: getContrastRatio("#ffffff", main) >= 3 ? "#ffffff" : "#0a1214",
+      };
+    }
+    const deep = raw;
+    const L = hexLuminance(deep);
+    const main = L > 0.42 ? deep : lighten(deep, 0.34);
+    const light = L > 0.42 ? lighten(deep, 0.12) : lighten(deep, 0.48);
+    const dark = darken(main, 0.14);
+    const contrastText = getContrastRatio("#ffffff", main) >= 4.5 ? "#ffffff" : "#050a0c";
+    return { main, light, dark, contrastText };
+  } catch {
+    return mode === "light"
+      ? { main: "#006a63", light: "#26a69a", dark: "#004a43", contrastText: "#ffffff" }
+      : { main: "#5eead4", light: "#99f6e4", dark: "#2dd4bf", contrastText: "#050a0c" };
+  }
+}
 
 function tempBypassAdminUser() {
   return {
@@ -109,6 +147,10 @@ function App() {
       cookies.set("token", "__TEMP_BYPASS_AUTH__", { path: "/" });
     }
   }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.themeMode = mode;
+  }, [mode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -198,22 +240,60 @@ function App() {
         spacing: uiSettings.density === "compact" ? 7 : 8,
         palette: {
           mode,
-          primary: { main: uiSettings.primaryColor, contrastText: "#ffffff" },
-          secondary: { main: uiSettings.secondaryColor, contrastText: "#ffffff" },
-          error: { main: "#ba1a1a" },
+          primary: brandPaletteForMode(uiSettings.primaryColor, mode),
+          secondary: brandPaletteForMode(uiSettings.secondaryColor, mode),
+          error: {
+            main: mode === "dark" ? "#f2b8b5" : "#ba1a1a",
+            light: mode === "dark" ? "#ffdad6" : "#ffdad6",
+            dark: mode === "dark" ? "#601410" : "#93000a",
+            contrastText: mode === "dark" ? "#601410" : "#ffffff",
+          },
+          success: {
+            main: mode === "dark" ? "#84cdb0" : "#1b6b4f",
+            contrastText: mode === "dark" ? "#0a1f16" : "#ffffff",
+          },
+          warning: {
+            main: mode === "dark" ? "#f5d088" : "#7c5e10",
+            contrastText: mode === "dark" ? "#221a05" : "#ffffff",
+          },
+          info: {
+            main: mode === "dark" ? "#8ec9ff" : "#1565c0",
+            contrastText: mode === "dark" ? "#051320" : "#ffffff",
+          },
           text:
             mode === "dark"
-              ? { primary: "#eff1f0", secondary: "#bec8c9" }
+              ? { primary: "#eef4f5", secondary: "#b9c9cc", disabled: "rgba(255,255,255,0.38)" }
               : { primary: "#191c1c", secondary: "#3f4949" },
-          divider: mode === "dark" ? "#3f4949" : "#d8dada",
+          divider: mode === "dark" ? "rgba(255,255,255,0.14)" : "#d8dada",
           background:
             mode === "dark"
-              ? { default: "#121616", paper: "#1f2526" }
+              ? { default: "#0f1416", paper: "#1a2124" }
               : { default: "#f8faf9", paper: "#ffffff" },
+          action:
+            mode === "dark"
+              ? {
+                  active: "rgba(255,255,255,0.78)",
+                  hover: "rgba(255,255,255,0.08)",
+                  selected: "rgba(255,255,255,0.12)",
+                  disabled: "rgba(255,255,255,0.32)",
+                  disabledBackground: "rgba(255,255,255,0.08)",
+                }
+              : {},
         },
         shape: { borderRadius: Number(uiSettings.borderRadius) || 10 },
         typography: { fontFamily: fontFamilyMap[uiSettings.fontFamily] || fontFamilyMap.playpen },
         components: {
+          MuiCssBaseline: {
+            styleOverrides: {
+              body: {
+                ...(mode === "dark"
+                  ? {
+                      colorScheme: "dark",
+                    }
+                  : { colorScheme: "light" }),
+              },
+            },
+          },
           MuiTableContainer: {
             styleOverrides: {
               root: {
@@ -233,6 +313,21 @@ function App() {
               }),
             },
           },
+          MuiIconButton: {
+            styleOverrides: {
+              root: ({ theme: t, ownerState }) => {
+                if (t.palette.mode !== "dark") return {};
+                const c = ownerState.color;
+                if (c === "primary" || c === "secondary" || c === "error" || c === "info" || c === "success" || c === "warning") {
+                  return {};
+                }
+                return {
+                  color: t.palette.action.active,
+                  "&:hover": { bgcolor: alpha(t.palette.primary.main, 0.12) },
+                };
+              },
+            },
+          },
           MuiButton: {
             styleOverrides: {
               root: ({ theme: t }) => ({
@@ -245,6 +340,63 @@ function App() {
                     t.palette.mode === "dark" ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.08)",
                 },
               }),
+              outlinedPrimary: ({ theme: t }) =>
+                t.palette.mode === "dark"
+                  ? {
+                      borderColor: alpha(t.palette.primary.main, 0.5),
+                      color: t.palette.primary.light,
+                      "&:hover": {
+                        borderColor: alpha(t.palette.primary.main, 0.72),
+                        bgcolor: alpha(t.palette.primary.main, 0.1),
+                      },
+                    }
+                  : {},
+              outlinedSecondary: ({ theme: t }) =>
+                t.palette.mode === "dark"
+                  ? {
+                      borderColor: alpha(t.palette.secondary.main, 0.5),
+                      color: t.palette.secondary.light,
+                      "&:hover": {
+                        borderColor: alpha(t.palette.secondary.main, 0.72),
+                        bgcolor: alpha(t.palette.secondary.main, 0.1),
+                      },
+                    }
+                  : {},
+              outlinedError: ({ theme: t }) =>
+                t.palette.mode === "dark"
+                  ? {
+                      borderColor: alpha(t.palette.error.main, 0.55),
+                      color: t.palette.error.light,
+                    }
+                  : {},
+            },
+          },
+          MuiToggleButton: {
+            styleOverrides: {
+              root: ({ theme: t }) =>
+                t.palette.mode === "dark"
+                  ? {
+                      color: t.palette.text.secondary,
+                      borderColor: alpha(t.palette.divider, 0.9),
+                      "&.Mui-selected": {
+                        color: t.palette.primary.light,
+                        bgcolor: alpha(t.palette.primary.main, 0.18),
+                        borderColor: alpha(t.palette.primary.main, 0.45),
+                      },
+                    }
+                  : {},
+            },
+          },
+          MuiChip: {
+            styleOverrides: {
+              outlined: ({ theme: t, ownerState }) => {
+                if (t.palette.mode !== "dark") return {};
+                if (ownerState.color && ownerState.color !== "default") return {};
+                return {
+                  borderColor: alpha(t.palette.text.primary, 0.32),
+                  color: t.palette.text.primary,
+                };
+              },
             },
           },
         },
@@ -273,15 +425,21 @@ function App() {
     <ThemeProvider theme={theme}>
       <CssBaseline />
       <BrowserRouter>
+        <SiteSeo />
         <Routes>
           <Route
             path="/login"
-            element={TEMP_BYPASS_AUTH_TO_ADMIN ? <Navigate to="/admin" replace /> : <Login />}
+            element={
+              TEMP_BYPASS_AUTH_TO_ADMIN ? (
+                <Navigate to="/admin" replace />
+              ) : isAuthenticated() ? (
+                <Navigate to={getStoredUser()?.role === "admin" ? "/admin" : "/cashier"} replace />
+              ) : (
+                <Login />
+              )
+            }
           />
-          <Route
-            path="/register"
-            element={TEMP_BYPASS_AUTH_TO_ADMIN ? <Navigate to="/admin" replace /> : <Register />}
-          />
+          <Route path="/register" element={<Navigate to="/login" replace />} />
           <Route
             path="/admin"
             element={
@@ -317,7 +475,7 @@ function App() {
           <Route
             path="/admin/debt-customers"
             element={
-              <ProtectedRoleRoute allowRoles={["admin"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_cashier"]}>
                 <DebtCustomersPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
@@ -510,10 +668,18 @@ function App() {
             }
           />
           <Route
+            path="/cashier/dashboard"
+            element={
+              <ProtectedRoleRoute allowRoles={["super_cashier"]}>
+                <SuperCashierDashboardPage mode={mode} onToggleMode={toggleMode} />
+              </ProtectedRoleRoute>
+            }
+          />
+          <Route
             path="/cashier/supply"
             element={
               <ProtectedRoleRoute allowRoles={["super_cashier"]}>
-                <SuperCashierSupplyPage mode={mode} onToggleMode={toggleMode} />
+                <Navigate to="/cashier/dashboard" replace />
               </ProtectedRoleRoute>
             }
           />

@@ -7,13 +7,14 @@ import {
   DarkMode,
   Dashboard,
   DeleteOutline,
+  CheckCircle,
   EventAvailable,
+  InfoOutlined,
   LightMode,
   ListAlt,
   LocalPharmacy,
   Logout,
   Notifications,
-  Settings,
   ShoppingCart,
   Today,
   WifiOff,
@@ -34,7 +35,6 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
-  Divider,
   Grid,
   IconButton,
   LinearProgress,
@@ -71,19 +71,22 @@ import { Axios } from "../Api/Axios";
 import { confirmApp, showAppToast } from "../utils/appToast";
 import { productDisplayName } from "../utils/productDisplayName";
 import { appendAudit } from "../utils/auditLog";
+import { negativeAmountTextSx } from "../utils/negativeAmountStyle";
 import { notifyStoreBalanceChanged } from "../utils/storeBalanceSync";
 import {
   deleteCashierDraft,
   readDraftsForCashier,
   saveCashierDraft,
 } from "../utils/cashierDraftInvoices";
+import ProductPatientInfoDialog from "../components/ProductPatientInfoDialog";
 import { normalizeSaleOptions, productHasSaleOptions } from "../utils/productSaleOptions";
 import {
   adjustCustomerBalance,
   canAddCreditSale,
   readDebtCustomers,
 } from "../utils/pharmacyDebtCustomers";
-import { isSuperCashier, purchaserDisplayName } from "../utils/userRoles";
+import { persistSalesCategories, PHARMACY_ADMIN_CATEGORIES_SYNCED } from "../utils/backendCategoriesSync";
+import { isSuperCashier, purchaserDisplayName, PHARMACY_USER_STORAGE_EVENT } from "../utils/userRoles";
 import {
   getCashierPrintReceiptPref,
   getCashierSystemSettings,
@@ -143,26 +146,161 @@ const saleTypeLabelMap = {
   optional: "اختياري",
 };
 
-const SALE_TYPE_PICKER_ORDER = ["pill", "strip", "bottle", "box", "sachet", "optional"];
+function mapBackendUnitToSaleType(unit) {
+  const u = String(unit || "").toLowerCase();
+  if (u === "bottle" || u === "ml" || u === "liter") return "bottle";
+  if (u === "box" || u === "pack") return "box";
+  if (u === "piece" || u === "gram" || u === "kg" || u === "meter" || u === "cm") return "pill";
+  if (u === "sachet") return "sachet";
+  return "strip";
+}
+
+function mapApiProductRow(row) {
+  const cats = row.categories || [];
+  const first = cats[0];
+  const catName = first?.name || row.category?.name || "بدون قسم";
+  const catId = first?.id ?? row.category_id ?? null;
+  const uh = String(row.usage_how_to || row.usageHowTo || "").trim();
+  const uf = String(row.usage_frequency || row.usageFrequency || "").trim();
+  const ut = String(row.usage_tips || row.usageTips || "").trim();
+  return {
+    id: row.id,
+    name: row.name,
+    desc: row.description || "",
+    price: Number(row.price || 0),
+    category: catName,
+    categoryId: catId,
+    qty: Number(row.stock ?? 0),
+    saleType: mapBackendUnitToSaleType(row.unit),
+    active: row.is_active !== false,
+    image: row.image_url || row.imageUrl || "",
+    barcode: row.barcode || "",
+    createdAt: row.created_at || row.createdAt,
+    saleOptions: row.sale_options ?? row.saleOptions,
+    ...(uh ? { usageHowTo: uh } : {}),
+    ...(uf ? { usageFrequency: uf } : {}),
+    ...(ut ? { usageTips: ut } : {}),
+  };
+}
+
+function mergeCashierProductsWithLocalStorage(apiList) {
+  let local = [];
+  try {
+    const parsed = JSON.parse(localStorage.getItem(ADMIN_PRODUCTS_KEY));
+    local = Array.isArray(parsed) ? parsed : [];
+  } catch {
+    local = [];
+  }
+  if (!local.length) return apiList;
+  return apiList.map((p) => {
+    const loc = local.find((l) => Number(l.id) === Number(p.id));
+    if (!loc) return p;
+    const lHow = String(loc.usageHowTo || "").trim();
+    const lFreq = String(loc.usageFrequency || "").trim();
+    const lTips = String(loc.usageTips || "").trim();
+    return {
+      ...p,
+      qty: loc.qty != null ? Number(loc.qty) : p.qty,
+      price: loc.price != null ? Number(loc.price) : p.price,
+      min: loc.min != null ? loc.min : p.min,
+      saleOptions: loc.saleOptions ?? p.saleOptions,
+      saleType: loc.saleType || p.saleType,
+      active: loc.active !== false,
+      ...(lHow ? { usageHowTo: lHow } : {}),
+      ...(lFreq ? { usageFrequency: lFreq } : {}),
+      ...(lTips ? { usageTips: lTips } : {}),
+    };
+  });
+}
+
+async function fetchAllSalesProductsPages(axiosInstance) {
+  const all = [];
+  let page = 1;
+  let lastPage = 1;
+  const perPage = 100;
+  for (let guard = 0; guard < 40; guard += 1) {
+    const { data } = await axiosInstance.get("products", {
+      params: { per_page: perPage, page, scope: "sales" },
+    });
+    if (!data?.success) break;
+    const chunk = Array.isArray(data.data) ? data.data : [];
+    all.push(...chunk);
+    lastPage = Number(data.pagination?.last_page || 1);
+    if (page >= lastPage) break;
+    page += 1;
+  }
+  return all;
+}
+
+function readStoredUser() {
+  try {
+    return JSON.parse(localStorage.getItem("user")) || null;
+  } catch {
+    return null;
+  }
+}
 
 export default function CashierPage({ mode = "light", onToggleMode }) {
   const theme = useTheme();
+  const cashierDlgPaperSx = useMemo(() => ({ borderRadius: 3, overflow: "hidden" }), []);
+  const cashierDlgSlotProps = useMemo(() => ({ paper: { sx: cashierDlgPaperSx } }), [cashierDlgPaperSx]);
+  const cashierDlgTitleSx = useMemo(
+    () => ({
+      textAlign: "right",
+      pt: 2.25,
+      pb: 1.5,
+      px: { xs: 2, sm: 2.5 },
+      borderBottom: "1px solid",
+      borderColor: "divider",
+    }),
+    [],
+  );
+  const cashierDlgContentSx = useMemo(
+    () => ({ textAlign: "right", px: { xs: 2, sm: 2.5 }, py: 2 }),
+    [],
+  );
+  const cashierDlgActionsSx = useMemo(
+    () => ({
+      px: 2.5,
+      py: 2,
+      gap: 1,
+      flexWrap: "wrap",
+      bgcolor: alpha(theme.palette.action.hover, 0.08),
+    }),
+    [theme],
+  );
   const isSmDown = useMediaQuery(theme.breakpoints.down("sm"));
   const isMdDown = useMediaQuery(theme.breakpoints.down("md"));
   const navigate = useNavigate();
   const cookies = new Cookies();
-  const currentUser = useMemo(() => {
-    try {
-      return JSON.parse(localStorage.getItem("user")) || null;
-    } catch {
-      return null;
-    }
+  const [currentUser, setCurrentUser] = useState(() => readStoredUser());
+  useEffect(() => {
+    const sync = () => setCurrentUser(readStoredUser());
+    const onStorage = (e) => {
+      if (e.key === "user" || e.key === null) sync();
+    };
+    window.addEventListener(PHARMACY_USER_STORAGE_EVENT, sync);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener(PHARMACY_USER_STORAGE_EVENT, sync);
+      window.removeEventListener("storage", onStorage);
+    };
   }, []);
+  const cashierAvatarSrc = useMemo(() => {
+    const u = currentUser;
+    if (!u) return undefined;
+    const s = u.avatarDataUrl || u.avatar;
+    return typeof s === "string" && s.trim() ? s.trim() : undefined;
+  }, [currentUser]);
+  const cashierAvatarLetter = useMemo(() => {
+    const raw = String(currentUser?.username || currentUser?.name || "?").trim() || "?";
+    return raw.charAt(0).toUpperCase();
+  }, [currentUser]);
+  const canOpenCashierSettings =
+    currentUser?.role === "cashier" || currentUser?.role === "super_cashier";
   const [activeCategory, setActiveCategory] = useState(0);
   const [cart, setCart] = useState([]);
   const [paymentMethod, setPaymentMethod] = useState("cash");
-  const [shiftStats, setShiftStats] = useState({ invoiceCount: 0, total: 0, cash: 0, app: 0, credit: 0 });
-  const [shiftInvoices, setShiftInvoices] = useState([]);
   const [shiftStartedAt, setShiftStartedAt] = useState(() => new Date().toISOString());
   const [endShiftOpen, setEndShiftOpen] = useState(false);
   const [shiftFeedback, setShiftFeedback] = useState("");
@@ -173,6 +311,14 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
   const [detailTodayInvoice, setDetailTodayInvoice] = useState(null);
   const [repeatInvoiceFeedback, setRepeatInvoiceFeedback] = useState("");
   const [invoiceStoreTick, setInvoiceStoreTick] = useState(0);
+  /** كتالوج المبيعات من الـ API (أقسام + أصناف) عند نجاح الجلب */
+  const [apiCatalog, setApiCatalog] = useState(null);
+  const [categoryStorageTick, setCategoryStorageTick] = useState(0);
+  useEffect(() => {
+    const bump = () => setCategoryStorageTick((t) => t + 1);
+    window.addEventListener(PHARMACY_ADMIN_CATEGORIES_SYNCED, bump);
+    return () => window.removeEventListener(PHARMACY_ADMIN_CATEGORIES_SYNCED, bump);
+  }, []);
   const [offlineModeEnabled, setOfflineModeEnabled] = useState(() => localStorage.getItem(OFFLINE_MODE_KEY) === "1");
   const [isOnline, setIsOnline] = useState(() => {
     if (typeof navigator === "undefined") return true;
@@ -187,10 +333,10 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
     }
   });
   const [productSortMode, setProductSortMode] = useState("default");
-  const [saleTypePickerOpen, setSaleTypePickerOpen] = useState(false);
   const [saleOptionPickerOpen, setSaleOptionPickerOpen] = useState(false);
   const [selectedProductForSaleType, setSelectedProductForSaleType] = useState(null);
-  const [pickedSaleOption, setPickedSaleOption] = useState(null);
+  const [productInfoOpen, setProductInfoOpen] = useState(false);
+  const [productInfoTarget, setProductInfoTarget] = useState(null);
   const [syncConfirmOpen, setSyncConfirmOpen] = useState(false);
   const [isCheckoutSubmitting, setIsCheckoutSubmitting] = useState(false);
   const [isSyncSubmitting, setIsSyncSubmitting] = useState(false);
@@ -276,6 +422,44 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
     window.addEventListener("pharmacy-notification-prefs-changed", on);
     return () => window.removeEventListener("pharmacy-notification-prefs-changed", on);
   }, []);
+
+  useEffect(() => {
+    const token = cookies.get("token");
+    if (!token) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const catRes = await Axios.get("categories/main", { params: { scope: "sales" } });
+        const rawRows = await fetchAllSalesProductsPages(Axios);
+        if (cancelled) return;
+        let cats =
+          catRes.data?.success && Array.isArray(catRes.data.data)
+            ? catRes.data.data.map((c) => ({ id: c.id, name: c.name, active: true }))
+            : [];
+        const mapped = rawRows.map(mapApiProductRow);
+        if (!cats.length && mapped.length) {
+          const byId = new Map();
+          for (const p of mapped) {
+            if (p.categoryId != null) {
+              byId.set(p.categoryId, { id: p.categoryId, name: p.category, active: true });
+            }
+          }
+          cats = [...byId.values()].sort((a, b) => String(a.name).localeCompare(String(b.name), "ar"));
+        }
+        if (!mapped.length) return;
+        setApiCatalog({ categories: cats, products: mapped });
+        if (cats.length) {
+          persistSalesCategories(cats.map((c) => ({ id: c.id, name: c.name, is_active: c.active !== false })));
+        }
+        setActiveCategory(0);
+      } catch (e) {
+        console.warn("[كاشير] تعذر جلب الأقسام/الأصناف من الخادم — يُستخدم المحلي", e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const unreadNotifications = useMemo(() => {
     void notifyPrefsTick;
     try {
@@ -285,7 +469,7 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
     } catch {
       return 0;
     }
-  }, [cart, currentUsername, shiftStats.invoiceCount, notifyPrefsTick]);
+  }, [cart, currentUsername, invoiceStoreTick, notifyPrefsTick]);
 
   const readStoreBalance = () => {
     let balance = { total: 0, cash: 0, app: 0 };
@@ -451,6 +635,42 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
       .sort((a, b) => new Date(b.soldAt || 0).getTime() - new Date(a.soldAt || 0).getTime());
   }, [allSalesInvoices, currentUser?.role, currentUser?.username]);
 
+  /** نفس منطق «بيع اليوم» حتى يتطابق ملخص إنهاء الدوام بعد التحديث أو فتح الصفحة من جديد */
+  const shiftStats = useMemo(() => {
+    let total = 0;
+    let cash = 0;
+    let app = 0;
+    let credit = 0;
+    for (const inv of todaySalesForCashier) {
+      const saleTotal = roundOneDecimal(Number(inv.total || 0));
+      total += saleTotal;
+      const pm = inv.paymentMethod;
+      if (pm === "cash") cash += saleTotal;
+      else if (pm === "app") app += saleTotal;
+      else if (pm === "credit") credit += saleTotal;
+    }
+    return {
+      invoiceCount: todaySalesForCashier.length,
+      total: roundOneDecimal(total),
+      cash: roundOneDecimal(cash),
+      app: roundOneDecimal(app),
+      credit: roundOneDecimal(credit),
+    };
+  }, [todaySalesForCashier]);
+
+  const shiftInvoices = useMemo(
+    () =>
+      todaySalesForCashier.map((inv) => ({
+        id: inv.id,
+        soldAt: inv.soldAt,
+        paymentMethod: inv.paymentMethod,
+        total: inv.total,
+        pendingOffline: Boolean(inv.pendingOffline),
+        items: (inv.items || []).map((it) => ({ name: it.name, qty: it.qty })),
+      })),
+    [todaySalesForCashier],
+  );
+
   const todaySalesPageCount = Math.max(1, Math.ceil(todaySalesForCashier.length / TODAY_SALES_ROWS));
   const safeTodayPage = Math.min(todaySalesPage, todaySalesPageCount);
   const paginatedTodaySales = useMemo(() => {
@@ -459,6 +679,9 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
   }, [todaySalesForCashier, safeTodayPage]);
 
   const visibleCategories = useMemo(() => {
+    if (apiCatalog?.categories?.length) {
+      return apiCatalog.categories.filter((c) => c.active !== false);
+    }
     try {
       const stored = JSON.parse(localStorage.getItem("adminCategories"));
       if (Array.isArray(stored) && stored.length) {
@@ -468,9 +691,12 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
       // ignore
     }
     return defaultAdminCategories.filter((c) => c.active !== false);
-  }, []);
+  }, [apiCatalog, categoryStorageTick]);
 
   const visibleProducts = useMemo(() => {
+    if (apiCatalog?.products?.length) {
+      return mergeCashierProductsWithLocalStorage(apiCatalog.products).filter((p) => p.active !== false);
+    }
     try {
       const stored = JSON.parse(localStorage.getItem("adminProducts"));
       if (Array.isArray(stored) && stored.length) {
@@ -480,7 +706,7 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
       // ignore
     }
     return products.filter((p) => p.active !== false);
-  }, [invoiceStoreTick]);
+  }, [apiCatalog, invoiceStoreTick]);
 
   const categoryTabs = useMemo(
     () => [{ id: 0, name: "الكل" }, ...visibleCategories],
@@ -500,8 +726,13 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
   }, [allSalesInvoices]);
 
   const shownProducts = useMemo(() => {
-    const activeCategoryName = visibleCategories.find((c) => c.id === activeCategory)?.name;
-    let list = visibleProducts.filter((p) => (activeCategoryName ? p.category === activeCategoryName : true));
+    const activeCat = visibleCategories.find((c) => c.id === activeCategory);
+    const activeCategoryName = activeCat?.name;
+    let list = visibleProducts.filter((p) => {
+      if (!activeCategory || activeCategory === 0) return true;
+      if (p.categoryId != null && activeCat != null && Number(p.categoryId) === Number(activeCat.id)) return true;
+      return activeCategoryName ? String(p.category || "") === String(activeCategoryName) : true;
+    });
     if (productSortMode === "top") {
       list = [...list].sort((a, b) => {
         const ca = salesCountByProductId.get(Number(a.id)) || 0;
@@ -574,13 +805,8 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
         showAppToast("لا صنف بهذا الباركود", "warning");
         return;
       }
-      setSelectedProductForSaleType(exact);
-      setPickedSaleOption(null);
-      if (productHasSaleOptions(exact)) {
-        setSaleOptionPickerOpen(true);
-      } else {
-        setSaleTypePickerOpen(true);
-      }
+      setProductInfoTarget(exact);
+      setProductInfoOpen(true);
       setProductFilter("");
     },
     [visibleProducts],
@@ -623,6 +849,32 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
         },
       ];
     });
+    showAppToast(`تمت إضافة «${lineName}» للسلة`, "success");
+  };
+
+  const openProductPatientInfo = (product) => {
+    if (!product) return;
+    setProductInfoTarget(product);
+    setProductInfoOpen(true);
+  };
+
+  const closeProductPatientInfo = () => {
+    setProductInfoOpen(false);
+    setProductInfoTarget(null);
+  };
+
+  const addFromProductPatientInfo = () => {
+    const p = productInfoTarget;
+    if (!p) return;
+    setProductInfoOpen(false);
+    setProductInfoTarget(null);
+    setSelectedProductForSaleType(p);
+    if (productHasSaleOptions(p)) {
+      setSaleOptionPickerOpen(true);
+    } else {
+      addToCart(p, p.saleType || "strip", null);
+      setSelectedProductForSaleType(null);
+    }
   };
 
   const updateQty = (rowId, op) => {
@@ -792,24 +1044,7 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
       }
       applySaleToLocalStock(invoice.items);
 
-      const saleTotal = roundOneDecimal(total);
       skipNextLogoutShiftNotifyRef.current = false;
-      const invSnap = {
-        id: invoice.id,
-        soldAt: invoice.soldAt,
-        paymentMethod: invoice.paymentMethod,
-        total: invoice.total,
-        pendingOffline: Boolean(shouldQueueOffline),
-        items: (invoice.items || []).map((it) => ({ name: it.name, qty: it.qty })),
-      };
-      setShiftInvoices((prev) => [invSnap, ...prev]);
-      setShiftStats((s) => ({
-        invoiceCount: s.invoiceCount + 1,
-        total: roundOneDecimal(s.total + saleTotal),
-        cash: paymentMethod === "cash" ? roundOneDecimal(s.cash + saleTotal) : s.cash,
-        app: paymentMethod === "app" ? roundOneDecimal(s.app + saleTotal) : s.app,
-        credit: paymentMethod === "credit" ? roundOneDecimal((s.credit || 0) + saleTotal) : s.credit || 0,
-      }));
 
       appendAudit({
         action: "cashier_sale",
@@ -1014,8 +1249,6 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
     });
     skipNextLogoutShiftNotifyRef.current = true;
 
-    setShiftStats({ invoiceCount: 0, total: 0, cash: 0, app: 0, credit: 0 });
-    setShiftInvoices([]);
     setShiftStartedAt(new Date().toISOString());
     setEndShiftOpen(false);
     setShiftFeedback("تم إرسال ملخص الدوام إلى المدير، وسيتم تسجيل الخروج تلقائياً.");
@@ -1074,19 +1307,40 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
                   borderBottom: `1px solid ${alpha(theme.palette.divider, 0.85)}`,
                 }}
               >
-                <Avatar
-                  variant="rounded"
-                  sx={{
-                    width: 40,
-                    height: 40,
-                    flexShrink: 0,
-                    bgcolor: alpha(theme.palette.primary.main, 0.12),
-                    color: "primary.main",
-                    borderRadius: 2,
-                  }}
-                >
-                  <LocalPharmacy sx={{ fontSize: 22 }} />
-                </Avatar>
+                <Tooltip title={canOpenCashierSettings ? "الحساب والإعدادات" : "معاينة المدير"}>
+                  <IconButton
+                    size="small"
+                    onClick={() => {
+                      if (canOpenCashierSettings) navigate("/cashier/settings/account");
+                    }}
+                    sx={{
+                      p: 0.25,
+                      flexShrink: 0,
+                      borderRadius: 2,
+                      ...(canOpenCashierSettings
+                        ? { "&:hover": { bgcolor: alpha(theme.palette.primary.main, 0.08) } }
+                        : { cursor: "default" }),
+                    }}
+                    aria-label={canOpenCashierSettings ? "الحساب والإعدادات" : "صورة المستخدم"}
+                  >
+                    <Avatar
+                      src={cashierAvatarSrc}
+                      variant="rounded"
+                      imgProps={{ decoding: "async" }}
+                      sx={{
+                        width: 40,
+                        height: 40,
+                        fontWeight: 800,
+                        fontSize: "1rem",
+                        bgcolor: alpha(theme.palette.primary.main, 0.14),
+                        color: "primary.main",
+                        border: `1px solid ${alpha(theme.palette.primary.main, 0.22)}`,
+                      }}
+                    >
+                      {cashierAvatarSrc ? null : cashierAvatarLetter}
+                    </Avatar>
+                  </IconButton>
+                </Tooltip>
                 <Box sx={{ flex: 1, minWidth: 0 }}>
                   <Typography fontWeight={800} sx={{ fontSize: { xs: "0.88rem", sm: "0.95rem" }, lineHeight: 1.35 }}>
                     {PHARMACY_DISPLAY_NAME}
@@ -1129,6 +1383,25 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
                   });
                   return (
                     <>
+                      {isSuperCashier(currentUser) ? (
+                        <Tooltip title="لوحة التحكم">
+                          <span style={{ display: "block", width: "100%", minWidth: 0 }}>
+                            <IconButton
+                              size="small"
+                              onClick={() => navigate("/cashier/dashboard")}
+                              aria-label="لوحة التحكم"
+                              sx={cellBtn({
+                                color: "secondary.main",
+                                bgcolor: alpha(theme.palette.secondary.main, 0.1),
+                                borderColor: alpha(theme.palette.secondary.main, 0.25),
+                                "&:hover": { bgcolor: alpha(theme.palette.secondary.main, 0.2) },
+                              })}
+                            >
+                              <Dashboard sx={{ fontSize: 22 }} />
+                            </IconButton>
+                          </span>
+                        </Tooltip>
+                      ) : null}
                       {cashierSys.todaySalesButtonEnabled ? (
                         <Tooltip title="بيع اليوم">
                           <span style={{ display: "block", width: "100%", minWidth: 0 }}>
@@ -1159,19 +1432,6 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
                             <Badge color="error" badgeContent={unreadNotifications} invisible={!unreadNotifications}>
                               <Notifications sx={{ fontSize: 22 }} />
                             </Badge>
-                          </IconButton>
-                        </span>
-                      </Tooltip>
-                      <Tooltip title="إعداداتي">
-                        <span style={{ display: "block", width: "100%", minWidth: 0 }}>
-                          <IconButton
-                            size="small"
-                            color="primary"
-                            onClick={() => navigate("/cashier/settings/account")}
-                            aria-label="إعداداتي"
-                            sx={cellBtn()}
-                          >
-                            <Settings sx={{ fontSize: 22 }} />
                           </IconButton>
                         </span>
                       </Tooltip>
@@ -1225,25 +1485,6 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
                           </span>
                         </Tooltip>
                       ) : null}
-                      {isSuperCashier(currentUser) ? (
-                        <Tooltip title="لوحة التوريد">
-                          <span style={{ display: "block", width: "100%", minWidth: 0 }}>
-                            <IconButton
-                              size="small"
-                              onClick={() => navigate("/cashier/supply")}
-                              aria-label="لوحة التوريد"
-                              sx={cellBtn({
-                                color: "secondary.main",
-                                bgcolor: alpha(theme.palette.secondary.main, 0.1),
-                                borderColor: alpha(theme.palette.secondary.main, 0.25),
-                                "&:hover": { bgcolor: alpha(theme.palette.secondary.main, 0.2) },
-                              })}
-                            >
-                              <Dashboard sx={{ fontSize: 22 }} />
-                            </IconButton>
-                          </span>
-                        </Tooltip>
-                      ) : null}
                       {currentUser?.role === "cashier" || currentUser?.role === "super_cashier" ? (
                         <Tooltip title="إنهاء الدوام">
                           <span style={{ display: "block", width: "100%", minWidth: 0 }}>
@@ -1276,13 +1517,42 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
               sx={{ px: { sm: 2, md: 3 }, py: 2, gap: 2, flexWrap: "wrap" }}
             >
               <Stack direction="row" alignItems="center" sx={{ gap: 1.25, flexWrap: "wrap", minWidth: 0 }}>
-                <LocalPharmacy color="primary" sx={{ opacity: 0.9 }} />
+                <Tooltip title={canOpenCashierSettings ? "الحساب والإعدادات" : "معاينة المدير"}>
+                  <IconButton
+                    size="small"
+                    onClick={() => {
+                      if (canOpenCashierSettings) navigate("/cashier/settings/account");
+                    }}
+                    sx={{
+                      p: 0.25,
+                      ...(canOpenCashierSettings
+                        ? { "&:hover": { bgcolor: alpha(theme.palette.primary.main, 0.08) } }
+                        : { cursor: "default" }),
+                    }}
+                    aria-label={canOpenCashierSettings ? "الحساب والإعدادات" : "صورة المستخدم"}
+                  >
+                    <Avatar
+                      src={cashierAvatarSrc}
+                      imgProps={{ decoding: "async" }}
+                      sx={{
+                        width: 44,
+                        height: 44,
+                        fontWeight: 800,
+                        bgcolor: alpha(theme.palette.primary.main, 0.14),
+                        color: "primary.main",
+                        border: `1px solid ${alpha(theme.palette.primary.main, 0.22)}`,
+                      }}
+                    >
+                      {cashierAvatarSrc ? null : cashierAvatarLetter}
+                    </Avatar>
+                  </IconButton>
+                </Tooltip>
                 <Box sx={{ minWidth: 0 }}>
                   <Typography fontWeight={900} color="primary.main" noWrap sx={{ maxWidth: { sm: 480 } }}>
                     {PHARMACY_DISPLAY_NAME} — الكاشير
                   </Typography>
                   <Typography variant="caption" color="text.secondary" display="block">
-                    تصفح الأصناف حسب القسم من الشريط الجانبي
+                    {currentUser?.username ? `@${currentUser.username}` : "الكاشير"}
                   </Typography>
                 </Box>
                 <IconButton onClick={onToggleMode} color="primary" size="small" aria-label="تبديل الوضع">
@@ -1317,15 +1587,6 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
                     <Notifications />
                   </Badge>
                 </IconButton>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  startIcon={<Settings sx={{ fontSize: 18 }} />}
-                  onClick={() => navigate("/cashier/settings/account")}
-                  sx={{ textTransform: "none", fontWeight: 800 }}
-                >
-                  إعداداتي
-                </Button>
                 {cashierSys.debtPayFromCashierEnabled ? (
                   <Button
                     variant="outlined"
@@ -1365,10 +1626,10 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
                     color="secondary"
                     size="small"
                     startIcon={<Dashboard fontSize="small" />}
-                    onClick={() => navigate("/cashier/supply")}
+                    onClick={() => navigate("/cashier/dashboard")}
                     sx={{ textTransform: "none", fontWeight: 800 }}
                   >
-                    لوحة التوريد
+                    لوحة التحكم
                   </Button>
                 ) : null}
 
@@ -1384,22 +1645,6 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
                     إنهاء الدوام
                   </Button>
                 ) : null}
-
-                <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-
-                <Stack direction="row" alignItems="center" sx={{ gap: 0.75 }}>
-                  <Box textAlign="right">
-                    <Typography variant="caption" fontWeight={700}>
-                      {currentUser?.username === "cashier_special" ? "Cashier Special" : "Cashier"}
-                    </Typography>
-                    <Typography variant="caption" display="block" color="text.secondary">
-                      Pharmacy Operator
-                    </Typography>
-                  </Box>
-                  <Avatar sx={{ bgcolor: alpha(theme.palette.primary.main, 0.2), color: "primary.main", width: 36, height: 36 }}>
-                    <LocalPharmacy fontSize="small" />
-                  </Avatar>
-                </Stack>
               </Stack>
             </Stack>
           )}
@@ -1430,16 +1675,19 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
           fullWidth
           maxWidth="md"
           fullScreen={isSmDown}
+          slotProps={cashierDlgSlotProps}
         >
-          <DialogTitle sx={{ textAlign: "right" }}>
-            بيع اليوم
-            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+          <DialogTitle sx={cashierDlgTitleSx}>
+            <Typography component="div" variant="h6" fontWeight={900}>
+              بيع اليوم
+            </Typography>
+            <Typography component="div" variant="body2" color="text.secondary" sx={{ mt: 0.75, lineHeight: 1.55, fontWeight: 500 }}>
               {currentUser?.role === "admin"
-                ? "جميع فواتير اليوم (معاينة المدير)"
-                : "فواتيرك المسجّلة اليوم فقط — إعادة الفاتورة تضيف البنود للسلة وتُسجَّل في مرتجعات المبيعات"}
+                ? "جميع فواتير اليوم (معاينة المدير)."
+                : "فواتيرك المسجّلة اليوم فقط. إعادة الفاتورة تضيف البنود للسلة وتُسجَّل في مرتجعات المبيعات."}
             </Typography>
           </DialogTitle>
-          <DialogContent sx={{ textAlign: "right", px: { xs: 1, sm: 3 } }}>
+          <DialogContent dividers sx={{ ...cashierDlgContentSx, px: { xs: 1, sm: 2.5 } }}>
             <TableContainer
               component={Paper}
               variant="outlined"
@@ -1544,7 +1792,7 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
               </Stack>
             ) : null}
           </DialogContent>
-          <DialogActions sx={{ px: 3, pb: 2 }}>
+          <DialogActions sx={cashierDlgActionsSx}>
             <Button onClick={() => setTodaySalesOpen(false)} variant="contained" sx={{ textTransform: "none" }}>
               إغلاق
             </Button>
@@ -1557,44 +1805,105 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
           fullWidth
           maxWidth="md"
           fullScreen={isSmDown}
+          slotProps={cashierDlgSlotProps}
         >
-          <DialogTitle sx={{ textAlign: "right" }}>
-            تفاصيل الفاتورة — {detailTodayInvoice?.id}
+          <DialogTitle sx={cashierDlgTitleSx}>
+            <Typography component="div" variant="h6" fontWeight={900}>
+              تفاصيل الفاتورة
+            </Typography>
+            <Typography component="div" variant="body2" color="text.secondary" sx={{ mt: 0.35 }}>
+              رقم الفاتورة:{" "}
+              <Box component="span" fontWeight={800} color="text.primary">
+                {detailTodayInvoice?.id ?? "—"}
+              </Box>
+            </Typography>
           </DialogTitle>
-          <DialogContent sx={{ textAlign: "right" }}>
-            <Stack sx={{ gap: 1, mb: 2 }}>
-              <Typography variant="body2" color="text.secondary">
-                البائع: <b>{detailTodayInvoice?.soldBy || "-"}</b>
-                {detailTodayInvoice?.soldByRole ? (
-                  <Typography component="span" variant="caption" color="text.secondary">
-                    {" "}
-                    ({detailTodayInvoice.soldByRole})
-                  </Typography>
-                ) : null}
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                التاريخ:{" "}
-                <b>
-                  {detailTodayInvoice?.soldAt ? new Date(detailTodayInvoice.soldAt).toLocaleString("en-GB") : "-"}
-                </b>
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                الدفع:{" "}
-                <b>
-                  {detailTodayInvoice?.paymentMethod === "app"
-                    ? "تطبيق"
-                    : detailTodayInvoice?.paymentMethod === "credit"
-                      ? `آجل${detailTodayInvoice?.creditCustomerName ? ` — ${detailTodayInvoice.creditCustomerName}` : ""}`
-                      : "كاش"}
-                </b>
-              </Typography>
-              {Number(detailTodayInvoice?.discountAmount || 0) > 0 ? (
-                <Typography variant="body2" color="text.secondary">
-                  المجموع قبل الخصم: <b>{roundOneDecimal(Number(detailTodayInvoice?.subTotal || 0)).toFixed(1)} شيكل</b> — خصم:{" "}
-                  <b>{roundOneDecimal(Number(detailTodayInvoice.discountAmount)).toFixed(1)} شيكل</b>
-                </Typography>
-              ) : null}
-            </Stack>
+          <DialogContent dividers sx={cashierDlgContentSx}>
+            <Typography variant="overline" color="text.secondary" fontWeight={800} sx={{ display: "block", mb: 1, letterSpacing: 0.5 }}>
+              بيانات الفاتورة
+            </Typography>
+            <TableContainer component={Paper} variant="outlined" sx={{ borderRadius: 2, mb: 2 }}>
+              <Table size="small">
+                <TableBody>
+                  <TableRow>
+                    <TableCell
+                      sx={{
+                        fontWeight: 800,
+                        width: "38%",
+                        bgcolor: alpha(theme.palette.primary.main, 0.06),
+                        borderRight: `1px solid ${theme.palette.divider}`,
+                      }}
+                    >
+                      البائع
+                    </TableCell>
+                    <TableCell sx={{ fontWeight: 700 }}>
+                      {detailTodayInvoice?.soldBy || "—"}
+                      {detailTodayInvoice?.soldByRole ? (
+                        <Typography component="span" variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.25 }}>
+                          ({detailTodayInvoice.soldByRole})
+                        </Typography>
+                      ) : null}
+                    </TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell
+                      sx={{
+                        fontWeight: 800,
+                        bgcolor: alpha(theme.palette.primary.main, 0.06),
+                        borderRight: `1px solid ${theme.palette.divider}`,
+                      }}
+                    >
+                      التاريخ والوقت
+                    </TableCell>
+                    <TableCell sx={{ fontWeight: 700 }}>
+                      {detailTodayInvoice?.soldAt ? new Date(detailTodayInvoice.soldAt).toLocaleString("en-GB") : "—"}
+                    </TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell
+                      sx={{
+                        fontWeight: 800,
+                        bgcolor: alpha(theme.palette.primary.main, 0.06),
+                        borderRight: `1px solid ${theme.palette.divider}`,
+                      }}
+                    >
+                      طريقة الدفع
+                    </TableCell>
+                    <TableCell sx={{ fontWeight: 700 }}>
+                      {detailTodayInvoice?.paymentMethod === "app"
+                        ? "تطبيق"
+                        : detailTodayInvoice?.paymentMethod === "credit"
+                          ? `آجل${detailTodayInvoice?.creditCustomerName ? ` — ${detailTodayInvoice.creditCustomerName}` : ""}`
+                          : "كاش"}
+                    </TableCell>
+                  </TableRow>
+                  {Number(detailTodayInvoice?.discountAmount || 0) > 0 ? (
+                    <TableRow>
+                      <TableCell
+                        sx={{
+                          fontWeight: 800,
+                          bgcolor: alpha(theme.palette.primary.main, 0.06),
+                          borderRight: `1px solid ${theme.palette.divider}`,
+                        }}
+                      >
+                        الخصم
+                      </TableCell>
+                      <TableCell>
+                        <Typography variant="body2" fontWeight={700}>
+                          قبل الخصم: {roundOneDecimal(Number(detailTodayInvoice?.subTotal || 0)).toFixed(1)} شيكل
+                        </Typography>
+                        <Typography variant="body2" color="error.main" fontWeight={800} sx={{ mt: 0.25 }}>
+                          خصم: {roundOneDecimal(Number(detailTodayInvoice.discountAmount)).toFixed(1)} شيكل
+                        </Typography>
+                      </TableCell>
+                    </TableRow>
+                  ) : null}
+                </TableBody>
+              </Table>
+            </TableContainer>
+            <Typography variant="overline" color="text.secondary" fontWeight={800} sx={{ display: "block", mb: 1, letterSpacing: 0.5 }}>
+              بنود الفاتورة
+            </Typography>
             <TableContainer component={Paper} variant="outlined" sx={{ borderRadius: 2 }}>
               <Table size="small">
                 <TableHead>
@@ -1641,11 +1950,13 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
                 </TableBody>
               </Table>
             </TableContainer>
-            <Typography variant="subtitle1" fontWeight={900} sx={{ mt: 2 }}>
-              إجمالي الفاتورة: {roundOneDecimal(detailTodayInvoice?.total).toFixed(1)} شيكل
-            </Typography>
+            <Paper variant="outlined" sx={{ mt: 2, p: 1.5, borderRadius: 2, bgcolor: alpha(theme.palette.success.main, 0.06) }}>
+              <Typography variant="subtitle1" fontWeight={900} textAlign="center">
+                إجمالي الفاتورة: {roundOneDecimal(detailTodayInvoice?.total).toFixed(1)} شيكل
+              </Typography>
+            </Paper>
           </DialogContent>
-          <DialogActions sx={{ px: 3, pb: 2, flexWrap: "wrap", gap: 1 }}>
+          <DialogActions sx={{ ...cashierDlgActionsSx, flexWrap: "wrap" }}>
             <Button onClick={() => setDetailTodayInvoice(null)} sx={{ textTransform: "none" }}>
               إغلاق
             </Button>
@@ -1661,43 +1972,156 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
           </DialogActions>
         </Dialog>
 
-        <Dialog open={thankYouOpen} onClose={finalizeLogout} fullWidth maxWidth="xs">
-          <DialogTitle sx={{ textAlign: "right" }}>شكراً لجهدك</DialogTitle>
-          <DialogContent sx={{ textAlign: "right" }}>
-            <Typography variant="h6" fontWeight={800} sx={{ mb: 1 }}>
-              يعطيك الف عافية اخي
+        <Dialog
+          open={thankYouOpen}
+          onClose={finalizeLogout}
+          fullWidth
+          maxWidth="xs"
+          slotProps={cashierDlgSlotProps}
+        >
+          <DialogTitle sx={cashierDlgTitleSx}>
+            <Stack direction="row" alignItems="center" gap={1.25} flexWrap="wrap">
+              <Avatar sx={{ bgcolor: alpha(theme.palette.success.main, 0.15), color: "success.main" }}>
+                <CheckCircle />
+              </Avatar>
+              <Box sx={{ minWidth: 0 }}>
+                <Typography variant="h6" fontWeight={900}>
+                  شكراً لجهدك
+                </Typography>
+                <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.25 }}>
+                  تم إنهاء الدوام بنجاح
+                </Typography>
+              </Box>
+            </Stack>
+          </DialogTitle>
+          <DialogContent dividers sx={cashierDlgContentSx}>
+            <Typography variant="subtitle1" fontWeight={800} sx={{ mb: 1.5 }}>
+              يعطيك الف عافية
             </Typography>
-            <Typography variant="body2" color="text.secondary">
-              تم إنهاء الدوام وإبلاغ المدير بملخص الجلسة عند الحاجة.
-            </Typography>
+            <Stack component="ul" sx={{ m: 0, pl: 2.25, listStyle: "disc", "& li": { display: "list-item" } }} spacing={1}>
+              <Typography component="li" variant="body2" color="text.secondary">
+                تم إنهاء الدوام على هذا الجهاز.
+              </Typography>
+              <Typography component="li" variant="body2" color="text.secondary">
+                يُبلَّغ المدير بملخص الجلسة عند تفعيل الإشعارات.
+              </Typography>
+            </Stack>
           </DialogContent>
-          <DialogActions sx={{ px: 3, pb: 2 }}>
+          <DialogActions sx={cashierDlgActionsSx}>
             <Button variant="contained" onClick={finalizeLogout} sx={{ textTransform: "none", fontWeight: 800 }}>
               متابعة
             </Button>
           </DialogActions>
         </Dialog>
 
-        <Dialog open={endShiftOpen} onClose={() => setEndShiftOpen(false)} fullWidth maxWidth="sm">
-          <DialogTitle sx={{ textAlign: "right" }}>تأكيد إنهاء الدوام</DialogTitle>
-          <DialogContent sx={{ textAlign: "right" }}>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-              سيتم إرسال إشعار للمدير يتضمن ملخص مبيعات هذه الجلسة فقط (بدون إشعار بعد كل فاتورة).
+        <Dialog
+          open={endShiftOpen}
+          onClose={() => setEndShiftOpen(false)}
+          fullWidth
+          maxWidth="sm"
+          slotProps={cashierDlgSlotProps}
+        >
+          <DialogTitle sx={cashierDlgTitleSx}>
+            <Stack direction="row" alignItems="center" gap={1.25} flexWrap="wrap">
+              <Avatar sx={{ bgcolor: alpha(theme.palette.secondary.main, 0.15), color: "secondary.main" }}>
+                <EventAvailable />
+              </Avatar>
+              <Box sx={{ minWidth: 0 }}>
+                <Typography variant="h6" fontWeight={900}>
+                  تأكيد إنهاء الدوام
+                </Typography>
+                <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.25 }}>
+                  راجع الأرقام ثم أرسل ملخص الجلسة للمدير
+                </Typography>
+              </Box>
+            </Stack>
+          </DialogTitle>
+          <DialogContent dividers sx={cashierDlgContentSx}>
+            <Alert severity="info" icon={<InfoOutlined />} sx={{ mb: 2, borderRadius: 2, textAlign: "right" }}>
+              يُرسل للمدير إشعار واحد يتضمن ملخص هذه الجلسة فقط، وليس بعد كل فاتورة.
+            </Alert>
+            <Typography variant="overline" color="text.secondary" fontWeight={800} sx={{ display: "block", mb: 1, letterSpacing: 0.5 }}>
+              ملخص المبيعات (الجلسة الحالية)
             </Typography>
-            <Typography variant="body2">
-              عدد الفواتير: <b>{shiftStats.invoiceCount}</b>
-            </Typography>
-            <Typography variant="body2">
-              إجمالي المبيعات: <b>{roundOneDecimal(shiftStats.total).toFixed(1)} شيكل</b>
-            </Typography>
-            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
-              كاش: {roundOneDecimal(shiftStats.cash).toFixed(1)} شيكل — تطبيق: {roundOneDecimal(shiftStats.app).toFixed(1)} شيكل
-              {roundOneDecimal(shiftStats.credit || 0) > 0
-                ? ` — آجل: ${roundOneDecimal(shiftStats.credit || 0).toFixed(1)} شيكل`
-                : ""}
-            </Typography>
+            <TableContainer component={Paper} variant="outlined" sx={{ borderRadius: 2 }}>
+              <Table size="small">
+                <TableBody>
+                  <TableRow>
+                    <TableCell
+                      sx={{
+                        fontWeight: 800,
+                        width: "42%",
+                        bgcolor: alpha(theme.palette.primary.main, 0.06),
+                        borderRight: `1px solid ${theme.palette.divider}`,
+                      }}
+                    >
+                      عدد الفواتير
+                    </TableCell>
+                    <TableCell sx={{ fontWeight: 900 }}>{shiftStats.invoiceCount}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell
+                      sx={{
+                        fontWeight: 800,
+                        bgcolor: alpha(theme.palette.primary.main, 0.06),
+                        borderRight: `1px solid ${theme.palette.divider}`,
+                      }}
+                    >
+                      إجمالي المبيعات
+                    </TableCell>
+                    <TableCell sx={{ fontWeight: 900, ...negativeAmountTextSx(shiftStats.total) }}>
+                      {roundOneDecimal(shiftStats.total).toFixed(1)} شيكل
+                    </TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell
+                      sx={{
+                        fontWeight: 800,
+                        bgcolor: alpha(theme.palette.primary.main, 0.06),
+                        borderRight: `1px solid ${theme.palette.divider}`,
+                      }}
+                    >
+                      كاش
+                    </TableCell>
+                    <TableCell sx={{ fontWeight: 800, ...negativeAmountTextSx(shiftStats.cash) }}>
+                      {roundOneDecimal(shiftStats.cash).toFixed(1)} شيكل
+                    </TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell
+                      sx={{
+                        fontWeight: 800,
+                        bgcolor: alpha(theme.palette.primary.main, 0.06),
+                        borderRight: `1px solid ${theme.palette.divider}`,
+                      }}
+                    >
+                      تطبيق
+                    </TableCell>
+                    <TableCell sx={{ fontWeight: 800, ...negativeAmountTextSx(shiftStats.app) }}>
+                      {roundOneDecimal(shiftStats.app).toFixed(1)} شيكل
+                    </TableCell>
+                  </TableRow>
+                  {roundOneDecimal(shiftStats.credit || 0) > 0 ? (
+                    <TableRow>
+                      <TableCell
+                        sx={{
+                          fontWeight: 800,
+                          bgcolor: alpha(theme.palette.primary.main, 0.06),
+                          borderRight: `1px solid ${theme.palette.divider}`,
+                        }}
+                      >
+                        آجل
+                      </TableCell>
+                      <TableCell sx={{ fontWeight: 800, ...negativeAmountTextSx(shiftStats.credit || 0) }}>
+                        {roundOneDecimal(shiftStats.credit || 0).toFixed(1)} شيكل
+                      </TableCell>
+                    </TableRow>
+                  ) : null}
+                </TableBody>
+              </Table>
+            </TableContainer>
           </DialogContent>
-          <DialogActions sx={{ px: 3, pb: 2 }}>
+          <DialogActions sx={cashierDlgActionsSx}>
             <Button onClick={() => setEndShiftOpen(false)} sx={{ textTransform: "none" }}>
               إلغاء
             </Button>
@@ -1871,7 +2295,16 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
             <Grid container spacing={{ xs: 1.5, sm: 2 }}>
               {shownProducts.map((item) => (
                 <Grid key={item.id} size={{ xs: 12, sm: 6, md: 6, lg: 4, xl: 3 }}>
-                  <Card sx={{ borderRadius: 3, border: `1px solid ${theme.palette.divider}` }}>
+                  <Card
+                    onClick={() => openProductPatientInfo(item)}
+                    sx={{
+                      borderRadius: 3,
+                      border: `1px solid ${theme.palette.divider}`,
+                      cursor: "pointer",
+                      transition: "box-shadow 0.15s, transform 0.15s",
+                      "&:hover": { boxShadow: `0 6px 20px ${alpha(theme.palette.common.black, 0.08)}` },
+                    }}
+                  >
                     <Box
                       sx={{
                         height: 120,
@@ -1881,6 +2314,7 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
                         backgroundImage: item.image ? `url(${item.image})` : "none",
                         backgroundSize: "cover",
                         backgroundPosition: "center",
+                        pointerEvents: "none",
                       }}
                     >
                       {!item.image ? <ShoppingCart color="primary" /> : null}
@@ -1913,14 +2347,10 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
                           ) : null}
                         </Stack>
                         <IconButton
-                          onClick={() => {
-                            setSelectedProductForSaleType(item);
-                            setPickedSaleOption(null);
-                            if (productHasSaleOptions(item)) {
-                              setSaleOptionPickerOpen(true);
-                            } else {
-                              setSaleTypePickerOpen(true);
-                            }
+                          aria-label="معلومات الصنف"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openProductPatientInfo(item);
                           }}
                           sx={{
                             alignSelf: { xs: "flex-end", sm: "center" },
@@ -1931,7 +2361,7 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
                             borderRadius: 2,
                           }}
                         >
-                          <Add />
+                          <InfoOutlined />
                         </IconButton>
                       </Stack>
                     </CardContent>
@@ -2121,8 +2551,10 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
                           <Typography fontWeight={800}>{c.name}</Typography>
                           <Typography variant="caption" color="text.secondary" display="block">
                             هاتف: {c.phone || "—"} — الرصيد (دين):{" "}
-                            {roundOneDecimal(Number(c.balance || 0)).toFixed(1)} شيكل — السقف:{" "}
-                            {roundOneDecimal(Number(c.creditLimit || 0)).toFixed(1)}
+                            <Box component="span" sx={negativeAmountTextSx(Number(c.balance || 0))}>
+                              {roundOneDecimal(Number(c.balance || 0)).toFixed(1)} شيكل
+                            </Box>{" "}
+                            — السقف: {roundOneDecimal(Number(c.creditLimit || 0)).toFixed(1)}
                           </Typography>
                         </Box>
                       </li>
@@ -2260,7 +2692,10 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
                 ) : null}
                 <Stack direction="row" justifyContent="space-between" alignItems="center">
                   <Typography fontWeight={800}>الصافي</Typography>
-                  <Typography fontWeight={900} color="primary.main">
+                  <Typography
+                    fontWeight={900}
+                    sx={{ ...negativeAmountTextSx(total, { color: "primary.main" }) }}
+                  >
                     {total.toFixed(2)} شيكل
                   </Typography>
                 </Stack>
@@ -2311,6 +2746,16 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
         </Stack>
       </Stack>
 
+      <ProductPatientInfoDialog
+        open={productInfoOpen}
+        product={productInfoTarget}
+        onClose={closeProductPatientInfo}
+        onAddToCart={addFromProductPatientInfo}
+        saleTypeLabel={
+          productInfoTarget ? saleTypeLabelMap[productInfoTarget.saleType] || saleTypeLabelMap.optional : ""
+        }
+      />
+
       <Dialog
         open={saleOptionPickerOpen}
         onClose={() => {
@@ -2319,52 +2764,49 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
         }}
         fullWidth
         maxWidth="xs"
+        slotProps={cashierDlgSlotProps}
       >
-        <DialogTitle sx={{ textAlign: "right" }}>
-          اختر خيار الصنف
-          <Typography variant="caption" color="text.secondary" display="block">
+        <DialogTitle sx={cashierDlgTitleSx}>
+          <Typography component="div" variant="h6" fontWeight={900}>
+            اختر خيار الصنف
+          </Typography>
+          <Typography component="div" variant="body2" color="text.secondary" sx={{ mt: 0.5, lineHeight: 1.5 }}>
             {selectedProductForSaleType ? productDisplayName(selectedProductForSaleType) : ""}
           </Typography>
         </DialogTitle>
-        <DialogContent sx={{ textAlign: "right" }}>
+        <DialogContent dividers sx={cashierDlgContentSx}>
           <Stack sx={{ gap: 1, mt: 0.5 }}>
             {selectedProductForSaleType
               ? normalizeSaleOptions(selectedProductForSaleType).map((opt) => {
                   const base = Number(selectedProductForSaleType.price || 0);
                   const line = roundOneDecimal(base + Number(opt.priceDelta || 0));
-                  const deltaTxt =
-                    Number(opt.priceDelta || 0) === 0
-                      ? "نفس السعر الأساسي"
-                      : Number(opt.priceDelta || 0) > 0
-                        ? `+${Number(opt.priceDelta).toFixed(1)} عن الأساس`
-                        : `${Number(opt.priceDelta).toFixed(1)} عن الأساس`;
                   return (
                     <Button
                       key={opt.id}
                       variant="outlined"
                       onClick={() => {
-                        setPickedSaleOption(opt);
+                        const p = selectedProductForSaleType;
                         setSaleOptionPickerOpen(false);
-                        setSaleTypePickerOpen(true);
+                        if (p) {
+                          addToCart(p, p.saleType || "strip", opt);
+                        }
+                        setSelectedProductForSaleType(null);
                       }}
-                      sx={{ justifyContent: "space-between", textTransform: "none", fontWeight: 700, py: 1.1, flexWrap: "wrap", gap: 1 }}
+                      sx={{ justifyContent: "space-between", textTransform: "none", fontWeight: 700, py: 1.25, flexWrap: "wrap", gap: 1 }}
                     >
-                      <span>{opt.label}</span>
-                      <Stack alignItems="flex-end" spacing={0.25}>
-                        <Typography variant="caption" fontWeight={800} color="primary">
-                          {line.toFixed(1)} شيكل
-                        </Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          {deltaTxt}
-                        </Typography>
-                      </Stack>
+                      <Typography component="span" fontWeight={800} sx={{ textAlign: "right" }}>
+                        {opt.label}
+                      </Typography>
+                      <Typography variant="body1" fontWeight={900} color="primary.main" sx={{ whiteSpace: "nowrap" }}>
+                        {line.toFixed(1)} شيكل
+                      </Typography>
                     </Button>
                   );
                 })
               : null}
           </Stack>
         </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
+        <DialogActions sx={cashierDlgActionsSx}>
           <Button
             onClick={() => {
               setSaleOptionPickerOpen(false);
@@ -2378,67 +2820,21 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
       </Dialog>
 
       <Dialog
-        open={saleTypePickerOpen}
-        onClose={() => {
-          setSaleTypePickerOpen(false);
-          setPickedSaleOption(null);
-          setSelectedProductForSaleType(null);
-        }}
+        open={holdLabelOpen}
+        onClose={() => setHoldLabelOpen(false)}
         fullWidth
         maxWidth="xs"
+        slotProps={cashierDlgSlotProps}
       >
-        <DialogTitle sx={{ textAlign: "right" }}>
-          اختر طريقة البيع
-          <Typography variant="caption" color="text.secondary" display="block">
-            {selectedProductForSaleType ? productDisplayName(selectedProductForSaleType) : ""}
-            {pickedSaleOption?.label ? ` — ${pickedSaleOption.label}` : ""}
+        <DialogTitle sx={cashierDlgTitleSx}>
+          <Typography variant="h6" fontWeight={900}>
+            تعليق السلة
           </Typography>
         </DialogTitle>
-        <DialogContent sx={{ textAlign: "right" }}>
-          <Stack sx={{ gap: 1, mt: 0.5 }}>
-            {SALE_TYPE_PICKER_ORDER.map((value) => {
-              const label = saleTypeLabelMap[value];
-              if (!label) return null;
-              return (
-              <Button
-                key={value}
-                variant="outlined"
-                onClick={() => {
-                  if (selectedProductForSaleType) {
-                    addToCart(selectedProductForSaleType, value, pickedSaleOption);
-                  }
-                  setSaleTypePickerOpen(false);
-                  setPickedSaleOption(null);
-                  setSelectedProductForSaleType(null);
-                }}
-                sx={{ justifyContent: "space-between", textTransform: "none", fontWeight: 700, py: 1.1 }}
-              >
-                {label}
-              </Button>
-              );
-            })}
-          </Stack>
-        </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button
-            onClick={() => {
-              setSaleTypePickerOpen(false);
-              setPickedSaleOption(null);
-              setSelectedProductForSaleType(null);
-            }}
-            sx={{ textTransform: "none" }}
-          >
-            إلغاء
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      <Dialog open={holdLabelOpen} onClose={() => setHoldLabelOpen(false)} fullWidth maxWidth="xs">
-        <DialogTitle sx={{ textAlign: "right" }}>تعليق السلة</DialogTitle>
-        <DialogContent sx={{ textAlign: "right" }}>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-            يُحفظ المعلّق لحسابك فقط ({currentUsername || "ضيف"}) ويمكن استرجاعه لاحقاً.
-          </Typography>
+        <DialogContent dividers sx={cashierDlgContentSx}>
+          <Alert severity="info" sx={{ mb: 2, borderRadius: 2, textAlign: "right" }}>
+            يُحفظ المعلّق لحسابك فقط ({currentUsername || "ضيف"}) ويمكن استرجاعه لاحقاً من قائمة السلال المعلّقة.
+          </Alert>
           <TextField
             fullWidth
             size="small"
@@ -2448,7 +2844,7 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
             placeholder="مثال: أحمد — وصفة"
           />
         </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
+        <DialogActions sx={cashierDlgActionsSx}>
           <Button onClick={() => setHoldLabelOpen(false)} sx={{ textTransform: "none" }}>
             إلغاء
           </Button>
@@ -2458,9 +2854,22 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={heldListOpen} onClose={() => setHeldListOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle sx={{ textAlign: "right" }}>سلال معلّقة — {currentUsername || "ضيف"}</DialogTitle>
-        <DialogContent sx={{ textAlign: "right" }}>
+      <Dialog
+        open={heldListOpen}
+        onClose={() => setHeldListOpen(false)}
+        fullWidth
+        maxWidth="sm"
+        slotProps={cashierDlgSlotProps}
+      >
+        <DialogTitle sx={cashierDlgTitleSx}>
+          <Typography component="div" variant="h6" fontWeight={900}>
+            سلال معلّقة
+          </Typography>
+          <Typography component="div" variant="body2" color="text.secondary" sx={{ mt: 0.35 }}>
+            الحساب: <Box component="span" fontWeight={800}>{currentUsername || "ضيف"}</Box>
+          </Typography>
+        </DialogTitle>
+        <DialogContent dividers sx={cashierDlgContentSx}>
           {!heldDrafts.length ? (
             <Typography variant="body2" color="text.secondary">
               لا توجد سلال معلّقة.
@@ -2491,32 +2900,61 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
             </Stack>
           )}
         </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
+        <DialogActions sx={cashierDlgActionsSx}>
           <Button onClick={() => setHeldListOpen(false)} variant="contained" sx={{ textTransform: "none" }}>
             إغلاق
           </Button>
         </DialogActions>
       </Dialog>
 
-      <Dialog open={syncConfirmOpen} onClose={() => setSyncConfirmOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle sx={{ textAlign: "right" }}>تأكيد مزامنة مبيعات عدم الاتصال</DialogTitle>
-        <DialogContent sx={{ textAlign: "right" }}>
-          <Typography variant="body2" sx={{ mb: 1 }}>
-            لديك <b>{pendingOfflineCount}</b> فاتورة محفوظة أثناء انقطاع الإنترنت.
+      <Dialog
+        open={syncConfirmOpen}
+        onClose={() => setSyncConfirmOpen(false)}
+        fullWidth
+        maxWidth="sm"
+        slotProps={cashierDlgSlotProps}
+      >
+        <DialogTitle sx={cashierDlgTitleSx}>
+          <Typography variant="h6" fontWeight={900}>
+            تأكيد مزامنة مبيعات عدم الاتصال
           </Typography>
-          <Typography variant="body2" color="text.secondary">
-            إجمالي المبلغ: <b>{pendingOfflineTotal.toFixed(2)} شيكل</b>
+        </DialogTitle>
+        <DialogContent dividers sx={cashierDlgContentSx}>
+          <TableContainer component={Paper} variant="outlined" sx={{ borderRadius: 2, mb: 2 }}>
+            <Table size="small">
+              <TableBody>
+                <TableRow>
+                  <TableCell sx={{ fontWeight: 800, width: "42%", bgcolor: alpha(theme.palette.primary.main, 0.06) }}>
+                    عدد الفواتير المعلّقة
+                  </TableCell>
+                  <TableCell sx={{ fontWeight: 900 }}>{pendingOfflineCount}</TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell sx={{ fontWeight: 800, bgcolor: alpha(theme.palette.primary.main, 0.06) }}>إجمالي المبالغ</TableCell>
+                  <TableCell sx={{ fontWeight: 900 }}>{pendingOfflineTotal.toFixed(2)} شيكل</TableCell>
+                </TableRow>
+              </TableBody>
+            </Table>
+          </TableContainer>
+          <Alert severity="warning" sx={{ mb: 2, borderRadius: 2, textAlign: "right" }}>
+            راجع الطلبيات في الجدول أدناه، ثم اضغط «حفظ الطلبيات في النظام».
+          </Alert>
+          <Typography variant="overline" color="text.secondary" fontWeight={800} sx={{ display: "block", mb: 1, letterSpacing: 0.5 }}>
+            الطلبيات المحفوظة محلياً
           </Typography>
-          <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
-            راجع الطلبيات التالية ثم اضغط حفظ الطلبيات في النظام.
-          </Typography>
-          <TableContainer sx={{ mt: 1.5, border: "1px solid", borderColor: "divider", borderRadius: 2 }}>
+          <TableContainer component={Paper} variant="outlined" sx={{ borderRadius: 2 }}>
             <Table size="small">
               <TableHead>
-                <TableRow>
-                  <TableCell align="right">رقم الطلب</TableCell>
-                  <TableCell align="right">المبلغ</TableCell>
-                  <TableCell align="right">وقت الحفظ</TableCell>
+                <TableRow sx={{ bgcolor: alpha(theme.palette.primary.main, 0.08) }}>
+                  <TableCell align="right" sx={{ fontWeight: 800 }}>
+                    رقم الطلب
+                  </TableCell>
+                  <TableCell align="right" sx={{ fontWeight: 800 }}>
+                    المبلغ
+                  </TableCell>
+                  <TableCell align="right" sx={{ fontWeight: 800 }}>
+                    وقت الحفظ
+                  </TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
@@ -2540,7 +2978,7 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
             </Table>
           </TableContainer>
         </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
+        <DialogActions sx={cashierDlgActionsSx}>
           <Button onClick={() => setSyncConfirmOpen(false)} sx={{ textTransform: "none" }}>
             إلغاء
           </Button>
@@ -2582,9 +3020,19 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={debtPayOpen} onClose={() => setDebtPayOpen(false)} fullWidth maxWidth="xs">
-        <DialogTitle sx={{ textAlign: "right" }}>تسديد دين — زبون آجل</DialogTitle>
-        <DialogContent sx={{ textAlign: "right", pt: 1 }}>
+      <Dialog
+        open={debtPayOpen}
+        onClose={() => setDebtPayOpen(false)}
+        fullWidth
+        maxWidth="xs"
+        slotProps={cashierDlgSlotProps}
+      >
+        <DialogTitle sx={cashierDlgTitleSx}>
+          <Typography variant="h6" fontWeight={900}>
+            تسديد دين — زبون آجل
+          </Typography>
+        </DialogTitle>
+        <DialogContent dividers sx={{ ...cashierDlgContentSx, pt: 2 }}>
           <Autocomplete
             sx={{ mt: 0.5 }}
             options={debtCustomers}
@@ -2611,14 +3059,68 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
                 <Box sx={{ width: "100%", py: 0.25 }}>
                   <Typography fontWeight={800}>{c.name}</Typography>
                   <Typography variant="caption" color="text.secondary" display="block">
-                    هاتف: {c.phone || "—"} — الرصيد: {roundOneDecimal(Number(c.balance || 0)).toFixed(1)} — السقف:{" "}
-                    {roundOneDecimal(Number(c.creditLimit || 0)).toFixed(1)}
+                    هاتف: {c.phone || "—"} — الرصيد:{" "}
+                    <Box component="span" sx={negativeAmountTextSx(Number(c.balance || 0))}>
+                      {roundOneDecimal(Number(c.balance || 0)).toFixed(1)}
+                    </Box>{" "}
+                    — السقف: {roundOneDecimal(Number(c.creditLimit || 0)).toFixed(1)}
                   </Typography>
                 </Box>
               </li>
             )}
             renderInput={(params) => <TextField {...params} label="الزبون" placeholder="ابحث بالاسم أو الهاتف…" />}
           />
+          {(() => {
+            const sel = debtCustomers.find((c) => String(c.id) === String(debtPayCustomerId));
+            if (!sel) return null;
+            return (
+              <TableContainer component={Paper} variant="outlined" sx={{ mt: 2, borderRadius: 2 }}>
+                <Table size="small">
+                  <TableBody>
+                    <TableRow>
+                      <TableCell
+                        sx={{
+                          fontWeight: 800,
+                          width: "40%",
+                          bgcolor: alpha(theme.palette.primary.main, 0.06),
+                          borderRight: `1px solid ${theme.palette.divider}`,
+                        }}
+                      >
+                        الهاتف
+                      </TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>{sel.phone || "—"}</TableCell>
+                    </TableRow>
+                    <TableRow>
+                      <TableCell
+                        sx={{
+                          fontWeight: 800,
+                          bgcolor: alpha(theme.palette.primary.main, 0.06),
+                          borderRight: `1px solid ${theme.palette.divider}`,
+                        }}
+                      >
+                        الرصيد الحالي
+                      </TableCell>
+                      <TableCell sx={{ fontWeight: 900, ...negativeAmountTextSx(Number(sel.balance || 0)) }}>
+                        {roundOneDecimal(Number(sel.balance || 0)).toFixed(1)} شيكل
+                      </TableCell>
+                    </TableRow>
+                    <TableRow>
+                      <TableCell
+                        sx={{
+                          fontWeight: 800,
+                          bgcolor: alpha(theme.palette.primary.main, 0.06),
+                          borderRight: `1px solid ${theme.palette.divider}`,
+                        }}
+                      >
+                        سقف الآجل
+                      </TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>{roundOneDecimal(Number(sel.creditLimit || 0)).toFixed(1)} شيكل</TableCell>
+                    </TableRow>
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            );
+          })()}
           <TextField
             fullWidth
             label="المبلغ (شيكل)"
@@ -2627,11 +3129,11 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
             sx={{ mt: 2 }}
             inputProps={{ style: { textAlign: "right" } }}
           />
-          <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
-            يُخصم من رصيد الزبون فقط — أضف للصندوق من إعداد المال عند الحاجة.
-          </Typography>
+          <Alert severity="info" variant="outlined" sx={{ mt: 1.5, borderRadius: 2, textAlign: "right" }}>
+            يُخصم من رصيد الزبون فقط. لإضافة المبلغ للصندوق استخدم إعداد المال عند الحاجة.
+          </Alert>
         </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
+        <DialogActions sx={cashierDlgActionsSx}>
           <Button onClick={() => setDebtPayOpen(false)} sx={{ textTransform: "none" }}>
             إلغاء
           </Button>
