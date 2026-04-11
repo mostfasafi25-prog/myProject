@@ -14,11 +14,19 @@ define('LARAVEL_START', microtime(true));
 */
 $__rqMethod = $_SERVER['REQUEST_METHOD'] ?? '';
 $__rqPath = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+$__origin = null;
 if (
     $__rqMethod === 'OPTIONS'
     && ($__rqPath === '/api' || str_starts_with($__rqPath, '/api/'))
 ) {
-    header('Access-Control-Allow-Origin: *');
+    $__origin = $_SERVER['HTTP_ORIGIN'] ?? null;
+    // إرجاع نفس Origin لـ Vercel أحياناً أنسب من * مع بعض البروكسيات/المتصفحات
+    if (is_string($__origin) && $__origin !== '' && preg_match('#^https://[a-zA-Z0-9.-]+\.vercel\.app$#', $__origin)) {
+        header('Access-Control-Allow-Origin: '.$__origin);
+        header('Vary: Origin');
+    } else {
+        header('Access-Control-Allow-Origin: *');
+    }
     header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
     header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, X-CSRF-TOKEN');
     header('Access-Control-Max-Age: 86400');
@@ -74,10 +82,19 @@ $request = Request::capture();
 $response = $kernel->handle($request);
 
 $__p = $request->path();
-if (($__p === 'api' || str_starts_with($__p, 'api/')) && ! $response->headers->get('Access-Control-Allow-Origin')) {
-    $response->headers->set('Access-Control-Allow-Origin', '*');
+$__originHdr = null;
+if ($__p === 'api' || str_starts_with($__p, 'api/')) {
+    if (! $response->headers->get('Access-Control-Allow-Origin')) {
+        $__originHdr = (string) $request->headers->get('Origin');
+        if ($__originHdr !== '' && preg_match('#^https://[a-zA-Z0-9.-]+\.vercel\.app$#', $__originHdr)) {
+            $response->headers->set('Access-Control-Allow-Origin', $__originHdr);
+            $response->headers->set('Vary', 'Origin');
+        } else {
+            $response->headers->set('Access-Control-Allow-Origin', '*');
+        }
+    }
 }
-unset($__p);
+unset($__p, $__originHdr);
 
 $response->send();
 

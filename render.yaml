@@ -28,9 +28,9 @@ services:
       # https://pharmacy-api-xxxx.onrender.com بدون شرطة أخيرة
       - key: APP_URL
         sync: false
-      # إن ظهر CORS من Vercel: https://your-frontend.vercel.app (بدون / أخيرة، فاصلة بين عدة دومينات)
+      # واجهة Vercel — عدّل إن غيّرت الدومين. فاصلة بين عدة أصول.
       - key: CORS_ALLOWED_ORIGINS
-        sync: false
+        value: "https://pharmacy-frontend-psi.vercel.app"
       # خطر أمني: true = الـ API المحمي يعمل بدون Bearer token (كأن المستخدم admin). عطّله للإنتاج: false
       - key: SKIP_API_AUTH
         value: "true"
