@@ -35,7 +35,7 @@ import { Axios } from "../../Api/Axios";
 import { PHARMACY_DISPLAY_NAME } from "../../config/appBranding";
 import { appendUserLoginNotification } from "../../utils/cashierShiftNotification";
 import { mergeUserWithProfileExtras } from "../../utils/staffProfileExtras";
-import { formatApiError, formatIncompleteLoginResponse } from "../../utils/formatApiError";
+import { formatLoginCatchError, loginFailureUserMessage } from "../../utils/formatApiError";
 
 export default function Login() {
   const theme = useTheme();
@@ -59,59 +59,44 @@ export default function Login() {
 
     try {
       setLoading(true);
-      const response = await Axios.post("login", { username: username.trim(), password });
+      const response = await Axios.post(
+        "login",
+        { username: username.trim(), password },
+        { validateStatus: () => true },
+      );
 
+      const status = response?.status ?? 0;
       let payload = response?.data;
       if (typeof payload === "string") {
         try {
           payload = JSON.parse(payload);
         } catch {
-          // يبقى نصاً للتحقق من HTML أدناه
+          // يبقى نصاً (مثلاً HTML)
         }
       }
 
-      const token = payload?.token;
-      let user = payload?.user;
+      const token = payload && typeof payload === "object" ? payload.token : undefined;
+      let user = payload && typeof payload === "object" ? payload.user : undefined;
 
       console.info("[صيدلية][تسجيل دخول] بعد الرد", {
         username,
         roleSelectedInUi: roleView,
         serverRole: user?.role,
         hasToken: Boolean(token),
+        status,
       });
 
-      if (!token || !user?.role) {
-        const raw = payload;
-        const looksLikeHtml = typeof raw === "string" && raw.trimStart().startsWith("<");
-        const reqUrl = [response?.config?.baseURL, response?.config?.url].filter(Boolean).join("");
-        if (raw && typeof raw === "object" && typeof raw.error === "string") {
-          const h = response?.headers;
-          const ct =
-            h?.["content-type"] ||
-            h?.["Content-Type"] ||
-            (typeof h?.get === "function" ? h.get("content-type") : "") ||
-            "";
-          setError(
-            [
-              raw.error,
-              `HTTP ${response?.status ?? "?"}`,
-              ct ? `Content-Type: ${ct}` : "",
-              reqUrl ? `عنوان الطلب: ${reqUrl}` : "",
-              response?.status === 200 && String(ct).toLowerCase().includes("text/html")
-                ? "تلميح: إن كان الخطأ من قاعدة Laravel فالمفترض HTTP 401 و application/json. إن رأيت HTML فالطلب قد لا يصل إلى /api/login على السيرفر الصحيح (تحقق من VITE_API_BASE_URL)."
-                : "",
-            ]
-              .filter(Boolean)
-              .join("\n"),
-          );
-          return;
-        }
-        setError(
-          looksLikeHtml
-            ? "السيرفر أرجع صفحة HTML بدل JSON — تحقق من عنوان الـ API وLogs على Render.\n" +
-                formatIncompleteLoginResponse(response)
-            : formatIncompleteLoginResponse(response),
-        );
+      const looksOk =
+        status >= 200 &&
+        status < 400 &&
+        Boolean(token) &&
+        user &&
+        typeof user === "object" &&
+        Boolean(user.role) &&
+        !(payload && typeof payload === "object" && typeof payload.error === "string");
+
+      if (!looksOk) {
+        setError(loginFailureUserMessage(status, payload));
         return;
       }
 
@@ -153,7 +138,7 @@ export default function Login() {
       }
     } catch (err) {
       console.warn("[صيدلية][تسجيل دخول] فشل", err?.response?.status, err?.response?.data, err);
-      setError(formatApiError(err, "تسجيل الدخول"));
+      setError(formatLoginCatchError(err));
     } finally {
       setLoading(false);
     }

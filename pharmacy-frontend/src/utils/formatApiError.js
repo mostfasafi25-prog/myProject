@@ -90,32 +90,56 @@ function dedupeLines(lines) {
 }
 
 /**
- * عند نجاح HTTP لكن جسم تسجيل الدخول لا يحتوي token/user (تشخيص للمستخدم)
+ * رسالة قصيرة لتسجيل الدخول فقط (بدون HTTP / Content-Type / عنوان الطلب).
+ * يدعم حالات يعيد فيها البروكسي 200 مع JSON خطأ أو Content-Type خاطئ.
  */
-export function formatIncompleteLoginResponse(response) {
-  const status = response?.status;
-  const headers = response?.headers || {};
-  const ct =
-    headers["content-type"] ||
-    headers["Content-Type"] ||
-    (typeof headers.get === "function" ? headers.get("content-type") : "") ||
-    "";
-  let d = response?.data;
-  if (typeof d === "string") {
+export function loginFailureUserMessage(status, rawData) {
+  let p = rawData;
+  if (typeof p === "string") {
+    const t = p.trim();
+    if (t.startsWith("<")) {
+      return "تعذر الاتصال بالسيرفر. تحقق من أن واجهة الـ API تعمل.";
+    }
     try {
-      d = JSON.parse(d);
+      p = JSON.parse(p);
     } catch {
-      // يبقى نصاً
+      return "تعذر تسجيل الدخول. تحقق من البيانات.";
     }
   }
-  const preview =
-    typeof d === "object" && d !== null
-      ? JSON.stringify(d, null, 0).slice(0, 600)
-      : String(d ?? "").slice(0, 600);
-  return [
-    "استجابة تسجيل الدخول غير مكتملة (لا يوجد token أو user.role).",
-    `HTTP ${status ?? "?"}`,
-    `Content-Type: ${ct || "(غير معروف)"}`,
-    `جسم الاستجابة: ${preview}${String(preview).length >= 600 ? "…" : ""}`,
-  ].join("\n");
+
+  if (p && typeof p === "object") {
+    const errStr = typeof p.error === "string" ? p.error.trim() : "";
+    if (errStr === "اسم المستخدم غير صحيح" || errStr === "كلمة المرور غير صحيحة") {
+      return "اسم المستخدم أو كلمة المرور غير صحيحة.";
+    }
+    if (errStr === "يجب إدخال اسم المستخدم وكلمة المرور") return errStr;
+    if (errStr.includes("موافقة الأدمن")) return errStr;
+    if (errStr) return errStr;
+
+    if (p.errors && typeof p.errors === "object") {
+      for (const msgs of Object.values(p.errors)) {
+        if (Array.isArray(msgs) && typeof msgs[0] === "string") return msgs[0];
+        if (typeof msgs === "string") return msgs;
+      }
+    }
+    const m = typeof p.message === "string" ? p.message.trim() : "";
+    if (m) return m;
+  }
+
+  if (status === 429) return "محاولات كثيرة. انتظر قليلاً ثم أعد المحاولة.";
+  if (status >= 500) return "السيرفر غير متاح مؤقتاً. حاول لاحقاً.";
+
+  return "تعذر تسجيل الدخول. تحقق من اسم المستخدم وكلمة المرور.";
+}
+
+/** أخطاء axios لصفحة الدخول (شبكة، إلخ) — نفس أسلوب الرسائل القصيرة */
+export function formatLoginCatchError(err) {
+  const res = err?.response;
+  if (res) {
+    return loginFailureUserMessage(res.status ?? 0, res.data);
+  }
+  if (err?.message === "Network Error" || err?.code === "ERR_NETWORK") {
+    return "لا يوجد اتصال بالسيرفر. تحقق من الإنترنت.";
+  }
+  return "تعذر تسجيل الدخول. حاول مرة أخرى.";
 }

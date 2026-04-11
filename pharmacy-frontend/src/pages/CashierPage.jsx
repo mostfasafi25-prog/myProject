@@ -11,6 +11,7 @@ import {
   LightMode,
   ListAlt,
   LocalPharmacy,
+  Logout,
   Notifications,
   Settings,
   ShoppingCart,
@@ -2639,6 +2640,50 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
           </Button>
         </DialogActions>
       </Dialog>
+
+      {currentUser?.role === "admin" ? (
+        <Paper
+          elevation={14}
+          sx={{
+            position: "fixed",
+            bottom: "max(12px, env(safe-area-inset-bottom))",
+            insetInlineStart: 12,
+            zIndex: theme.zIndex.snackbar,
+            p: 1,
+            borderRadius: 2.5,
+            display: "flex",
+            flexDirection: "column",
+            gap: 0.75,
+            minWidth: 0,
+            maxWidth: "min(280px, calc(100vw - 24px))",
+            bgcolor: alpha(theme.palette.background.paper, 0.98),
+            backdropFilter: "blur(10px)",
+            border: `1px solid ${alpha(theme.palette.primary.main, 0.22)}`,
+            boxShadow: `0 8px 32px ${alpha(theme.palette.common.black, 0.16)}`,
+          }}
+        >
+          <Button
+            variant="contained"
+            color="primary"
+            size="small"
+            startIcon={<Dashboard fontSize="small" />}
+            onClick={() => navigate("/admin")}
+            sx={{ textTransform: "none", fontWeight: 800 }}
+          >
+            لوحة الإدارة
+          </Button>
+          <Button
+            variant="outlined"
+            color="error"
+            size="small"
+            startIcon={<Logout fontSize="small" />}
+            onClick={finalizeLogout}
+            sx={{ textTransform: "none", fontWeight: 700 }}
+          >
+            تسجيل الخروج
+          </Button>
+        </Paper>
+      ) : null}
 
       {printInvoice ? (
         <div className="pharmacy-print-root" dir="rtl">

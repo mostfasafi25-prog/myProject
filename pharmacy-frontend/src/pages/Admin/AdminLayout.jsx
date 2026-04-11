@@ -138,7 +138,17 @@ function AdminSidebarNav({ menuItems, openSections, setOpenSections, onItemNavig
   };
 
   return (
-    <Stack sx={{ flex: 1, minHeight: 0, width: "100%", maxWidth: "100%" }}>
+    <Stack
+      sx={{
+        flex: 1,
+        minHeight: 0,
+        height: "100%",
+        width: "100%",
+        maxWidth: "100%",
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
       <Stack direction="row" alignItems="center" mb={2} sx={{ gap: 1.5, flexShrink: 0 }}>
         <Avatar sx={{ bgcolor: "primary.main", width: 36, height: 36 }}>
           <LocalPharmacy fontSize="small" />
@@ -251,7 +261,14 @@ function AdminSidebarNav({ menuItems, openSections, setOpenSections, onItemNavig
         })}
       </Stack>
 
-      <Box sx={{ pt: 1.5, flexShrink: 0, mt: "auto" }}>
+      <Box
+        sx={{
+          pt: 1.5,
+          flexShrink: 0,
+          mt: "auto",
+          bgcolor: "background.paper",
+        }}
+      >
         <Divider sx={{ mb: 1.5 }} />
         <Button
           fullWidth
@@ -595,13 +612,15 @@ export default function AdminLayout({ mode = "light", onToggleMode, children, em
           },
         }}
       >
-        <AdminSidebarNav
-          menuItems={effectiveMenu}
-          openSections={openSections}
-          setOpenSections={setOpenSections}
-          onItemNavigate={() => setMobileNavOpen(false)}
-          onLogout={handleLogout}
-        />
+        <Box sx={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+          <AdminSidebarNav
+            menuItems={effectiveMenu}
+            openSections={openSections}
+            setOpenSections={setOpenSections}
+            onItemNavigate={() => setMobileNavOpen(false)}
+            onLogout={handleLogout}
+          />
+        </Box>
       </Drawer>
 
       <Stack direction="row" alignItems="stretch" sx={{ gap: { xs: 0, sm: 1.5, md: 2 } }}>
@@ -621,16 +640,62 @@ export default function AdminLayout({ mode = "light", onToggleMode, children, em
             overflow: "hidden",
           }}
         >
-          <AdminSidebarNav
-            menuItems={effectiveMenu}
-            openSections={openSections}
-            setOpenSections={setOpenSections}
-            onLogout={handleLogout}
-          />
+          <Box sx={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            <AdminSidebarNav
+              menuItems={effectiveMenu}
+              openSections={openSections}
+              setOpenSections={setOpenSections}
+              onLogout={handleLogout}
+            />
+          </Box>
         </Paper>
 
         <Box sx={adminMainContentSx}>{children}</Box>
       </Stack>
+
+      {isMdDown && location.pathname.startsWith("/admin") ? (
+        <Paper
+          elevation={14}
+          sx={{
+            position: "fixed",
+            bottom: "max(12px, env(safe-area-inset-bottom))",
+            insetInlineStart: 12,
+            zIndex: theme.zIndex.snackbar,
+            p: 1,
+            borderRadius: 2.5,
+            display: "flex",
+            flexDirection: "column",
+            gap: 0.75,
+            minWidth: 0,
+            maxWidth: "min(280px, calc(100vw - 24px))",
+            bgcolor: alpha(theme.palette.background.paper, 0.98),
+            backdropFilter: "blur(10px)",
+            border: `1px solid ${alpha(theme.palette.primary.main, 0.22)}`,
+            boxShadow: `0 8px 32px ${alpha(theme.palette.common.black, 0.16)}`,
+          }}
+        >
+          <Button
+            variant="contained"
+            color="primary"
+            size="small"
+            startIcon={<PointOfSale fontSize="small" />}
+            onClick={() => navigate("/cashier")}
+            sx={{ textTransform: "none", fontWeight: 800 }}
+          >
+            معاينة الكاشير
+          </Button>
+          <Button
+            variant="outlined"
+            color="error"
+            size="small"
+            startIcon={<Logout fontSize="small" />}
+            onClick={handleLogout}
+            sx={{ textTransform: "none", fontWeight: 700 }}
+          >
+            تسجيل الخروج
+          </Button>
+        </Paper>
+      ) : null}
     </Box>
   );
 }
