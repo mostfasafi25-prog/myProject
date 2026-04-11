@@ -47,7 +47,12 @@ import { Axios } from "../../Api/Axios";
 import { showAppToast } from "../../utils/appToast";
 import { compressImageFileForUpload } from "../../utils/imageCompress";
 import { safeLocalStorageSetJsonWithDataUrlFallback } from "../../utils/safeLocalStorage";
-import { readStaffProfileExtras, writeStaffProfileExtras } from "../../utils/staffProfileExtras";
+import {
+  getSessionAvatarDataUrl,
+  persistUserAvatarForLogin,
+  readStaffProfileExtras,
+  writeStaffProfileExtras,
+} from "../../utils/staffProfileExtras";
 
 const ROWS_PER_PAGE = 5;
 const STAFF_STORAGE_KEY = "adminStaffAccounts";
@@ -106,23 +111,33 @@ const initialStaff = [
   },
 ];
 
+function withSessionAvatars(rows) {
+  if (!Array.isArray(rows)) return rows;
+  return rows.map((row) => ({
+    ...row,
+    avatarDataUrl: getSessionAvatarDataUrl(row.username) || row.avatarDataUrl || "",
+  }));
+}
+
 function loadStaffFromStorage() {
   const defaultsByUsername = Object.fromEntries(initialStaff.map((s) => [s.username, s]));
   try {
     const raw = localStorage.getItem(STAFF_STORAGE_KEY);
-    if (!raw) return initialStaff;
+    if (!raw) return withSessionAvatars(initialStaff);
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed) || !parsed.length) return initialStaff;
-    return parsed.map((row) => {
-      const def = defaultsByUsername[row.username];
-      return {
-        ...row,
-        email: row.email ?? def?.email ?? "",
-        password: row.password ?? def?.password ?? "",
-      };
-    });
+    if (!Array.isArray(parsed) || !parsed.length) return withSessionAvatars(initialStaff);
+    return withSessionAvatars(
+      parsed.map((row) => {
+        const def = defaultsByUsername[row.username];
+        return {
+          ...row,
+          email: row.email ?? def?.email ?? "",
+          password: row.password ?? def?.password ?? "",
+        };
+      }),
+    );
   } catch {
-    return initialStaff;
+    return withSessionAvatars(initialStaff);
   }
 }
 
@@ -190,7 +205,11 @@ export default function StaffPage({ mode, onToggleMode }) {
   const [loadingUsers, setLoadingUsers] = useState(false);
 
   useEffect(() => {
-    safeLocalStorageSetJsonWithDataUrlFallback(STAFF_STORAGE_KEY, staff);
+    for (const u of staff) {
+      if (u?.username) persistUserAvatarForLogin(u.username, u.avatarDataUrl || null);
+    }
+    const slim = staff.map(({ avatarDataUrl: _a, ...rest }) => rest);
+    safeLocalStorageSetJsonWithDataUrlFallback(STAFF_STORAGE_KEY, slim);
   }, [staff]);
 
   useEffect(() => {
@@ -202,15 +221,17 @@ export default function StaffPage({ mode, onToggleMode }) {
         if (apiUsers.length) {
           const extras = readStaffProfileExtras();
           setStaff(
-            apiUsers.map((u) => {
-              const base = mapApiUserToStaff(u);
-              const e = extras[base.username] || {};
-              return {
-                ...base,
-                name: e.name || base.name,
-                avatarDataUrl: e.avatarDataUrl || base.avatarDataUrl,
-              };
-            }),
+            withSessionAvatars(
+              apiUsers.map((u) => {
+                const base = mapApiUserToStaff(u);
+                const e = extras[base.username] || {};
+                return {
+                  ...base,
+                  name: e.name || base.name,
+                  avatarDataUrl: base.avatarDataUrl || "",
+                };
+              }),
+            ),
           );
         }
       } catch {
@@ -286,9 +307,9 @@ export default function StaffPage({ mode, onToggleMode }) {
       extras[uname] = {
         ...extras[uname],
         name: newUser.name.trim(),
-        ...(newUser.avatarDataUrl ? { avatarDataUrl: newUser.avatarDataUrl } : {}),
       };
       writeStaffProfileExtras(extras);
+      persistUserAvatarForLogin(uname, newUser.avatarDataUrl || null);
 
       const row = {
         id: created.id,
@@ -390,12 +411,14 @@ export default function StaffPage({ mode, onToggleMode }) {
 
       const extras = readStaffProfileExtras();
       const oldU = editTarget.username;
-      if (oldU !== username) delete extras[oldU];
+      if (oldU !== username) {
+        delete extras[oldU];
+        persistUserAvatarForLogin(oldU, null);
+      }
       const prevEx = extras[username] || {};
       extras[username] = { ...prevEx, name };
-      if (editForm.avatarDataUrl) extras[username].avatarDataUrl = editForm.avatarDataUrl;
-      else delete extras[username].avatarDataUrl;
       writeStaffProfileExtras(extras);
+      persistUserAvatarForLogin(username, editForm.avatarDataUrl || null);
 
       setStaff((prev) =>
         prev.map((u) =>

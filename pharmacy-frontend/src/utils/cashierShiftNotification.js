@@ -1,4 +1,8 @@
+import { isQuotaExceededError } from "./safeLocalStorage";
+import { evictHeavyCachesBeforeLogin } from "./localStorageEviction";
+
 const NOTIFICATIONS_KEY = "systemNotifications";
+const MAX_NOTIFICATIONS = 80;
 
 const roundOneDecimal = (n) => Math.round(Number(n) * 10) / 10;
 
@@ -53,12 +57,25 @@ export function appendCashierShiftEndNotification({
 
   try {
     const existingNotifications = JSON.parse(localStorage.getItem(NOTIFICATIONS_KEY));
-    const nextNotifications = Array.isArray(existingNotifications)
-      ? [notification, ...existingNotifications]
-      : [notification];
+    const nextNotifications = (
+      Array.isArray(existingNotifications) ? [notification, ...existingNotifications] : [notification]
+    ).slice(0, MAX_NOTIFICATIONS);
     localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify(nextNotifications));
-  } catch {
-    localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify([notification]));
+  } catch (e) {
+    if (isQuotaExceededError(e)) {
+      evictHeavyCachesBeforeLogin();
+      try {
+        localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify([notification]));
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    try {
+      localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify([notification]));
+    } catch {
+      // ignore
+    }
   }
 }
 
@@ -84,10 +101,23 @@ export function appendUserLoginNotification({ username, role }) {
 
   try {
     const existing = JSON.parse(localStorage.getItem(NOTIFICATIONS_KEY));
-    const next = Array.isArray(existing) ? [notification, ...existing] : [notification];
+    const next = (Array.isArray(existing) ? [notification, ...existing] : [notification]).slice(0, MAX_NOTIFICATIONS);
     localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify(next));
-  } catch {
-    localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify([notification]));
+  } catch (e) {
+    if (isQuotaExceededError(e)) {
+      evictHeavyCachesBeforeLogin();
+      try {
+        localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify([notification]));
+      } catch {
+        /* تجاهل — لا نمنع تسجيل الدخول بسبب إشعار */
+      }
+      return;
+    }
+    try {
+      localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify([notification]));
+    } catch {
+      // ignore
+    }
   }
 }
 
@@ -123,9 +153,22 @@ export function appendAdminSaleNotification(invoice) {
   };
   try {
     const existing = JSON.parse(localStorage.getItem(NOTIFICATIONS_KEY));
-    const next = Array.isArray(existing) ? [notification, ...existing] : [notification];
+    const next = (Array.isArray(existing) ? [notification, ...existing] : [notification]).slice(0, MAX_NOTIFICATIONS);
     localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify(next));
-  } catch {
-    localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify([notification]));
+  } catch (e) {
+    if (isQuotaExceededError(e)) {
+      evictHeavyCachesBeforeLogin();
+      try {
+        localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify([notification]));
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    try {
+      localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify([notification]));
+    } catch {
+      // ignore
+    }
   }
 }

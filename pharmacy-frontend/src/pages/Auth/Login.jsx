@@ -37,7 +37,15 @@ import { Axios } from "../../Api/Axios";
 import { PHARMACY_DISPLAY_NAME } from "../../config/appBranding";
 import { SITE_OG_DESCRIPTION } from "../../config/siteSeo";
 import { appendUserLoginNotification } from "../../utils/cashierShiftNotification";
-import { mergeUserWithProfileExtras, persistSessionUser } from "../../utils/staffProfileExtras";
+import {
+  mergeUserWithProfileExtras,
+  persistSessionUser,
+} from "../../utils/staffProfileExtras";
+import {
+  evictAllLocalStorageExceptSessionAndOfflineQueue,
+  evictHeavyCachesBeforeLogin,
+  evictLocalBusinessCachesSecondPass,
+} from "../../utils/localStorageEviction";
 import { formatLoginCatchError, loginFailureUserMessage } from "../../utils/formatApiError";
 
 const welcomeContainer = {
@@ -93,6 +101,7 @@ export default function Login() {
 
     try {
       setLoading(true);
+      evictHeavyCachesBeforeLogin();
       const response = await Axios.post(
         "login",
         { username: username.trim(), password },
@@ -142,7 +151,6 @@ export default function Login() {
             (s) => String(s.username || "").toLowerCase() === String(user.username || "").toLowerCase(),
           );
           if (row?.name) user = { ...user, name: row.name };
-          if (row?.avatarDataUrl) user = { ...user, avatarDataUrl: row.avatarDataUrl };
         }
       } catch {
         // ignore
@@ -159,10 +167,18 @@ export default function Login() {
         return;
       }
 
-      const sessionSave = persistSessionUser(user);
+      let sessionSave = persistSessionUser(user);
+      if (!sessionSave.ok) {
+        evictLocalBusinessCachesSecondPass();
+        sessionSave = persistSessionUser(user);
+      }
+      if (!sessionSave.ok) {
+        evictAllLocalStorageExceptSessionAndOfflineQueue();
+        sessionSave = persistSessionUser(user);
+      }
       if (!sessionSave.ok) {
         setError(
-          "تعذر حفظ جلسة المستخدم: الذاكرة المحلية للمتصفح ممتلئة. من الإعدادات امسح بيانات الموقع أو احذف الصور الكبيرة من «الموظفين» ثم أعد المحاولة.",
+          "تعذر حفظ جلسة المستخدم بعد محاولة تفريغ التخزين المحلي. امسح بيانات الموقع للنطاق من إعدادات المتصفح أو زر «تفريغ التخزين» من إعدادات المدير ثم أعد المحاولة.",
         );
         return;
       }

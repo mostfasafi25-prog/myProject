@@ -86,6 +86,11 @@ import {
   DANGER_TRIM_KEEP,
   dangerPhraseUnlocked,
 } from "../../utils/systemDangerReset";
+import {
+  evictAllLocalStorageExceptSessionAndOfflineQueue,
+  evictHeavyCachesBeforeLogin,
+  evictLocalBusinessCachesSecondPass,
+} from "../../utils/localStorageEviction";
 import { THEME_PRESETS } from "../../utils/themePresets";
 import { chipColorForBalance, negativeAmountTextSx } from "../../utils/negativeAmountStyle";
 import { notifyStoreBalanceChanged } from "../../utils/storeBalanceSync";
@@ -138,6 +143,8 @@ export default function SettingsPage({
   const isSuperAdminMoneyControls =
     (currentUser?.role === "admin" || currentUser?.role === "super_admin") &&
     String(currentUser?.username || "").toLowerCase() === "admin";
+  const canManageBrowserStorage =
+    currentUser?.role === "admin" || currentUser?.role === "super_admin";
   const isAccountSettings = location.pathname.includes("/settings/account");
   const isAppearanceSettings = location.pathname.includes("/settings/appearance");
   const isMoneySettings = location.pathname.includes("/settings/money");
@@ -1438,6 +1445,65 @@ export default function SettingsPage({
               </Grid>
             </Grid>
           </Stack>
+          ) : null}
+
+          {canManageBrowserStorage && (isMoneySettings || isCashierSystemSettings) ? (
+            <Card
+              sx={{
+                p: 2,
+                borderRadius: 3,
+                border: `1px solid ${alpha(theme.palette.info.main, 0.35)}`,
+                bgcolor: alpha(theme.palette.info.main, 0.04),
+                mb: 2,
+              }}
+            >
+              <Typography fontWeight={900}>مساحة المتصفح (localStorage)</Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, mb: 1.5 }}>
+                المصدر الرسمي للبيانات هو الخادم. يُبقى محلياً فقط: جلسة الدخول + طابور فواتير الكاشير عند انقطاع الشبكة. استخدم الأزرار إذا
+                امتلأ التخزين وتعذّر الدخول.
+              </Typography>
+              <Stack direction={{ xs: "column", sm: "row" }} flexWrap="wrap" sx={{ gap: 1 }}>
+                <Button
+                  variant="outlined"
+                  onClick={() => {
+                    const n = evictHeavyCachesBeforeLogin();
+                    showAppToast(`تفريغ خفيف — أُزيلت طبقات ثقيلة (${n} مفتاح)`, "success");
+                  }}
+                  sx={{ textTransform: "none", fontWeight: 700 }}
+                >
+                  تفريغ خفيف (سجلات وإشعارات)
+                </Button>
+                <Button
+                  variant="outlined"
+                  color="warning"
+                  onClick={() => {
+                    const n = evictLocalBusinessCachesSecondPass();
+                    showAppToast(`حُذفت نسخ المبيعات/المخزون المحلية (${n} مفتاح)`, "warning");
+                  }}
+                  sx={{ textTransform: "none", fontWeight: 700 }}
+                >
+                  حذف نسخ المبيعات والمخزون المحلية
+                </Button>
+                <Button
+                  variant="contained"
+                  color="error"
+                  onClick={async () => {
+                    const ok = await confirmApp({
+                      title: "مسح التخزين المحلي بالكامل؟",
+                      message:
+                        "سيُحذف كل ما في localStorage ما عدا: المستخدم الحالي + طابور الكاشير غير المتصل. ستحتاج إعادة تحميل الصفحة واسترجاع البيانات من الخادم.",
+                      confirmText: "مسح الكل",
+                    });
+                    if (!ok) return;
+                    const removed = evictAllLocalStorageExceptSessionAndOfflineQueue();
+                    showAppToast(`تم — أُزيلت ${removed} مفتاحاً. أعد تحميل الصفحة.`, "success");
+                  }}
+                  sx={{ textTransform: "none", fontWeight: 800 }}
+                >
+                  مسح شبه كامل (ما عدا الجلسة والطابور)
+                </Button>
+              </Stack>
+            </Card>
           ) : null}
 
           {isCashierSystemSettings ? (

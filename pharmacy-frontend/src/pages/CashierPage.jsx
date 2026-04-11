@@ -584,9 +584,7 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
     for (const invoice of pending) {
       try {
         await submitInvoiceToBackend(invoice);
-        appendInvoiceToSales(invoice);
         applyInvoiceToBalance(invoice);
-        appendAdminSaleNotification(invoice);
         if (invoice.paymentMethod === "credit" && invoice.creditCustomerId) {
           adjustCustomerBalance(invoice.creditCustomerId, Number(invoice.total || 0), {
             type: "credit_sale",

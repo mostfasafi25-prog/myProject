@@ -1,6 +1,8 @@
 import { safeLocalStorageSetItem, safeLocalStorageSetJsonWithDataUrlFallback } from "./safeLocalStorage";
 
 const PROFILE_EXTRAS_KEY = "staffProfileExtras";
+/** صور الملف الشخصي للعرض فقط خلال الجلسة — لا تُكتب في localStorage (تجنباً لامتلاء المساحة) */
+const SESSION_AVATAR_PREFIX = "pharmacy_sess_avatar:";
 
 /** حقول الجلسة فقط — بدون صور base64 (تسبب QuotaExceededError في localStorage). */
 const SESSION_USER_KEYS = ["id", "username", "role", "approval_status", "is_active", "name", "email"];
@@ -49,36 +51,76 @@ export function readStaffProfileExtras() {
   }
 }
 
+/** إزالة أي صور مضمّنة من extras المحفوظة (قديمة) — الأسماء تبقى */
+export function stripAvatarsFromStaffProfileExtrasDisk() {
+  const map = readStaffProfileExtras();
+  let changed = false;
+  for (const u of Object.keys(map)) {
+    const row = map[u];
+    if (row && typeof row === "object" && row.avatarDataUrl) {
+      delete row.avatarDataUrl;
+      changed = true;
+    }
+  }
+  if (changed) {
+    safeLocalStorageSetJsonWithDataUrlFallback(PROFILE_EXTRAS_KEY, map);
+  }
+}
+
 export function writeStaffProfileExtras(map) {
-  safeLocalStorageSetJsonWithDataUrlFallback(PROFILE_EXTRAS_KEY, map || {});
+  const clean = { ...(map || {}) };
+  for (const u of Object.keys(clean)) {
+    const row = clean[u];
+    if (row && typeof row === "object" && row.avatarDataUrl) {
+      const { avatarDataUrl, ...rest } = row;
+      clean[u] = Object.keys(rest).length ? rest : {};
+    }
+  }
+  safeLocalStorageSetJsonWithDataUrlFallback(PROFILE_EXTRAS_KEY, clean);
 }
 
 export function mergeUserWithProfileExtras(user) {
   if (!user?.username) return user;
+  let sessionAvatar;
+  try {
+    sessionAvatar = sessionStorage.getItem(SESSION_AVATAR_PREFIX + user.username);
+  } catch {
+    sessionAvatar = null;
+  }
   const ex = readStaffProfileExtras()[user.username];
-  if (!ex) return user;
   return {
     ...user,
-    ...(ex.name ? { name: ex.name } : {}),
-    ...(ex.avatarDataUrl ? { avatarDataUrl: ex.avatarDataUrl } : {}),
+    ...(ex?.name ? { name: ex.name } : {}),
+    ...(sessionAvatar ? { avatarDataUrl: sessionAvatar } : {}),
   };
 }
 
-/** يحفظ صورة الملف الشخصي بمفتاح اسم المستخدم لتُدمج عند تسجيل الدخول (انظر mergeUserWithProfileExtras). */
+/**
+ * صورة الملف الشخصي للعرض في الجلسة الحالية فقط (sessionStorage).
+ * لا تُخزّن في localStorage.
+ */
 export function persistUserAvatarForLogin(username, avatarDataUrl) {
   if (!username) return;
-  const map = readStaffProfileExtras();
-  const prev = map[username] && typeof map[username] === "object" ? map[username] : {};
-  if (!avatarDataUrl) {
-    const next = { ...prev };
-    delete next.avatarDataUrl;
-    if (Object.keys(next).length === 0) {
-      delete map[username];
-    } else {
-      map[username] = next;
+  const key = SESSION_AVATAR_PREFIX + username;
+  try {
+    if (!avatarDataUrl) {
+      sessionStorage.removeItem(key);
+      return;
     }
-  } else {
-    map[username] = { ...prev, avatarDataUrl };
+    if (typeof avatarDataUrl === "string" && avatarDataUrl.length > 120_000) {
+      return;
+    }
+    sessionStorage.setItem(key, avatarDataUrl);
+  } catch {
+    // تجاهل — مساحة sessionStorage أو وضع خاص
   }
-  writeStaffProfileExtras(map);
+}
+
+export function getSessionAvatarDataUrl(username) {
+  if (!username) return "";
+  try {
+    return sessionStorage.getItem(SESSION_AVATAR_PREFIX + username) || "";
+  } catch {
+    return "";
+  }
 }
