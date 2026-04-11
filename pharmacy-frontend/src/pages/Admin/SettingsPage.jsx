@@ -1488,6 +1488,11 @@ export default function SettingsPage({
                   hint: "زر «تسديد آجل» في شريط الكاشير العلوي",
                 },
                 {
+                  key: "barcodeScanEnabled",
+                  title: "الباركود في الكاشير",
+                  hint: "عند التعطيل: لا يُستخدم الباركود في البحث ولا الإضافة السريعة بمفتاح Enter",
+                },
+                {
                   key: "productSortFiltersEnabled",
                   title: "فرز الأصناف (الأكثر مبيعاً / الأحدث)",
                   hint: "الأزرار فوق قائمة المنتجات",

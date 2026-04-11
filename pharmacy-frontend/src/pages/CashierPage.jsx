@@ -74,6 +74,7 @@ import { appendAudit } from "../utils/auditLog";
 import { negativeAmountTextSx } from "../utils/negativeAmountStyle";
 import { notifyStoreBalanceChanged } from "../utils/storeBalanceSync";
 import { unitInventoryCost } from "../utils/inventoryCost";
+import { buildInitialDemoCategories } from "../data/pharmacyDemoCatalog";
 import {
   deleteCashierDraft,
   readDraftsForCashier,
@@ -102,14 +103,14 @@ const OFFLINE_MODE_KEY = "cashierOfflineModeEnabled";
 const OFFLINE_PENDING_INVOICES_KEY = "cashierOfflinePendingInvoices";
 const ADMIN_PRODUCTS_KEY = "adminProducts";
 
-const defaultAdminCategories = [
-  { id: 1, name: "مسكنات", active: true },
-  { id: 2, name: "مضادات حيوية", active: true },
-  { id: 3, name: "فيتامينات", active: true },
-  { id: 4, name: "اطفال", active: true },
-  { id: 5, name: "عناية", active: true },
-  { id: 6, name: "هضمية", active: true },
-];
+/** تبويب «الكل» — قيمة لا تتعارض مع id قسم قد يكون 0 من الخادم */
+const CASHIER_ALL_CATEGORIES_TAB = "__all__";
+
+const defaultAdminCategories = buildInitialDemoCategories().map((c) => ({
+  id: c.id,
+  name: c.name,
+  active: c.active !== false,
+}));
 
 const products = [
   { id: 1, name: "باراسيتامول 500", desc: "مسكن وخافض حرارة", price: 12, category: "مسكنات", saleType: "strip", active: true, image: "https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?auto=format&fit=crop&w=600&q=80" },
@@ -316,7 +317,7 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
   }, [currentUser]);
   const canOpenCashierSettings =
     currentUser?.role === "cashier" || currentUser?.role === "super_cashier";
-  const [activeCategory, setActiveCategory] = useState(0);
+  const [activeCategory, setActiveCategory] = useState(CASHIER_ALL_CATEGORIES_TAB);
   const [cart, setCart] = useState([]);
   const [paymentMethod, setPaymentMethod] = useState("cash");
   const [shiftStartedAt, setShiftStartedAt] = useState(() => new Date().toISOString());
@@ -469,7 +470,7 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
         if (cats.length) {
           persistSalesCategories(cats.map((c) => ({ id: c.id, name: c.name, is_active: c.active !== false })));
         }
-        setActiveCategory(0);
+        setActiveCategory(CASHIER_ALL_CATEGORIES_TAB);
       } catch (e) {
         console.warn("[كاشير] تعذر جلب الأقسام/الأصناف من الخادم — يُستخدم المحلي", e);
       }
@@ -727,7 +728,7 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
   }, [apiCatalog, invoiceStoreTick]);
 
   const categoryTabs = useMemo(
-    () => [{ id: 0, name: "الكل" }, ...visibleCategories],
+    () => [{ id: CASHIER_ALL_CATEGORIES_TAB, name: "الكل" }, ...visibleCategories],
     [visibleCategories],
   );
 
@@ -744,12 +745,18 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
   }, [allSalesInvoices]);
 
   const shownProducts = useMemo(() => {
-    const activeCat = visibleCategories.find((c) => c.id === activeCategory);
+    const isAll = activeCategory === CASHIER_ALL_CATEGORIES_TAB;
+    const activeCat = isAll
+      ? null
+      : visibleCategories.find((c) => String(c.id) === String(activeCategory));
     const activeCategoryName = activeCat?.name;
     let list = visibleProducts.filter((p) => {
-      if (!activeCategory || activeCategory === 0) return true;
-      if (p.categoryId != null && activeCat != null && Number(p.categoryId) === Number(activeCat.id)) return true;
-      return activeCategoryName ? String(p.category || "") === String(activeCategoryName) : true;
+      if (isAll) return true;
+      if (!activeCat) return true;
+      if (p.categoryId != null && activeCat.id != null && Number(p.categoryId) === Number(activeCat.id)) return true;
+      return activeCategoryName
+        ? String(p.category || "").trim() === String(activeCategoryName).trim()
+        : true;
     });
     if (productSortMode === "top") {
       list = [...list].sort((a, b) => {
@@ -763,17 +770,30 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
       );
     }
     const f = productFilter.trim().toLowerCase();
+    const barcodeOn = cashierSys.barcodeScanEnabled !== false;
     if (f) {
-      list = list.filter(
-        (p) =>
+      list = list.filter((p) => {
+        const nameMatch =
           String(p.name || "").toLowerCase().includes(f) ||
-          String(productDisplayName(p)).toLowerCase().includes(f) ||
+          String(productDisplayName(p)).toLowerCase().includes(f);
+        if (!barcodeOn) return nameMatch;
+        return (
+          nameMatch ||
           String(p.barcode || "").toLowerCase().includes(f) ||
-          String(p.barcode || "").trim() === productFilter.trim(),
-      );
+          String(p.barcode || "").trim() === productFilter.trim()
+        );
+      });
     }
     return list;
-  }, [activeCategory, visibleCategories, visibleProducts, productSortMode, salesCountByProductId, productFilter]);
+  }, [
+    activeCategory,
+    visibleCategories,
+    visibleProducts,
+    productSortMode,
+    salesCountByProductId,
+    productFilter,
+    cashierSys.barcodeScanEnabled,
+  ]);
 
   const applySaleToLocalStock = (soldItems) => {
     try {
@@ -816,6 +836,10 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
 
   const tryBarcodeQuickAdd = useCallback(
     (raw) => {
+      if (!getCashierSystemSettings().barcodeScanEnabled) {
+        showAppToast("الباركود معطّل من إعدادات المدير → إعدادات الكاشير", "info");
+        return;
+      }
       const code = String(raw || "").trim();
       if (!code) return;
       const exact = visibleProducts.find((p) => String(p.barcode || "").trim() === code);
@@ -2316,11 +2340,15 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
               <TextField
                 fullWidth
                 size="small"
-                placeholder="بحث بالاسم أو أدخل الباركود ثم Enter"
+                placeholder={
+                  cashierSys.barcodeScanEnabled
+                    ? "بحث بالاسم أو أدخل الباركود ثم Enter"
+                    : "بحث بالاسم أو القسم (الباركود معطّل من الإعدادات)"
+                }
                 value={productFilter}
                 onChange={(e) => setProductFilter(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") {
+                  if (e.key === "Enter" && cashierSys.barcodeScanEnabled) {
                     e.preventDefault();
                     tryBarcodeQuickAdd(productFilter);
                   }
@@ -2331,7 +2359,10 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
 
             <Grid container spacing={{ xs: 1.5, sm: 2 }}>
               {shownProducts.map((item) => (
-                <Grid key={item.id} size={{ xs: 12, sm: 6, md: 6, lg: 4, xl: 3 }}>
+                <Grid
+                  key={`${item.id}::${String(item.variantLabel || "").slice(0, 48)}`}
+                  size={{ xs: 12, sm: 6, md: 6, lg: 4, xl: 3 }}
+                >
                   <Card
                     onClick={() => openProductPatientInfo(item)}
                     sx={{

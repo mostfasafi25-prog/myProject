@@ -29,6 +29,7 @@ import {
   PHARMACY_ADMIN_CATEGORIES_SYNCED,
   readAdminCategoriesFromStorage,
 } from "../../utils/backendCategoriesSync";
+import { buildInitialDemoCategories } from "../../data/pharmacyDemoCatalog";
 const unifiedToggleSx = {
   direction: "ltr",
   width: 54,
@@ -60,14 +61,6 @@ const unifiedToggleSx = {
 
 const CATEGORIES_KEY = "adminCategories";
 const ROWS_PER_PAGE = 5;
-const initialCategories = [
-  { id: 1, name: "مسكنات", productsCount: 42, status: "نشط", manager: "أحمد", active: true },
-  { id: 2, name: "مضادات حيوية", productsCount: 28, status: "نشط", manager: "ليث", active: true },
-  { id: 3, name: "فيتامينات", productsCount: 33, status: "نشط", manager: "سارة", active: true },
-  { id: 4, name: "عناية", productsCount: 16, status: "متوسط", manager: "محمد", active: true },
-  { id: 5, name: "أطفال", productsCount: 9, status: "منخفض", manager: "رهف", active: true },
-];
-
 function getStoredCategories() {
   const synced = readAdminCategoriesFromStorage();
   if (synced?.length) return synced;
@@ -77,7 +70,14 @@ function getStoredCategories() {
   } catch {
     // ignore
   }
-  return initialCategories;
+  const fallback = buildInitialDemoCategories();
+  try {
+    localStorage.setItem(CATEGORIES_KEY, JSON.stringify(fallback));
+    window.dispatchEvent(new CustomEvent(PHARMACY_ADMIN_CATEGORIES_SYNCED));
+  } catch {
+    // ignore
+  }
+  return fallback;
 }
 
 export default function CategoriesPage({ mode, onToggleMode }) {

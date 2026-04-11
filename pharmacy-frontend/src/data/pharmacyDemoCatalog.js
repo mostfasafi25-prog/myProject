@@ -26,6 +26,28 @@ export const DEMO_CATEGORY_NAMES = [
   "مطهرات ومعقمات",
 ];
 
+/** أقسام افتراضية متوافقة مع صفحة الأقسام والكاشير (نفس أسماء توزيع الأصناف التجريبية) */
+export function buildInitialDemoCategories() {
+  const now = new Date().toISOString();
+  return DEMO_CATEGORY_NAMES.map((name, i) => ({
+    id: i + 1,
+    name,
+    productsCount: 0,
+    status: "نشط",
+    manager: "—",
+    active: true,
+    createdAt: now,
+  }));
+}
+
+const categoryNameToId = new Map(DEMO_CATEGORY_NAMES.map((name, i) => [name, i + 1]));
+
+function withCategoryId(fields) {
+  const name = String(fields.category || "").trim();
+  const categoryId = categoryNameToId.get(name) ?? null;
+  return categoryId != null ? { ...fields, categoryId } : { ...fields };
+}
+
 function opt(id, label, priceDelta = 0) {
   return { id, label, priceDelta };
 }
@@ -189,7 +211,13 @@ export function buildInitialDemoProducts() {
   let id = 1;
 
   const add = (fields) => {
-    out.push(row(id++, fields));
+    const price = Number(fields.price || 0);
+    const costGuess =
+      fields.costPrice != null && fields.costPrice !== ""
+        ? Number(fields.costPrice)
+        : Number((price * 0.72).toFixed(1));
+    const costPrice = Number.isFinite(costGuess) && costGuess >= 0 ? costGuess : 0;
+    out.push(row(id++, withCategoryId({ ...fields, costPrice })));
   };
 
   const paraVariants = [

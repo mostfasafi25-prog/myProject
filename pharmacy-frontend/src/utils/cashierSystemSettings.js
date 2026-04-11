@@ -8,6 +8,8 @@ export const CASHIER_SYSTEM_SETTINGS_DEFAULT = {
   appPaymentEnabled: true,
   holdCartEnabled: true,
   debtPayFromCashierEnabled: true,
+  /** بحث/إدخال الباركود في شاشة الكاشير (Enter للإضافة السريعة) */
+  barcodeScanEnabled: true,
   productSortFiltersEnabled: true,
   offlineModeToggleEnabled: true,
   todaySalesButtonEnabled: true,

@@ -1,4 +1,4 @@
-import { buildInitialDemoProducts } from "../data/pharmacyDemoCatalog";
+import { buildInitialDemoProducts, buildInitialDemoCategories } from "../data/pharmacyDemoCatalog";
 import { appendAudit, clearAuditLog } from "./auditLog";
 import { notifyStoreBalanceChanged } from "./storeBalanceSync";
 import { clearShiftActivityLog } from "./shiftActivityLog";
@@ -9,15 +9,6 @@ export const CONFIRM_DANGER_PHRASE = "I UNDERSTAND RESET";
 export function dangerPhraseUnlocked(value) {
   return String(value || "").trim() === CONFIRM_DANGER_PHRASE;
 }
-
-/** أقسام افتراضية متوافقة مع شاشة الأقسام */
-const DEFAULT_ADMIN_CATEGORIES = [
-  { id: 1, name: "مسكنات", productsCount: 42, status: "نشط", manager: "أحمد", active: true },
-  { id: 2, name: "مضادات حيوية", productsCount: 28, status: "نشط", manager: "ليث", active: true },
-  { id: 3, name: "فيتامينات", productsCount: 33, status: "نشط", manager: "سارة", active: true },
-  { id: 4, name: "عناية", productsCount: 16, status: "متوسط", manager: "محمد", active: true },
-  { id: 5, name: "أطفال", productsCount: 9, status: "منخفض", manager: "رهف", active: true },
-];
 
 const STORE_BALANCE_KEY = "storeBalance";
 const SALES_INVOICES_KEY = "salesInvoices";
@@ -131,7 +122,7 @@ export function applySystemDangerResets(flags, meta = {}) {
 
   if (flags.catalog) {
     localStorage.setItem(PRODUCTS_KEY, JSON.stringify(buildInitialDemoProducts()));
-    localStorage.setItem(CATEGORIES_KEY, JSON.stringify(DEFAULT_ADMIN_CATEGORIES));
+    localStorage.setItem(CATEGORIES_KEY, JSON.stringify(buildInitialDemoCategories()));
     done.push("إعادة الأقسام والأصناف للوضع التجريبي");
   }
 

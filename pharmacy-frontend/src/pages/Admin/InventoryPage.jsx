@@ -45,7 +45,7 @@ import AdminLayout from "./AdminLayout";
 import { showAppToast } from "../../utils/appToast";
 import { productDisplayName } from "../../utils/productDisplayName";
 import { appendAudit } from "../../utils/auditLog";
-import { buildInitialDemoProducts } from "../../data/pharmacyDemoCatalog";
+import { buildInitialDemoProducts, buildInitialDemoCategories } from "../../data/pharmacyDemoCatalog";
 import { fetchAndPersistSalesCategories, PHARMACY_ADMIN_CATEGORIES_SYNCED } from "../../utils/backendCategoriesSync";
 import { normalizeSaleOptions, productHasSaleOptions } from "../../utils/productSaleOptions";
 import { debitStoreBalanceForPurchase, notifyStoreBalanceChanged } from "../../utils/storeBalanceSync";
@@ -97,6 +97,16 @@ function getStoredProducts() {
   try {
     const raw = JSON.parse(localStorage.getItem(PRODUCTS_KEY));
     if (Array.isArray(raw) && raw.length) return raw;
+  } catch {
+    // ignore
+  }
+  try {
+    const catsRaw = localStorage.getItem(CATEGORIES_KEY);
+    const cats = catsRaw ? JSON.parse(catsRaw) : [];
+    if (!Array.isArray(cats) || cats.length === 0) {
+      localStorage.setItem(CATEGORIES_KEY, JSON.stringify(buildInitialDemoCategories()));
+      window.dispatchEvent(new CustomEvent(PHARMACY_ADMIN_CATEGORIES_SYNCED));
+    }
   } catch {
     // ignore
   }
@@ -364,8 +374,20 @@ export default function InventoryPage({ mode, onToggleMode }) {
   const purchaseUnitCost = parseNonNegativeNumber(newItem.costPrice);
   const saleUnitPrice = parseNonNegativeNumber(newItem.price);
   const purchaseCost = Math.max(0, paidPurchaseQty * purchaseUnitCost);
+  const blendedIncomingForPreview =
+    stockQtyTotal > 0
+      ? weightedAverageUnitCost(0, 0, paidPurchaseQty, purchaseUnitCost, bonusStockQty)
+      : null;
   const expectedMarginPerUnit =
-    stockQtyTotal > 0 && saleUnitPrice > 0 ? Math.round((saleUnitPrice - purchaseUnitCost) * 10) / 10 : null;
+    stockQtyTotal > 0 && saleUnitPrice > 0 && blendedIncomingForPreview != null
+      ? Math.round((saleUnitPrice - blendedIncomingForPreview) * 10) / 10
+      : stockQtyTotal === 0 && saleUnitPrice > 0 && purchaseUnitCost > 0
+        ? Math.round((saleUnitPrice - purchaseUnitCost) * 10) / 10
+        : null;
+  const previewTotalStockProfit =
+    expectedMarginPerUnit != null && stockQtyTotal > 0
+      ? Number((expectedMarginPerUnit * stockQtyTotal).toFixed(1))
+      : null;
   const treasuryBalance = useMemo(() => {
     try {
       const raw = JSON.parse(localStorage.getItem(STORE_BALANCE_KEY));
@@ -549,7 +571,7 @@ export default function InventoryPage({ mode, onToggleMode }) {
               <TableHead>
                 <TableRow>
                   <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary" }}>الصورة</TableCell>
-                  <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary" }}>الصنف / باركود</TableCell>
+                  <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary" }}>الصنف</TableCell>
                   <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary" }}>القسم</TableCell>
                   <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary" }}>طريقة البيع</TableCell>
                   <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary" }}>الكمية</TableCell>
@@ -611,12 +633,11 @@ export default function InventoryPage({ mode, onToggleMode }) {
                               <Chip size="small" label="خيارات بيع" color="secondary" variant="outlined" sx={{ fontWeight: 700 }} />
                             ) : null}
                           </Stack>
-                          <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.4 }}>
-                            {item.barcode ? `باركود: ${item.barcode}` : ""}
-                            {item.expiryDate
-                              ? ` ${item.barcode ? "·" : ""} انتهاء: ${item.expiryDate}`
-                              : ""}
-                          </Typography>
+                          {item.expiryDate ? (
+                            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.4 }}>
+                              انتهاء: {item.expiryDate}
+                            </Typography>
+                          ) : null}
                           <LinearProgress
                             variant="determinate"
                             value={stockPercent}
@@ -644,29 +665,34 @@ export default function InventoryPage({ mode, onToggleMode }) {
                             item.cost_price != null ||
                             item.purchaseUnitPrice != null ||
                             item.purchase_unit_price != null;
-                          const marginLabel =
+                          const profitText =
                             sale <= 0
                               ? "—"
                               : !hasExplicitCost
-                                ? "حدّث سعر الشراء"
-                                : `${margin.toFixed(1)} ش`;
+                                ? "حدّث الشراء"
+                                : `${margin >= 0 ? "+" : ""}${margin.toFixed(1)}`;
                           return (
-                            <Stack spacing={0.25} alignItems="center">
-                              <Typography variant="caption" color="text.secondary" display="block">
-                                بيع: <Box component="span" fontWeight={700}>{sale.toFixed(1)}</Box>
+                            <Stack direction="row" alignItems="center" justifyContent="center" spacing={0.75} flexWrap="wrap">
+                              <Typography fontWeight={800} color="text.primary">
+                                {sale.toFixed(1)} ش
                               </Typography>
-                              <Typography variant="caption" color="text.secondary" display="block">
-                                شراء: <Box component="span" fontWeight={700}>{cost.toFixed(1)}</Box>
+                              <Typography
+                                variant="body2"
+                                fontWeight={900}
+                                sx={{
+                                  color:
+                                    sale <= 0
+                                      ? "text.disabled"
+                                      : !hasExplicitCost
+                                        ? "warning.main"
+                                        : margin >= 0
+                                          ? "success.main"
+                                          : "error.main",
+                                }}
+                              >
+                                ربح {profitText}
+                                {sale > 0 && hasExplicitCost ? " ش" : ""}
                               </Typography>
-                              <Chip
-                                size="small"
-                                label={`ربح/وحدة: ${marginLabel}`}
-                                color={
-                                  sale <= 0 ? "default" : !hasExplicitCost ? "warning" : margin >= 0 ? "success" : "error"
-                                }
-                                variant="outlined"
-                                sx={{ fontWeight: 800, maxWidth: "100%" }}
-                              />
                             </Stack>
                           );
                         })()}
@@ -893,10 +919,27 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   onChange={(e) => setNewItem((p) => ({ ...p, price: normalizeOneDecimal(e.target.value) }))}
                   fullWidth
                   size="small"
-                  helperText="سعر الكاشير — الربح = سعر البيع − متوسط تكلفة الوحدة"
+                  helperText="سعر البيع للكاشير (بعد سعر الشراء أعلاه)"
                   inputProps={{ style: { textAlign: "right" } }}
                 />
               </Grid>
+              {expectedMarginPerUnit != null ? (
+                <Grid size={{ xs: 12 }}>
+                  <Alert severity="success" variant="outlined" sx={{ py: 1, borderRadius: 2 }}>
+                    <Typography variant="body2" fontWeight={800} sx={{ color: "success.dark" }}>
+                      ربح الوحدة المتوقع: {expectedMarginPerUnit.toFixed(1)} شيكل
+                      {previewTotalStockProfit != null
+                        ? ` — إجمالي ربح المخزون لهذه الدفعة (${stockQtyTotal.toFixed(1)} وحدة): ${previewTotalStockProfit.toFixed(1)} شيكل`
+                        : ""}
+                    </Typography>
+                    {stockQtyTotal > 0 && blendedIncomingForPreview != null ? (
+                      <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+                        متوسط تكلفة الوحدة بعد دمج البونص: {blendedIncomingForPreview.toFixed(2)} شيكل
+                      </Typography>
+                    ) : null}
+                  </Alert>
+                </Grid>
+              ) : null}
               <Grid size={{ xs: 12 }}>
                 <input
                   ref={newItemImageInputRef}
@@ -1076,11 +1119,6 @@ export default function InventoryPage({ mode, onToggleMode }) {
                     </Typography>
                   </>
                 )}
-                {stockQtyTotal > 0 && saleUnitPrice > 0 && purchaseUnitCost >= 0 ? (
-                  <Typography variant="caption" color="success.dark" display="block" sx={{ mt: 0.5, fontWeight: 700 }}>
-                    ربح متوقع للوحدة (بعد دمج البونص في متوسط التكلفة): {expectedMarginPerUnit != null ? `${expectedMarginPerUnit.toFixed(1)} شيكل` : "—"}
-                  </Typography>
-                ) : null}
                 {stockQtyTotal > 0 ? (
                   <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.75 }}>
                     إجمالي ما يُدخل للمخزون: {stockQtyTotal.toFixed(1)} (مشتراة {paidPurchaseQty.toFixed(1)}
