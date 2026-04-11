@@ -44,6 +44,7 @@ import AdminLayout from "./AdminLayout";
 import { appendAudit } from "../../utils/auditLog";
 import { confirmApp, showAppToast } from "../../utils/appToast";
 import { adjustCustomerBalance } from "../../utils/pharmacyDebtCustomers";
+import { notifyStoreBalanceChanged } from "../../utils/storeBalanceSync";
 
 const ROWS_PER_PAGE = 5;
 const SALES_INVOICES_KEY = "salesInvoices";
@@ -217,6 +218,7 @@ export default function InvoicesPage({ mode, onToggleMode }) {
             updatedAt: new Date().toISOString(),
           };
           localStorage.setItem(STORE_BALANCE_KEY, JSON.stringify(next));
+          notifyStoreBalanceChanged();
         }
       } catch {
         // ignore

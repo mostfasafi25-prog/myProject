@@ -44,7 +44,9 @@ import AdminLayout from "./AdminLayout";
 import { showAppToast } from "../../utils/appToast";
 import { productDisplayName } from "../../utils/productDisplayName";
 import { appendAudit } from "../../utils/auditLog";
+import { buildInitialDemoProducts, DEMO_CATEGORY_NAMES } from "../../data/pharmacyDemoCatalog";
 import { normalizeSaleOptions, productHasSaleOptions } from "../../utils/productSaleOptions";
+import { notifyStoreBalanceChanged } from "../../utils/storeBalanceSync";
 import { isAdmin, isSuperCashier, purchaserDisplayName } from "../../utils/userRoles";
 
 const float = keyframes`
@@ -65,21 +67,6 @@ const STORE_BALANCE_KEY = "storeBalance";
 const PURCHASE_INVOICES_KEY = "purchaseInvoices";
 const NOTIFICATIONS_KEY = "systemNotifications";
 const ROWS_PER_PAGE = 5;
-const initialItems = [
-  { id: 1, name: "باراسيتامول 500", category: "مسكنات", qty: 142, min: 50, price: 12, saleType: "strip", active: true, image: "https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?auto=format&fit=crop&w=600&q=80", createdAt: "2026-04-04T10:00:00Z" },
-  { id: 2, name: "اموكسيسيلين شراب", category: "مضادات حيوية", qty: 34, min: 40, price: 28, saleType: "bottle", active: true, image: "https://images.unsplash.com/photo-1471864190281-a93a3070b6de?auto=format&fit=crop&w=600&q=80", createdAt: "2026-04-05T11:30:00Z" },
-  { id: 3, name: "فيتامين C 1000", category: "فيتامينات", qty: 88, min: 30, price: 18, saleType: "strip", active: true, image: "https://images.unsplash.com/photo-1607619056574-7b8d3ee536b2?auto=format&fit=crop&w=600&q=80", createdAt: "2026-04-06T12:30:00Z" },
-  { id: 4, name: "أوميبرازول 20", category: "هضمية", qty: 56, min: 25, price: 16, saleType: "box", active: true, image: "https://images.unsplash.com/photo-1576602976047-174e57a47881?auto=format&fit=crop&w=600&q=80", createdAt: "2026-04-07T09:10:00Z" },
-  { id: 5, name: "إيبوبروفين 400", category: "مسكنات", qty: 74, min: 30, price: 14, saleType: "pill", active: true, image: "https://images.unsplash.com/photo-1550572017-edd951b55104?auto=format&fit=crop&w=600&q=80", createdAt: "2026-04-08T13:25:00Z" },
-  { id: 6, name: "شراب كحة أطفال", category: "اطفال", qty: 41, min: 20, price: 24, saleType: "bottle", active: true, image: "https://images.unsplash.com/photo-1628771065518-0d82f1938462?auto=format&fit=crop&w=600&q=80", createdAt: "2026-04-09T08:15:00Z" },
-  { id: 7, name: "ديكلوفيناك 50", category: "مسكنات", qty: 63, min: 28, price: 11, saleType: "strip", active: true, image: "https://images.unsplash.com/photo-1612532275214-e4ca76d0e4d1?auto=format&fit=crop&w=600&q=80", createdAt: "2026-04-10T08:00:00Z" },
-  { id: 8, name: "أزيثروميسين 500", category: "مضادات حيوية", qty: 29, min: 18, price: 35, saleType: "strip", active: true, image: "https://images.unsplash.com/photo-1512069772995-ec65ed45afd6?auto=format&fit=crop&w=600&q=80", createdAt: "2026-04-10T08:05:00Z" },
-  { id: 9, name: "كالسيوم + D3", category: "فيتامينات", qty: 52, min: 22, price: 22, saleType: "box", active: true, image: "https://images.unsplash.com/photo-1587854692152-cbe660dbde88?auto=format&fit=crop&w=600&q=80", createdAt: "2026-04-10T08:10:00Z" },
-  { id: 10, name: "فوار فيتامين C", category: "فيتامينات", qty: 95, min: 35, price: 19, saleType: "box", active: true, image: "https://images.unsplash.com/photo-1494390248081-4e521a5940db?auto=format&fit=crop&w=600&q=80", createdAt: "2026-04-10T08:12:00Z" },
-  { id: 11, name: "لوراتادين 10", category: "عناية", qty: 120, min: 40, price: 13, saleType: "strip", active: true, image: "https://images.unsplash.com/photo-1505751172876-fa1923c5c528?auto=format&fit=crop&w=600&q=80", createdAt: "2026-04-10T08:14:00Z" },
-  { id: 12, name: "نقط أنف ملحي", category: "عناية", qty: 210, min: 60, price: 9, saleType: "bottle", active: true, image: "https://images.unsplash.com/photo-1631549916768-4119b4123a1c?auto=format&fit=crop&w=600&q=80", createdAt: "2026-04-10T08:16:00Z" },
-];
-
 function getStoredProducts() {
   try {
     const raw = JSON.parse(localStorage.getItem(PRODUCTS_KEY));
@@ -87,7 +74,7 @@ function getStoredProducts() {
   } catch {
     // ignore
   }
-  return initialItems;
+  return buildInitialDemoProducts();
 }
 
 export default function InventoryPage({ mode, onToggleMode }) {
@@ -173,15 +160,20 @@ export default function InventoryPage({ mode, onToggleMode }) {
     saleOptionRows: [],
   });
   const categoryOptions = useMemo(() => {
+    const names = new Set(DEMO_CATEGORY_NAMES);
     try {
       const raw = JSON.parse(localStorage.getItem(CATEGORIES_KEY));
       if (Array.isArray(raw) && raw.length) {
-        return raw.filter((c) => c.active !== false).map((c) => c.name);
+        raw.filter((c) => c.active !== false).forEach((c) => names.add(String(c.name || "").trim()));
       }
     } catch {
       // ignore
     }
-    return ["مسكنات", "مضادات حيوية", "فيتامينات", "مكملات", "هضمية", "اطفال", "عناية"];
+    items.forEach((p) => {
+      const c = String(p.category || "").trim();
+      if (c) names.add(c);
+    });
+    return [...names].filter(Boolean).sort((a, b) => a.localeCompare(b, "ar"));
   }, [items]);
   const normalizeOneDecimal = (value) => {
     const cleaned = String(value ?? "").replace(/[^\d.]/g, "");
@@ -252,6 +244,7 @@ export default function InventoryPage({ mode, onToggleMode }) {
       updatedAt: new Date().toISOString(),
     };
     localStorage.setItem(STORE_BALANCE_KEY, JSON.stringify(nextBal));
+    notifyStoreBalanceChanged();
   };
 
   const openDeleteDialog = (id) => {

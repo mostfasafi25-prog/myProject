@@ -42,6 +42,7 @@ import { Axios } from "../../Api/Axios";
 import { productDisplayName } from "../../utils/productDisplayName";
 import { daysUntilExpiry } from "../../utils/productExpiry";
 import { adminPageContainerSx } from "../../utils/adminPageLayout";
+import { STORE_BALANCE_CHANGED } from "../../utils/storeBalanceSync";
 import AdminLayout from "./AdminLayout";
 const STORE_BALANCE_KEY = "storeBalance";
 const PURCHASE_INVOICES_KEY = "purchaseInvoices";
@@ -137,8 +138,16 @@ export default function HomeDashboard({ mode = "light", onToggleMode }) {
       refreshBalance();
       setLocalTick((t) => t + 1);
     };
+    const onBalanceChanged = () => {
+      refreshBalance();
+      setLocalTick((t) => t + 1);
+    };
     window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
+    window.addEventListener(STORE_BALANCE_CHANGED, onBalanceChanged);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener(STORE_BALANCE_CHANGED, onBalanceChanged);
+    };
   }, []);
 
   useEffect(() => {

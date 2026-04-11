@@ -138,8 +138,8 @@ function AdminSidebarNav({ menuItems, openSections, setOpenSections, onItemNavig
   };
 
   return (
-    <>
-      <Stack direction="row" alignItems="center" mb={2} sx={{ gap: 1.5 }}>
+    <Stack sx={{ flex: 1, minHeight: 0, width: "100%", maxWidth: "100%" }}>
+      <Stack direction="row" alignItems="center" mb={2} sx={{ gap: 1.5, flexShrink: 0 }}>
         <Avatar sx={{ bgcolor: "primary.main", width: 36, height: 36 }}>
           <LocalPharmacy fontSize="small" />
         </Avatar>
@@ -153,7 +153,16 @@ function AdminSidebarNav({ menuItems, openSections, setOpenSections, onItemNavig
         </Box>
       </Stack>
 
-      <Stack sx={{ gap: 1, flex: 1, minHeight: 0, overflow: "auto" }}>
+      <Stack
+        sx={{
+          gap: 1,
+          flex: 1,
+          minHeight: 0,
+          overflowX: "hidden",
+          overflowY: "auto",
+          overscrollBehavior: "contain",
+        }}
+      >
         {menuItems.map((item) => {
           if (item.type === "item") {
             const active = isActivePath(item.path);
@@ -240,57 +249,58 @@ function AdminSidebarNav({ menuItems, openSections, setOpenSections, onItemNavig
             </Box>
           );
         })}
-        <Box sx={{ pt: 1.5, flexShrink: 0 }}>
-          <Divider sx={{ mb: 1.5 }} />
-          <Button
-            fullWidth
-            startIcon={bottomMenu.icon}
-            onClick={() => go(bottomMenu.path)}
-            sx={{
-              justifyContent: "center",
-              textTransform: "none",
-              borderRadius: 2,
-              py: 1,
-              color: "primary.main",
-              bgcolor: alpha(theme.palette.primary.main, 0.12),
-              fontWeight: 800,
-              textAlign: "center",
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              "& .MuiButton-startIcon": { marginInlineStart: 0, marginInlineEnd: 6 },
-            }}
-          >
-            {bottomMenu.label}
-          </Button>
-          <Button
-            fullWidth
-            startIcon={<Logout fontSize="small" />}
-            onClick={() => {
-              onLogout();
-              onItemNavigate?.();
-            }}
-            color="error"
-            variant="outlined"
-            sx={{
-              justifyContent: "center",
-              textTransform: "none",
-              borderRadius: 2,
-              py: 1,
-              mt: 1,
-              fontWeight: 700,
-              textAlign: "center",
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              "& .MuiButton-startIcon": { marginInlineStart: 0, marginInlineEnd: 6 },
-            }}
-          >
-            تسجيل الخروج
-          </Button>
-        </Box>
       </Stack>
-    </>
+
+      <Box sx={{ pt: 1.5, flexShrink: 0, mt: "auto" }}>
+        <Divider sx={{ mb: 1.5 }} />
+        <Button
+          fullWidth
+          startIcon={bottomMenu.icon}
+          onClick={() => go(bottomMenu.path)}
+          sx={{
+            justifyContent: "center",
+            textTransform: "none",
+            borderRadius: 2,
+            py: 1,
+            color: "primary.main",
+            bgcolor: alpha(theme.palette.primary.main, 0.12),
+            fontWeight: 800,
+            textAlign: "center",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            "& .MuiButton-startIcon": { marginInlineStart: 0, marginInlineEnd: 6 },
+          }}
+        >
+          {bottomMenu.label}
+        </Button>
+        <Button
+          fullWidth
+          startIcon={<Logout fontSize="small" />}
+          onClick={() => {
+            onLogout();
+            onItemNavigate?.();
+          }}
+          color="error"
+          variant="outlined"
+          sx={{
+            justifyContent: "center",
+            textTransform: "none",
+            borderRadius: 2,
+            py: 1,
+            mt: 1,
+            fontWeight: 700,
+            textAlign: "center",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            "& .MuiButton-startIcon": { marginInlineStart: 0, marginInlineEnd: 6 },
+          }}
+        >
+          تسجيل الخروج
+        </Button>
+      </Box>
+    </Stack>
   );
 }
 
@@ -513,14 +523,24 @@ export default function AdminLayout({ mode = "light", onToggleMode, children, em
             </Stack>
           </Stack>
         ) : (
-          <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ px: 3, py: 2 }}>
-            <Stack direction="row" alignItems="center" sx={{ gap: 1.5, flex: 1, minWidth: 0 }}>
-              <Typography fontWeight={800} color="primary.main" sx={{ pt: 0.75, flexShrink: 0 }}>
+          <Stack
+            direction="row"
+            alignItems="center"
+            justifyContent="space-between"
+            sx={{ px: { xs: 2, sm: 3 }, py: 2, gap: 1.5, minWidth: 0, overflow: "hidden" }}
+          >
+            <Stack direction="row" alignItems="center" sx={{ gap: 1.5, flex: 1, minWidth: 0, overflow: "hidden" }}>
+              <Typography
+                fontWeight={800}
+                color="primary.main"
+                noWrap
+                sx={{ pt: 0.75, minWidth: 0 }}
+              >
                 {superCashierUi ? `${PHARMACY_DISPLAY_NAME} — المخزون والتوريد` : `${PHARMACY_DISPLAY_NAME} — لوحة الإدارة`}
               </Typography>
             </Stack>
 
-            <Stack direction="row" alignItems="center" sx={{ gap: 1.25 }}>
+            <Stack direction="row" alignItems="center" sx={{ gap: 1.25, flexShrink: 0 }}>
               <IconButton onClick={onToggleMode} color="primary">
                 {mode === "dark" ? <LightMode /> : <DarkMode />}
               </IconButton>
@@ -569,7 +589,9 @@ export default function AdminLayout({ mode = "light", onToggleMode, children, em
             boxShadow: `-4px 0 24px ${alpha(theme.palette.common.black, 0.12)}`,
             display: "flex",
             flexDirection: "column",
+            height: "100%",
             maxHeight: "100%",
+            minHeight: 0,
           },
         }}
       >

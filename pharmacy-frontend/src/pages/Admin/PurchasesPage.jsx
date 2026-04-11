@@ -38,6 +38,7 @@ import AdminLayout from "./AdminLayout";
 import { confirmApp, showAppToast } from "../../utils/appToast";
 import { productDisplayName } from "../../utils/productDisplayName";
 import { getStoredUser, isSuperCashier, purchaserDisplayName } from "../../utils/userRoles";
+import { notifyStoreBalanceChanged } from "../../utils/storeBalanceSync";
 
 const ROWS_PER_PAGE = 5;
 const PURCHASE_INVOICES_KEY = "purchaseInvoices";
@@ -165,15 +166,33 @@ export default function PurchasesPage({ mode, onToggleMode }) {
         } catch {
           // ignore
         }
-        const refund = Number(inv.total || 0);
+        const refundTotal = Number(inv.total || 0);
+        const td = inv.treasuryDebit;
+        let refundCash = refundTotal;
+        let refundApp = 0;
+        if (td && typeof td === "object") {
+          refundCash = Number(td.cash || 0);
+          refundApp = Number(td.app || 0);
+          const sum = refundCash + refundApp;
+          if (sum <= 0 && refundTotal > 0) {
+            refundCash = refundTotal;
+            refundApp = 0;
+          } else if (Math.abs(sum - refundTotal) > 0.05 && sum > 0) {
+            const k = refundTotal / sum;
+            refundCash = Number((refundCash * k).toFixed(2));
+            refundApp = Number((refundTotal - refundCash).toFixed(2));
+          }
+        }
         const nextBal = {
           ...balance,
-          total: Number((balance.total + refund).toFixed(2)),
-          cash: Number((balance.cash + refund).toFixed(2)),
+          total: Number((balance.total + refundTotal).toFixed(2)),
+          cash: Number((balance.cash + refundCash).toFixed(2)),
+          app: Number((balance.app + refundApp).toFixed(2)),
           lastOperation: "purchase_return",
           updatedAt: new Date().toISOString(),
         };
         localStorage.setItem(STORE_BALANCE_KEY, JSON.stringify(nextBal));
+        notifyStoreBalanceChanged();
 
         list[idx] = {
           ...inv,
@@ -410,6 +429,8 @@ export default function PurchasesPage({ mode, onToggleMode }) {
     const remainingAfterCash = Math.max(0, totalCost - balance.cash);
     const nextCash = Math.max(0, balance.cash - totalCost);
     const nextApp = Math.max(0, balance.app - remainingAfterCash);
+    const paidFromCash = Number((balance.cash - nextCash).toFixed(2));
+    const paidFromApp = Number((balance.app - nextApp).toFixed(2));
     const nextBalance = {
       ...balance,
       total: Math.max(0, balance.total - totalCost),
@@ -419,6 +440,7 @@ export default function PurchasesPage({ mode, onToggleMode }) {
       updatedAt: new Date().toISOString(),
     };
     localStorage.setItem(STORE_BALANCE_KEY, JSON.stringify(nextBalance));
+    notifyStoreBalanceChanged();
 
     const purchaseInvoice = {
       id: `PO-${Date.now()}`,
@@ -427,9 +449,14 @@ export default function PurchasesPage({ mode, onToggleMode }) {
       purchasedByRole: currentUser?.role || "admin",
       supplier: "مورد عام",
       status: "مكتمل",
-      paymentMethod: "cash",
+      paymentMethod: paidFromApp > 0 ? "mixed" : "cash",
       purchasedAt: new Date().toISOString(),
       total: Number(totalCost.toFixed(2)),
+      treasuryDebit: {
+        total: Number(totalCost.toFixed(2)),
+        cash: paidFromCash,
+        app: paidFromApp,
+      },
       items: invoiceItems,
     };
     try {

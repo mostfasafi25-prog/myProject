@@ -59,7 +59,7 @@ export default function Login() {
 
     try {
       setLoading(true);
-      const response = await Axios.post("login", { username, password });
+      const response = await Axios.post("login", { username: username.trim(), password });
 
       let payload = response?.data;
       if (typeof payload === "string") {
@@ -83,6 +83,7 @@ export default function Login() {
       if (!token || !user?.role) {
         const raw = payload;
         const looksLikeHtml = typeof raw === "string" && raw.trimStart().startsWith("<");
+        const reqUrl = [response?.config?.baseURL, response?.config?.url].filter(Boolean).join("");
         if (raw && typeof raw === "object" && typeof raw.error === "string") {
           const h = response?.headers;
           const ct =
@@ -91,7 +92,15 @@ export default function Login() {
             (typeof h?.get === "function" ? h.get("content-type") : "") ||
             "";
           setError(
-            [raw.error, `HTTP ${response?.status ?? "?"}`, ct ? `Content-Type: ${ct}` : ""]
+            [
+              raw.error,
+              `HTTP ${response?.status ?? "?"}`,
+              ct ? `Content-Type: ${ct}` : "",
+              reqUrl ? `عنوان الطلب: ${reqUrl}` : "",
+              response?.status === 200 && String(ct).toLowerCase().includes("text/html")
+                ? "تلميح: إن كان الخطأ من قاعدة Laravel فالمفترض HTTP 401 و application/json. إن رأيت HTML فالطلب قد لا يصل إلى /api/login على السيرفر الصحيح (تحقق من VITE_API_BASE_URL)."
+                : "",
+            ]
               .filter(Boolean)
               .join("\n"),
           );

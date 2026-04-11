@@ -70,6 +70,7 @@ import { Axios } from "../Api/Axios";
 import { confirmApp, showAppToast } from "../utils/appToast";
 import { productDisplayName } from "../utils/productDisplayName";
 import { appendAudit } from "../utils/auditLog";
+import { notifyStoreBalanceChanged } from "../utils/storeBalanceSync";
 import {
   deleteCashierDraft,
   readDraftsForCashier,
@@ -316,6 +317,7 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
       updatedAt: new Date().toISOString(),
     };
     localStorage.setItem(STORE_BALANCE_KEY, JSON.stringify(next));
+    notifyStoreBalanceChanged();
   };
 
   const appendInvoiceToSales = (invoice) => {

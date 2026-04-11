@@ -144,15 +144,17 @@ class AuthController extends Controller
 
     public function login(Request $request)
     {
-        if (!$request->username || !$request->password) {
+        $username = trim((string) $request->username);
+        $password = (string) $request->password;
+        if ($username === '' || $password === '') {
             return response()->json(['error' => 'يجب إدخال اسم المستخدم وكلمة المرور'], 422);
         }
 
-        $user = User::where('username', $request->username)->first();
+        $user = User::where('username', $username)->first();
         if (!$user) {
             return response()->json(['error' => 'اسم المستخدم غير صحيح'], 401);
         }
-        if (!Hash::check($request->password, $user->password)) {
+        if (!Hash::check($password, $user->password)) {
             return response()->json(['error' => 'كلمة المرور غير صحيحة'], 401);
         }
 

@@ -68,6 +68,7 @@ import {
 import { appendAudit } from "../../utils/auditLog";
 import { confirmApp } from "../../utils/appToast";
 import { THEME_PRESETS } from "../../utils/themePresets";
+import { notifyStoreBalanceChanged } from "../../utils/storeBalanceSync";
 import {
   getCashierSystemSettings,
   setCashierSystemSettings,
@@ -268,6 +269,7 @@ export default function SettingsPage({
       updatedAt: new Date().toISOString(),
     };
     localStorage.setItem(STORE_BALANCE_KEY, JSON.stringify(next));
+    notifyStoreBalanceChanged();
     setStoreBalance(next);
     setMoneyAmount("");
     setMoneyMsg({ type: "success", text: "تم تزويد الخزنة بنجاح" });
@@ -311,6 +313,7 @@ export default function SettingsPage({
       updatedAt: new Date().toISOString(),
     };
     localStorage.setItem(STORE_BALANCE_KEY, JSON.stringify(next));
+    notifyStoreBalanceChanged();
     setStoreBalance(next);
     setMoneyWithdrawAmount("");
     setMoneyMsg({ type: "success", text: "تم خصم المبلغ بنجاح" });
@@ -339,6 +342,7 @@ export default function SettingsPage({
       updatedAt: new Date().toISOString(),
     };
     localStorage.setItem(STORE_BALANCE_KEY, JSON.stringify(next));
+    notifyStoreBalanceChanged();
     setStoreBalance(next);
     setMoneyMsg({ type: "success", text: "تم تصفير الخزنة بالكامل" });
     appendAudit({
