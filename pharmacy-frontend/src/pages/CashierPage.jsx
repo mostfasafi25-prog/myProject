@@ -714,6 +714,21 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
     return defaultAdminCategories.filter((c) => c.active !== false);
   }, [apiCatalog, categoryStorageTick]);
 
+  /** أقسام بدون تعارض مع تبويب «الكل» (__all__) وبدون تكرار id */
+  const visibleCategoriesForTabs = useMemo(() => {
+    const seen = new Set();
+    const out = [];
+    for (const c of visibleCategories) {
+      if (!c || c.name == null) continue;
+      const sid = String(c.id);
+      if (sid === CASHIER_ALL_CATEGORIES_TAB) continue;
+      if (seen.has(sid)) continue;
+      seen.add(sid);
+      out.push(c);
+    }
+    return out;
+  }, [visibleCategories]);
+
   const visibleProducts = useMemo(() => {
     if (apiCatalog?.products?.length) {
       return mergeCashierProductsWithLocalStorage(apiCatalog.products).filter((p) => p.active !== false);
@@ -730,8 +745,8 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
   }, [apiCatalog, invoiceStoreTick]);
 
   const categoryTabs = useMemo(
-    () => [{ id: CASHIER_ALL_CATEGORIES_TAB, name: "الكل" }, ...visibleCategories],
-    [visibleCategories],
+    () => [{ id: CASHIER_ALL_CATEGORIES_TAB, name: "الكل" }, ...visibleCategoriesForTabs],
+    [visibleCategoriesForTabs],
   );
 
   const salesCountByProductId = useMemo(() => {
@@ -747,10 +762,10 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
   }, [allSalesInvoices]);
 
   const shownProducts = useMemo(() => {
-    const isAll = activeCategory === CASHIER_ALL_CATEGORIES_TAB;
+    const isAll = String(activeCategory) === String(CASHIER_ALL_CATEGORIES_TAB);
     const activeCat = isAll
       ? null
-      : visibleCategories.find((c) => String(c.id) === String(activeCategory));
+      : visibleCategoriesForTabs.find((c) => String(c.id) === String(activeCategory));
     const activeCategoryName = activeCat?.name;
     let list = visibleProducts.filter((p) => {
       if (isAll) return true;
@@ -789,7 +804,7 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
     return list;
   }, [
     activeCategory,
-    visibleCategories,
+    visibleCategoriesForTabs,
     visibleProducts,
     productSortMode,
     salesCountByProductId,
@@ -2305,7 +2320,7 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
             <Stack spacing={1.5} alignItems="center">
               {categoryTabs.map((cat) => (
                 <Button
-                  key={cat.id}
+                  key={cat.id === CASHIER_ALL_CATEGORIES_TAB ? "cashier-cat-all" : `cashier-cat-${String(cat.id)}`}
                   onClick={() => setActiveCategory(cat.id)}
                   sx={{
                     minWidth: 0,
@@ -2313,9 +2328,9 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
                     py: 1.2,
                     borderRadius: 2,
                     textTransform: "none",
-                    color: activeCategory === cat.id ? "primary.main" : "text.secondary",
+                    color: String(activeCategory) === String(cat.id) ? "primary.main" : "text.secondary",
                     bgcolor:
-                      activeCategory === cat.id ? alpha(theme.palette.primary.main, 0.15) : "transparent",
+                      String(activeCategory) === String(cat.id) ? alpha(theme.palette.primary.main, 0.15) : "transparent",
                     fontSize: 12,
                     fontWeight: 700,
                   }}
@@ -2355,10 +2370,10 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
             >
               {categoryTabs.map((cat) => (
                 <Button
-                  key={cat.id}
+                  key={cat.id === CASHIER_ALL_CATEGORIES_TAB ? "cashier-cat-all" : `cashier-cat-${String(cat.id)}`}
                   onClick={() => setActiveCategory(cat.id)}
-                  variant={activeCategory === cat.id ? "contained" : "outlined"}
-                  color={activeCategory === cat.id ? "primary" : "inherit"}
+                  variant={String(activeCategory) === String(cat.id) ? "contained" : "outlined"}
+                  color={String(activeCategory) === String(cat.id) ? "primary" : "inherit"}
                   size="small"
                   sx={{
                     flexShrink: 0,
