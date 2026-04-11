@@ -45,7 +45,8 @@ import { adminPageContainerSx } from "../../utils/adminPageLayout";
 import AdminLayout from "./AdminLayout";
 import { readAuditLog } from "../../utils/auditLog";
 import { AUDIT_ACTION_LABELS, AuditDetailsRich } from "../../utils/auditLogDisplay";
-import { readShiftActivityLog } from "../../utils/shiftActivityLog";
+import { fetchCashierShiftClosesFromBackend } from "../../utils/shiftActivityBackendSync";
+import { mergeShiftActivityRows, readShiftActivityLog } from "../../utils/shiftActivityLog";
 import { displayCashierName } from "./InvoicesPage";
 
 const ROWS_PER_PAGE = 6;
@@ -70,6 +71,7 @@ export default function ActivityLogPage({ mode, onToggleMode }) {
   const theme = useTheme();
   const mdUp = useMediaQuery(theme.breakpoints.up("md"));
   const [dataTick, setDataTick] = useState(0);
+  const [serverShifts, setServerShifts] = useState([]);
   const [mainTab, setMainTab] = useState(0);
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
@@ -83,10 +85,22 @@ export default function ActivityLogPage({ mode, onToggleMode }) {
     return () => window.removeEventListener("pharmacy-system-data-reset", on);
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const fromApi = await fetchCashierShiftClosesFromBackend();
+      if (!cancelled) setServerShifts(fromApi);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [dataTick]);
+
   const rows = useMemo(() => {
     void dataTick;
     const q = search.trim().toLowerCase();
-    return readShiftActivityLog().filter((r) => {
+    const merged = mergeShiftActivityRows(serverShifts, readShiftActivityLog());
+    return merged.filter((r) => {
       if (!q) return true;
       return (
         String(r.username || "")
@@ -97,7 +111,7 @@ export default function ActivityLogPage({ mode, onToggleMode }) {
           .includes(q)
       );
     });
-  }, [search, dataTick]);
+  }, [search, dataTick, serverShifts]);
 
   const pageCount = Math.max(1, Math.ceil(rows.length / ROWS_PER_PAGE));
   const safePage = Math.min(page, pageCount);
@@ -108,11 +122,11 @@ export default function ActivityLogPage({ mode, onToggleMode }) {
 
   const metrics = useMemo(() => {
     void dataTick;
-    const all = readShiftActivityLog();
+    const all = mergeShiftActivityRows(serverShifts, readShiftActivityLog());
     const inv = all.reduce((s, r) => s + (r.invoiceCount || 0), 0);
     const totalSales = all.reduce((s, r) => s + Number(r.total || 0), 0);
     return { sessions: all.length, invoices: inv, totalSales };
-  }, [dataTick]);
+  }, [dataTick, serverShifts]);
 
   const auditFiltered = useMemo(() => {
     void dataTick;
@@ -190,7 +204,7 @@ export default function ActivityLogPage({ mode, onToggleMode }) {
                 سجل النشاط
               </Typography>
               <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                دوام الكاشير، الفواتير، وسجل التدقيق — يتحدّث تلقائياً بعد تصفير البيانات من الإعدادات
+                إنهاءات الدوام تُحفظ في السيرفر وتظهر بعد تحديث الصفحة؛ نسخة محلية للعمل دون اتصال. سجل التدقيق محلي حتى ربطه بالخادم.
               </Typography>
             </Box>
             <Button

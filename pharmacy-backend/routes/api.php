@@ -10,6 +10,7 @@ use App\Http\Controllers\OrderController;
 use App\Http\Controllers\UserController;
 use App\Http\Controllers\AdminDashboardController;
 use App\Http\Controllers\CategoryController;
+use App\Http\Controllers\CashierShiftCloseController;
 
 /*
 |--------------------------------------------------------------------------
@@ -84,4 +85,8 @@ Route::middleware($apiAuthMiddleware)->group(function () {
     Route::get('/orders/stats/summary', [OrderController::class, 'stats']);
     Route::get('/dashboard/summary', [AdminDashboardController::class, 'summary']);
     Route::apiResource('orders', OrderController::class)->only(['index', 'store', 'show']);
+
+    /** إنهاء دوام الكاشير — يُحفظ في السيرفر ولا يضيع عند تحديث الصفحة */
+    Route::get('/cashier-shifts', [CashierShiftCloseController::class, 'index']);
+    Route::post('/cashier-shifts', [CashierShiftCloseController::class, 'store']);
 });

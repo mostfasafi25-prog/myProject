@@ -1,4 +1,25 @@
+import { safeLocalStorageSetJsonWithDataUrlFallback } from "./safeLocalStorage";
+import { pushCashierShiftCloseToBackend } from "./shiftActivityBackendSync";
+
 export const SHIFT_ACTIVITY_LOG_KEY = "cashierShiftActivityLog";
+
+/** دمج سجلات السيرفر مع المحلية (نفس المفتاح id = client_row_id) */
+export function mergeShiftActivityRows(serverRows, localRows) {
+  const byId = new Map();
+  for (const r of serverRows || []) {
+    if (r?.id) byId.set(r.id, { ...r, fromServer: r.fromServer !== false });
+  }
+  for (const r of localRows || []) {
+    if (r?.id && !byId.has(r.id)) {
+      byId.set(r.id, { ...r, fromServer: false });
+    }
+  }
+  return [...byId.values()].sort(
+    (a, b) =>
+      new Date(b.shiftEndedAt || b.createdAt || 0).getTime() -
+      new Date(a.shiftEndedAt || a.createdAt || 0).getTime(),
+  );
+}
 
 /**
  * @param {object} p
@@ -28,13 +49,23 @@ export function appendShiftActivityRecord(p) {
     invoices: Array.isArray(p.invoices) ? p.invoices : [],
     createdAt: new Date().toISOString(),
   };
+  let list = [];
   try {
     const raw = localStorage.getItem(SHIFT_ACTIVITY_LOG_KEY);
-    const list = Array.isArray(JSON.parse(raw || "[]")) ? JSON.parse(raw || "[]") : [];
-    localStorage.setItem(SHIFT_ACTIVITY_LOG_KEY, JSON.stringify([row, ...list]));
+    list = Array.isArray(JSON.parse(raw || "[]")) ? JSON.parse(raw || "[]") : [];
   } catch {
-    localStorage.setItem(SHIFT_ACTIVITY_LOG_KEY, JSON.stringify([row]));
+    list = [];
   }
+  const next = [row, ...list];
+  let r = safeLocalStorageSetJsonWithDataUrlFallback(SHIFT_ACTIVITY_LOG_KEY, next);
+  if (!r.ok || r.stripped) {
+    const slimRow = { ...row, invoices: [] };
+    r = safeLocalStorageSetJsonWithDataUrlFallback(SHIFT_ACTIVITY_LOG_KEY, [slimRow, ...list]);
+  }
+  if (!r.ok) {
+    console.warn("[shiftActivityLog] تعذر حفظ السجل محلياً", r.error);
+  }
+  void pushCashierShiftCloseToBackend(row);
 }
 
 export function readShiftActivityLog() {
@@ -47,9 +78,5 @@ export function readShiftActivityLog() {
 }
 
 export function clearShiftActivityLog() {
-  try {
-    localStorage.setItem(SHIFT_ACTIVITY_LOG_KEY, "[]");
-  } catch {
-    // ignore
-  }
+  safeLocalStorageSetJsonWithDataUrlFallback(SHIFT_ACTIVITY_LOG_KEY, []);
 }
