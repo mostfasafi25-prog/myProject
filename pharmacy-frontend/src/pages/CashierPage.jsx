@@ -76,7 +76,7 @@ import { appendAudit } from "../utils/auditLog";
 import { negativeAmountTextSx } from "../utils/negativeAmountStyle";
 import { notifyStoreBalanceChanged } from "../utils/storeBalanceSync";
 import { unitInventoryCost } from "../utils/inventoryCost";
-import { buildInitialDemoCategories } from "../data/pharmacyDemoCatalog";
+import { buildInitialDemoCategories, buildInitialDemoProducts } from "../data/pharmacyDemoCatalog";
 import {
   deleteCashierDraft,
   readDraftsForCashier,
@@ -114,20 +114,6 @@ const defaultAdminCategories = buildInitialDemoCategories().map((c) => ({
   active: c.active !== false,
 }));
 
-const products = [
-  { id: 1, name: "باراسيتامول 500", desc: "مسكن وخافض حرارة", price: 12, category: "مسكنات", saleType: "strip", active: true, image: "https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?auto=format&fit=crop&w=600&q=80" },
-  { id: 2, name: "اموكسيسيلين شراب", desc: "مضاد حيوي للأطفال", price: 28, category: "مضادات حيوية", saleType: "bottle", active: true, image: "https://images.unsplash.com/photo-1471864190281-a93a3070b6de?auto=format&fit=crop&w=600&q=80" },
-  { id: 3, name: "فيتامين C 1000", desc: "مقوي مناعة", price: 18, category: "فيتامينات", saleType: "strip", active: true, image: "https://images.unsplash.com/photo-1607619056574-7b8d3ee536b2?auto=format&fit=crop&w=600&q=80" },
-  { id: 4, name: "أوميبرازول 20", desc: "لعلاج الحموضة", price: 16, category: "هضمية", saleType: "box", active: true, image: "https://images.unsplash.com/photo-1576602976047-174e57a47881?auto=format&fit=crop&w=600&q=80" },
-  { id: 5, name: "إيبوبروفين 400", desc: "مضاد التهاب", price: 14, category: "مسكنات", saleType: "pill", active: true, image: "https://images.unsplash.com/photo-1550572017-edd951b55104?auto=format&fit=crop&w=600&q=80" },
-  { id: 6, name: "شراب كحة أطفال", desc: "لطرد البلغم", price: 24, category: "اطفال", saleType: "bottle", active: true, image: "https://images.unsplash.com/photo-1628771065518-0d82f1938462?auto=format&fit=crop&w=600&q=80" },
-  { id: 7, name: "ديكلوفيناك 50", desc: "مسكن سريع", price: 11, category: "مسكنات", saleType: "strip", active: true, image: "https://images.unsplash.com/photo-1612532275214-e4ca76d0e4d1?auto=format&fit=crop&w=600&q=80" },
-  { id: 8, name: "أزيثروميسين 500", desc: "مضاد حيوي", price: 35, category: "مضادات حيوية", saleType: "strip", active: true, image: "https://images.unsplash.com/photo-1512069772995-ec65ed45afd6?auto=format&fit=crop&w=600&q=80" },
-  { id: 9, name: "كالسيوم + D3", desc: "عظام ومناعة", price: 22, category: "فيتامينات", saleType: "box", active: true, image: "https://images.unsplash.com/photo-1587854692152-cbe660dbde88?auto=format&fit=crop&w=600&q=80" },
-  { id: 10, name: "فوار فيتامين C", desc: "مكمل يومي", price: 19, category: "فيتامينات", saleType: "box", active: true, image: "https://images.unsplash.com/photo-1494390248081-4e521a5940db?auto=format&fit=crop&w=600&q=80" },
-  { id: 11, name: "لوراتادين 10", desc: "مضاد حساسية", price: 13, category: "عناية", saleType: "strip", active: true, image: "https://images.unsplash.com/photo-1505751172876-fa1923c5c528?auto=format&fit=crop&w=600&q=80" },
-  { id: 12, name: "نقط أنف ملحي", desc: "احتقان وانسداد", price: 9, category: "عناية", saleType: "bottle", active: true, image: "https://images.unsplash.com/photo-1631549916768-4119b4123a1c?auto=format&fit=crop&w=600&q=80" },
-];
 const roundOneDecimal = (n) => Math.round(Number(n) * 10) / 10;
 
 const TODAY_SALES_ROWS = 6;
@@ -222,7 +208,9 @@ function mergeCashierProductsWithLocalStorage(apiList) {
       min: loc.min != null ? loc.min : p.min,
       saleOptions: loc.saleOptions ?? p.saleOptions,
       saleType: loc.saleType || p.saleType,
-      active: loc.active !== false,
+      /** تعطيل صريح في المحلي يطغى؛ وإلا نتبع حالة الـ API (لا نُخفي أصناف الـ API بسبب غياب الحقل في المحلي) */
+      active:
+        Object.prototype.hasOwnProperty.call(loc, "active") && loc.active === false ? false : p.active !== false,
       ...(mergedCost != null && Number.isFinite(mergedCost) ? { costPrice: mergedCost } : {}),
       ...(lHow ? { usageHowTo: lHow } : {}),
       ...(lFreq ? { usageFrequency: lFreq } : {}),
@@ -722,6 +710,8 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
       if (!c || c.name == null) continue;
       const sid = String(c.id);
       if (sid === CASHIER_ALL_CATEGORIES_TAB) continue;
+      /** قسم من الخادم اسمه «الكل» يُربك مع تبويب «الكل» الحقيقي — نعرضه فقط ضمن «الكل» وليس كتبويب منفصل */
+      if (String(c.name).trim() === "الكل") continue;
       if (seen.has(sid)) continue;
       seen.add(sid);
       out.push(c);
@@ -741,7 +731,7 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
     } catch {
       // ignore
     }
-    return products.filter((p) => p.active !== false);
+    return buildInitialDemoProducts().filter((p) => p.active !== false);
   }, [apiCatalog, invoiceStoreTick]);
 
   const categoryTabs = useMemo(
