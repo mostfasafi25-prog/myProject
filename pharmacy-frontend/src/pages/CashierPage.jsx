@@ -1,6 +1,7 @@
 import {
   AccountBalance,
   Add,
+  AdminPanelSettings,
   AppShortcut,
   AttachMoney,
   BookmarkBorder,
@@ -32,6 +33,7 @@ import {
   Chip,
   CircularProgress,
   Dialog,
+  Divider,
   DialogActions,
   DialogContent,
   DialogTitle,
@@ -317,6 +319,8 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
   }, [currentUser]);
   const canOpenCashierSettings =
     currentUser?.role === "cashier" || currentUser?.role === "super_cashier";
+  const showAdminCashierHeaderActions =
+    currentUser?.role === "admin" || currentUser?.role === "super_admin";
   const [activeCategory, setActiveCategory] = useState(CASHIER_ALL_CATEGORIES_TAB);
   const [cart, setCart] = useState([]);
   const [paymentMethod, setPaymentMethod] = useState("cash");
@@ -1544,6 +1548,41 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
                           </span>
                         </Tooltip>
                       ) : null}
+                      {showAdminCashierHeaderActions ? (
+                        <>
+                          <Tooltip title="لوحة الإدارة">
+                            <span style={{ display: "block", width: "100%", minWidth: 0 }}>
+                              <IconButton
+                                size="small"
+                                color="primary"
+                                onClick={() => navigate("/admin")}
+                                aria-label="لوحة الإدارة"
+                                sx={cellBtn()}
+                              >
+                                <AdminPanelSettings sx={{ fontSize: 22 }} />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
+                          <Tooltip title="تسجيل الخروج">
+                            <span style={{ display: "block", width: "100%", minWidth: 0 }}>
+                              <IconButton
+                                size="small"
+                                color="error"
+                                onClick={finalizeLogout}
+                                aria-label="تسجيل الخروج"
+                                sx={cellBtn({
+                                  color: "error.main",
+                                  bgcolor: alpha(theme.palette.error.main, 0.08),
+                                  borderColor: alpha(theme.palette.error.main, 0.28),
+                                  "&:hover": { bgcolor: alpha(theme.palette.error.main, 0.16) },
+                                })}
+                              >
+                                <Logout sx={{ fontSize: 22 }} />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
+                        </>
+                      ) : null}
                       {currentUser?.role === "cashier" || currentUser?.role === "super_cashier" ? (
                         <Tooltip title="إنهاء الدوام">
                           <span style={{ display: "block", width: "100%", minWidth: 0 }}>
@@ -1624,86 +1663,138 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
                 alignItems="center"
                 justifyContent="flex-end"
                 flexWrap="wrap"
-                sx={{ gap: 1, columnGap: 1.25, rowGap: 1 }}
+                sx={{ gap: 1.25, columnGap: 1.5, rowGap: 1.25, flex: 1, minWidth: 0 }}
               >
-                {cashierSys.todaySalesButtonEnabled ? (
-                  <Button
-                    variant="outlined"
-                    color="primary"
-                    size="small"
-                    startIcon={<Today />}
-                    onClick={() => {
-                      setTodaySalesPage(1);
-                      setTodaySalesOpen(true);
-                    }}
-                    sx={{ textTransform: "none", fontWeight: 800 }}
-                  >
-                    بيع اليوم
-                  </Button>
-                ) : null}
-                <IconButton onClick={() => navigate("/cashier/notifications")} color="primary" aria-label="الإشعارات">
-                  <Badge color="error" badgeContent={unreadNotifications} invisible={!unreadNotifications}>
-                    <Notifications />
-                  </Badge>
-                </IconButton>
-                {cashierSys.debtPayFromCashierEnabled ? (
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    startIcon={<AccountBalance sx={{ fontSize: 18 }} />}
-                    onClick={() => {
-                      setDebtPayOpen(true);
-                      setDebtPayCustomerId("");
-                      setDebtPayAmount("");
-                    }}
-                    sx={{ textTransform: "none", fontWeight: 800 }}
-                  >
-                    تسديد آجل
-                  </Button>
-                ) : null}
-                {cashierSys.offlineModeToggleEnabled ? (
-                  <Button
-                    variant={offlineModeEnabled ? "contained" : "outlined"}
-                    color={offlineModeEnabled ? "warning" : "primary"}
-                    size="small"
-                    onClick={() => {
-                      if (offlineModeEnabled && pendingOfflineCount > 0 && isOnline) {
-                        setSyncConfirmOpen(true);
-                        return;
-                      }
-                      setOfflineModeEnabled((v) => !v);
-                    }}
-                    sx={{ textTransform: "none", fontWeight: 800 }}
-                  >
-                    {offlineModeEnabled ? "وضع عدم الاتصال: مفعّل" : "وضع عدم الاتصال"}
-                  </Button>
-                ) : null}
+                <Stack
+                  direction="row"
+                  alignItems="center"
+                  flexWrap="wrap"
+                  sx={{
+                    gap: 1,
+                    justifyContent: "flex-end",
+                    px: 1,
+                    py: 0.5,
+                    borderRadius: 2,
+                    bgcolor: alpha(theme.palette.primary.main, 0.04),
+                    border: `1px solid ${alpha(theme.palette.primary.main, 0.1)}`,
+                  }}
+                >
+                  {cashierSys.todaySalesButtonEnabled ? (
+                    <Button
+                      variant="outlined"
+                      color="primary"
+                      size="small"
+                      startIcon={<Today />}
+                      onClick={() => {
+                        setTodaySalesPage(1);
+                        setTodaySalesOpen(true);
+                      }}
+                      sx={{ textTransform: "none", fontWeight: 800 }}
+                    >
+                      بيع اليوم
+                    </Button>
+                  ) : null}
+                  <Tooltip title="الإشعارات">
+                    <IconButton onClick={() => navigate("/cashier/notifications")} color="primary" aria-label="الإشعارات" size="small">
+                      <Badge color="error" badgeContent={unreadNotifications} invisible={!unreadNotifications}>
+                        <Notifications fontSize="small" />
+                      </Badge>
+                    </IconButton>
+                  </Tooltip>
+                  {cashierSys.debtPayFromCashierEnabled ? (
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      startIcon={<AccountBalance sx={{ fontSize: 18 }} />}
+                      onClick={() => {
+                        setDebtPayOpen(true);
+                        setDebtPayCustomerId("");
+                        setDebtPayAmount("");
+                      }}
+                      sx={{ textTransform: "none", fontWeight: 800 }}
+                    >
+                      تسديد آجل
+                    </Button>
+                  ) : null}
+                  {cashierSys.offlineModeToggleEnabled ? (
+                    <Button
+                      variant={offlineModeEnabled ? "contained" : "outlined"}
+                      color={offlineModeEnabled ? "warning" : "primary"}
+                      size="small"
+                      onClick={() => {
+                        if (offlineModeEnabled && pendingOfflineCount > 0 && isOnline) {
+                          setSyncConfirmOpen(true);
+                          return;
+                        }
+                        setOfflineModeEnabled((v) => !v);
+                      }}
+                      sx={{ textTransform: "none", fontWeight: 800 }}
+                    >
+                      {offlineModeEnabled ? "أوفلاين: مفعّل" : "أوفلاين"}
+                    </Button>
+                  ) : null}
+                </Stack>
 
-                {isSuperCashier(currentUser) ? (
-                  <Button
-                    variant="contained"
-                    color="secondary"
-                    size="small"
-                    startIcon={<Dashboard fontSize="small" />}
-                    onClick={() => navigate("/cashier/dashboard")}
-                    sx={{ textTransform: "none", fontWeight: 800 }}
-                  >
-                    لوحة التحكم
-                  </Button>
-                ) : null}
+                <Divider
+                  orientation="vertical"
+                  flexItem
+                  sx={{
+                    alignSelf: "stretch",
+                    borderColor: alpha(theme.palette.divider, 0.9),
+                    display: { xs: "none", sm: "block" },
+                  }}
+                />
 
-                {currentUser?.role === "cashier" || currentUser?.role === "super_cashier" ? (
-                  <Button
-                    variant="contained"
-                    color="secondary"
-                    size="small"
-                    startIcon={<EventAvailable />}
-                    onClick={() => setEndShiftOpen(true)}
-                    sx={{ textTransform: "none", fontWeight: 800 }}
-                  >
-                    إنهاء الدوام
-                  </Button>
-                ) : null}
+                <Stack direction="row" alignItems="center" flexWrap="wrap" sx={{ gap: 1, justifyContent: "flex-end" }}>
+                  {isSuperCashier(currentUser) ? (
+                    <Button
+                      variant="contained"
+                      color="secondary"
+                      size="small"
+                      startIcon={<Dashboard fontSize="small" />}
+                      onClick={() => navigate("/cashier/dashboard")}
+                      sx={{ textTransform: "none", fontWeight: 800 }}
+                    >
+                      لوحة التحكم
+                    </Button>
+                  ) : null}
+                  {currentUser?.role === "cashier" || currentUser?.role === "super_cashier" ? (
+                    <Button
+                      variant="contained"
+                      color="secondary"
+                      size="small"
+                      startIcon={<EventAvailable />}
+                      onClick={() => setEndShiftOpen(true)}
+                      sx={{ textTransform: "none", fontWeight: 800 }}
+                    >
+                      إنهاء الدوام
+                    </Button>
+                  ) : null}
+                  {showAdminCashierHeaderActions ? (
+                    <>
+                      <Button
+                        variant="outlined"
+                        color="primary"
+                        size="small"
+                        startIcon={<AdminPanelSettings fontSize="small" />}
+                        onClick={() => navigate("/admin")}
+                        sx={{ textTransform: "none", fontWeight: 800 }}
+                      >
+                        لوحة الإدارة
+                      </Button>
+                      <Button
+                        variant="outlined"
+                        color="error"
+                        size="small"
+                        startIcon={<Logout fontSize="small" />}
+                        onClick={finalizeLogout}
+                        sx={{ textTransform: "none", fontWeight: 700 }}
+                      >
+                        خروج
+                      </Button>
+                    </>
+                  ) : null}
+                </Stack>
               </Stack>
             </Stack>
           )}
@@ -3208,50 +3299,6 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
           </Button>
         </DialogActions>
       </Dialog>
-
-      {currentUser?.role === "admin" || currentUser?.role === "super_admin" ? (
-        <Paper
-          elevation={14}
-          sx={{
-            position: "fixed",
-            bottom: "max(12px, env(safe-area-inset-bottom))",
-            insetInlineStart: 12,
-            zIndex: theme.zIndex.snackbar,
-            p: 1,
-            borderRadius: 2.5,
-            display: "flex",
-            flexDirection: "column",
-            gap: 0.75,
-            minWidth: 0,
-            maxWidth: "min(280px, calc(100vw - 24px))",
-            bgcolor: alpha(theme.palette.background.paper, 0.98),
-            backdropFilter: "blur(10px)",
-            border: `1px solid ${alpha(theme.palette.primary.main, 0.22)}`,
-            boxShadow: `0 8px 32px ${alpha(theme.palette.common.black, 0.16)}`,
-          }}
-        >
-          <Button
-            variant="contained"
-            color="primary"
-            size="small"
-            startIcon={<Dashboard fontSize="small" />}
-            onClick={() => navigate("/admin")}
-            sx={{ textTransform: "none", fontWeight: 800 }}
-          >
-            لوحة الإدارة
-          </Button>
-          <Button
-            variant="outlined"
-            color="error"
-            size="small"
-            startIcon={<Logout fontSize="small" />}
-            onClick={finalizeLogout}
-            sx={{ textTransform: "none", fontWeight: 700 }}
-          >
-            تسجيل الخروج
-          </Button>
-        </Paper>
-      ) : null}
 
       {printInvoice ? (
         <div className="pharmacy-print-root" dir="rtl">

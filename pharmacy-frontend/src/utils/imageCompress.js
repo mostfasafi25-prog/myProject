@@ -82,3 +82,11 @@ export function compressImageFileToDataUrl(file, maxEdge = 480, quality = 0.82) 
     img.src = url;
   });
 }
+
+/** لا يُخزَّن data:/blob: في localStorage — استخدم رابط https (صور الأصناف وغيرها). */
+export function productImageForLocalStorage(raw) {
+  const s = String(raw ?? "").trim();
+  if (!s) return "";
+  if (s.startsWith("data:") || s.startsWith("blob:")) return "";
+  return s;
+}

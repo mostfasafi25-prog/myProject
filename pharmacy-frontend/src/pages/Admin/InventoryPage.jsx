@@ -37,7 +37,7 @@ import {
   useTheme,
 } from "@mui/material";
 import { keyframes } from "@mui/system";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import FilterBarRow from "../../components/FilterBarRow";
 import { adminPageContainerSx, adminPageSubtitleSx, adminPageTitleRowSx } from "../../utils/adminPageLayout";
 import { negativeAmountTextSx } from "../../utils/negativeAmountStyle";
@@ -49,7 +49,7 @@ import { buildInitialDemoProducts, buildInitialDemoCategories } from "../../data
 import { fetchAndPersistSalesCategories, PHARMACY_ADMIN_CATEGORIES_SYNCED } from "../../utils/backendCategoriesSync";
 import { normalizeSaleOptions, productHasSaleOptions } from "../../utils/productSaleOptions";
 import { debitStoreBalanceForPurchase, notifyStoreBalanceChanged } from "../../utils/storeBalanceSync";
-import { compressImageFileForUpload } from "../../utils/imageCompress";
+import { productImageForLocalStorage } from "../../utils/imageCompress";
 import { safeLocalStorageSetJsonWithDataUrlFallback } from "../../utils/safeLocalStorage";
 import { isAdmin, isSuperCashier, purchaserDisplayName } from "../../utils/userRoles";
 import { parseNonNegativeNumber, unitInventoryCost, weightedAverageUnitCost } from "../../utils/inventoryCost";
@@ -96,7 +96,12 @@ const ROWS_PER_PAGE = 5;
 function getStoredProducts() {
   try {
     const raw = JSON.parse(localStorage.getItem(PRODUCTS_KEY));
-    if (Array.isArray(raw) && raw.length) return raw;
+    if (Array.isArray(raw) && raw.length) {
+      return raw.map((p) => ({
+        ...p,
+        image: productImageForLocalStorage(p?.image),
+      }));
+    }
   } catch {
     // ignore
   }
@@ -115,8 +120,6 @@ function getStoredProducts() {
 
 export default function InventoryPage({ mode, onToggleMode }) {
   const theme = useTheme();
-  const newItemImageInputRef = useRef(null);
-  const editItemImageInputRef = useRef(null);
   const unifiedToggleSx = useMemo(
     () => ({
       direction: "ltr",
@@ -261,14 +264,23 @@ export default function InventoryPage({ mode, onToggleMode }) {
     }));
 
   const persistProducts = (next) => {
-    setItems(next);
-    const r = safeLocalStorageSetJsonWithDataUrlFallback(PRODUCTS_KEY, next);
+    const sanitized = next.map((item) => ({
+      ...item,
+      image: productImageForLocalStorage(item?.image),
+    }));
+    setItems(sanitized);
+    const r = safeLocalStorageSetJsonWithDataUrlFallback(PRODUCTS_KEY, sanitized);
     if (!r.ok) {
       showAppToast("تعذر حفظ المخزون — الذاكرة المحلية ممتلئة. امسح بيانات الموقع أو صور الأصناف الكبيرة.", "error");
       return;
     }
     if (r.stripped && Array.isArray(r.data)) {
-      setItems(r.data);
+      setItems(
+        r.data.map((item) => ({
+          ...item,
+          image: productImageForLocalStorage(item?.image),
+        })),
+      );
       showAppToast("تم الحفظ بعد إزالة صور كبيرة من بعض الأصناف لضيق مساحة المتصفح.", "warning");
     }
   };
@@ -607,7 +619,10 @@ export default function InventoryPage({ mode, onToggleMode }) {
                             return raw != null && raw !== "" ? String(raw) : "";
                           })(),
                           price: String(item.price ?? ""),
-                          imageUrl: typeof item.image === "string" ? item.image : "",
+                          imageUrl:
+                            typeof item.image === "string" && !String(item.image).startsWith("data:")
+                              ? item.image
+                              : "",
                           expiryDate: String(item.expiryDate ?? "").slice(0, 10),
                           saleOptionRows: saleOptionRowsFromProduct(item),
                           usageHowTo: String(item.usageHowTo ?? ""),
@@ -955,39 +970,16 @@ export default function InventoryPage({ mode, onToggleMode }) {
                 </Grid>
               ) : null}
               <Grid size={{ xs: 12 }}>
-                <input
-                  ref={newItemImageInputRef}
-                  type="file"
-                  accept="image/*"
-                  style={{ display: "none" }}
-                  onChange={async (e) => {
-                    const f = e.target.files?.[0];
-                    e.target.value = "";
-                    if (!f?.type?.startsWith("image/")) return;
-                    try {
-                      const dataUrl = await compressImageFileForUpload(f);
-                      setNewItem((p) => ({ ...p, imageUrl: dataUrl }));
-                    } catch {
-                      showAppToast("تعذر ضغط الصورة. جرّب صورة أصغر أو بصيغة JPG/PNG.", "error");
-                    }
-                  }}
+                <TextField
+                  label="رابط صورة الصنف (اختياري)"
+                  value={newItem.imageUrl}
+                  onChange={(e) => setNewItem((p) => ({ ...p, imageUrl: e.target.value.trim() }))}
+                  fullWidth
+                  size="small"
+                  placeholder="https://…"
+                  helperText="لا يُحفظ رفع ملفات في المتصفح — ضع رابط صورة عام (https) فقط لتفادي امتلاء التخزين."
+                  inputProps={{ style: { textAlign: "right" } }}
                 />
-                <Button
-                  type="button"
-                  variant="outlined"
-                  sx={{ textTransform: "none" }}
-                  onClick={(ev) => {
-                    ev.stopPropagation();
-                    newItemImageInputRef.current?.click();
-                  }}
-                >
-                  رفع صورة من الجهاز
-                </Button>
-                {newItem.imageUrl && String(newItem.imageUrl).startsWith("data:") ? (
-                  <Typography variant="caption" color="success.main" sx={{ display: "block", mt: 0.75 }}>
-                    تم اختيار صورة من الجهاز
-                  </Typography>
-                ) : null}
               </Grid>
               <Grid size={{ xs: 12 }}>
                 <Card variant="outlined" sx={{ p: 1.5, borderRadius: 2.5, borderColor: alpha(theme.palette.info.main, 0.35) }}>
@@ -1203,7 +1195,7 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   price: Number(newItem.price || 0),
                   ...(stockQtyTotal > 0 ? { costPrice: blendedUnitCost } : {}),
                   active: true,
-                  image: newItem.imageUrl?.trim() || "",
+                  image: productImageForLocalStorage(newItem.imageUrl?.trim() || ""),
                   createdAt: new Date().toISOString(),
                   ...(saleOpts.length ? { saleOptions: saleOpts } : {}),
                   ...(String(newItem.expiryDate || "").trim() ? { expiryDate: String(newItem.expiryDate).trim() } : {}),
@@ -1820,39 +1812,16 @@ export default function InventoryPage({ mode, onToggleMode }) {
                 />
               </Grid>
               <Grid size={{ xs: 12 }}>
-                <input
-                  ref={editItemImageInputRef}
-                  type="file"
-                  accept="image/*"
-                  style={{ display: "none" }}
-                  onChange={async (e) => {
-                    const f = e.target.files?.[0];
-                    e.target.value = "";
-                    if (!f?.type?.startsWith("image/")) return;
-                    try {
-                      const dataUrl = await compressImageFileForUpload(f);
-                      setEditForm((p) => ({ ...p, imageUrl: dataUrl }));
-                    } catch {
-                      showAppToast("تعذر ضغط الصورة. جرّب صورة أصغر أو بصيغة JPG/PNG.", "error");
-                    }
-                  }}
+                <TextField
+                  label="رابط صورة الصنف (اختياري)"
+                  value={editForm.imageUrl}
+                  onChange={(e) => setEditForm((p) => ({ ...p, imageUrl: e.target.value.trim() }))}
+                  fullWidth
+                  size="small"
+                  placeholder="https://…"
+                  helperText="لا يُحفظ رفع ملفات في المتصفح — رابط https فقط."
+                  inputProps={{ style: { textAlign: "right" } }}
                 />
-                <Button
-                  type="button"
-                  variant="outlined"
-                  sx={{ textTransform: "none" }}
-                  onClick={(ev) => {
-                    ev.stopPropagation();
-                    editItemImageInputRef.current?.click();
-                  }}
-                >
-                  رفع صورة من الجهاز
-                </Button>
-                {editForm.imageUrl && String(editForm.imageUrl).startsWith("data:") ? (
-                  <Typography variant="caption" color="success.main" sx={{ display: "block", mt: 0.75 }}>
-                    تم اختيار صورة من الجهاز
-                  </Typography>
-                ) : null}
               </Grid>
               <Grid size={{ xs: 12 }}>
                 <Card variant="outlined" sx={{ p: 1.5, borderRadius: 2.5, borderColor: alpha(theme.palette.info.main, 0.35) }}>
@@ -2005,7 +1974,7 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   showAppToast("تحقق من الكمية والحد الأدنى والسعر", "error");
                   return;
                 }
-                const img = editForm.imageUrl?.trim() || editTarget.image || "";
+                const img = productImageForLocalStorage(editForm.imageUrl?.trim() || editTarget.image || "");
                 const variantTrim = String(editForm.variantLabel || "").trim();
                 const saleOpts = buildPersistedSaleOptions(editForm.saleOptionRows, editTarget.id);
                 const expTrim = String(editForm.expiryDate || "").trim().slice(0, 10);

@@ -66,7 +66,11 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Axios } from "../../Api/Axios";
-import { persistSessionUser, persistUserAvatarForLogin } from "../../utils/staffProfileExtras";
+import {
+  mergeUserWithProfileExtras,
+  persistSessionUser,
+  persistUserAvatarForLogin,
+} from "../../utils/staffProfileExtras";
 import { compressImageFileForUpload } from "../../utils/imageCompress";
 import { PHARMACY_USER_STORAGE_EVENT } from "../../utils/userRoles";
 import { adminPageContainerSx } from "../../utils/adminPageLayout";
@@ -193,8 +197,10 @@ export default function SettingsPage({
   const avatarInputRef = useRef(null);
   const [avatarPreview, setAvatarPreview] = useState(() => {
     try {
-      const u = JSON.parse(localStorage.getItem("user"));
-      return u?.avatarDataUrl || u?.avatar || null;
+      const raw = localStorage.getItem("user");
+      const u = raw ? JSON.parse(raw) : null;
+      const merged = mergeUserWithProfileExtras(u);
+      return merged?.avatarDataUrl || merged?.avatar || null;
     } catch {
       return null;
     }
