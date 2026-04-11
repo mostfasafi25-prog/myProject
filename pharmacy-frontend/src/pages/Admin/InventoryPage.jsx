@@ -52,6 +52,7 @@ import { debitStoreBalanceForPurchase, notifyStoreBalanceChanged } from "../../u
 import { compressImageFileForUpload } from "../../utils/imageCompress";
 import { safeLocalStorageSetJsonWithDataUrlFallback } from "../../utils/safeLocalStorage";
 import { isAdmin, isSuperCashier, purchaserDisplayName } from "../../utils/userRoles";
+import { parseNonNegativeNumber, unitInventoryCost, weightedAverageUnitCost } from "../../utils/inventoryCost";
 
 const inventoryDialogPaperSx = { borderRadius: 3, overflow: "hidden" };
 const inventoryDialogTitleSx = {
@@ -91,6 +92,7 @@ const STORE_BALANCE_KEY = "storeBalance";
 const PURCHASE_INVOICES_KEY = "purchaseInvoices";
 const NOTIFICATIONS_KEY = "systemNotifications";
 const ROWS_PER_PAGE = 5;
+
 function getStoredProducts() {
   try {
     const raw = JSON.parse(localStorage.getItem(PRODUCTS_KEY));
@@ -167,6 +169,7 @@ export default function InventoryPage({ mode, onToggleMode }) {
     saleType: "strip",
     qty: "",
     min: "",
+    costPrice: "",
     price: "",
     imageUrl: "",
     bonusQty: "",
@@ -195,6 +198,7 @@ export default function InventoryPage({ mode, onToggleMode }) {
     saleType: "strip",
     qty: "",
     min: "",
+    costPrice: "",
     price: "",
     imageUrl: "",
     barcode: "",
@@ -268,8 +272,8 @@ export default function InventoryPage({ mode, onToggleMode }) {
   };
 
   const stockCreditForProduct = (p) => {
-    const q = Number(p?.qty || 0);
-    const unit = Number(p?.price || 0);
+    const q = parseNonNegativeNumber(p?.qty);
+    const unit = unitInventoryCost(p);
     return Number((q * unit).toFixed(2));
   };
 
@@ -357,8 +361,11 @@ export default function InventoryPage({ mode, onToggleMode }) {
   const paidPurchaseQty = Number(newItem.qty || 0);
   const bonusStockQty = Number(newItem.bonusQty || 0);
   const stockQtyTotal = Math.max(0, paidPurchaseQty + bonusStockQty);
-  const purchasePrice = Number(newItem.price || 0);
-  const purchaseCost = Math.max(0, paidPurchaseQty * purchasePrice);
+  const purchaseUnitCost = parseNonNegativeNumber(newItem.costPrice);
+  const saleUnitPrice = parseNonNegativeNumber(newItem.price);
+  const purchaseCost = Math.max(0, paidPurchaseQty * purchaseUnitCost);
+  const expectedMarginPerUnit =
+    stockQtyTotal > 0 && saleUnitPrice > 0 ? Math.round((saleUnitPrice - purchaseUnitCost) * 10) / 10 : null;
   const treasuryBalance = useMemo(() => {
     try {
       const raw = JSON.parse(localStorage.getItem(STORE_BALANCE_KEY));
@@ -406,6 +413,7 @@ export default function InventoryPage({ mode, onToggleMode }) {
                 qty: "",
                 bonusQty: "",
                 min: "",
+                costPrice: "",
                 price: "",
                 imageUrl: "",
                 barcode: "",
@@ -545,7 +553,9 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary" }}>القسم</TableCell>
                   <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary" }}>طريقة البيع</TableCell>
                   <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary" }}>الكمية</TableCell>
-                  <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary" }}>السعر</TableCell>
+                  <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary" }}>
+                    الأسعار والربح
+                  </TableCell>
                   <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary" }}>الحالة</TableCell>
                   <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary" }}>تزويد</TableCell>
                   <TableCell align="center" sx={{ fontWeight: 800, color: "text.secondary" }}>حذف</TableCell>
@@ -568,6 +578,10 @@ export default function InventoryPage({ mode, onToggleMode }) {
                           saleType: item.saleType || "strip",
                           qty: String(item.qty ?? ""),
                           min: String(item.min ?? ""),
+                          costPrice: (() => {
+                            const raw = item.costPrice ?? item.cost_price;
+                            return raw != null && raw !== "" ? String(raw) : "";
+                          })(),
                           price: String(item.price ?? ""),
                           imageUrl: typeof item.image === "string" ? item.image : "",
                           barcode: String(item.barcode ?? ""),
@@ -621,7 +635,41 @@ export default function InventoryPage({ mode, onToggleMode }) {
                         <Typography fontWeight={700}>{Number(item.qty || 0).toFixed(1)}</Typography>
                       </TableCell>
                       <TableCell align="center">
-                        <Typography color="text.secondary">{Number(item.price || 0).toFixed(1)} شيكل</Typography>
+                        {(() => {
+                          const sale = parseNonNegativeNumber(item.price);
+                          const cost = unitInventoryCost(item);
+                          const margin = Math.round((sale - cost) * 10) / 10;
+                          const hasExplicitCost =
+                            item.costPrice != null ||
+                            item.cost_price != null ||
+                            item.purchaseUnitPrice != null ||
+                            item.purchase_unit_price != null;
+                          const marginLabel =
+                            sale <= 0
+                              ? "—"
+                              : !hasExplicitCost
+                                ? "حدّث سعر الشراء"
+                                : `${margin.toFixed(1)} ش`;
+                          return (
+                            <Stack spacing={0.25} alignItems="center">
+                              <Typography variant="caption" color="text.secondary" display="block">
+                                بيع: <Box component="span" fontWeight={700}>{sale.toFixed(1)}</Box>
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary" display="block">
+                                شراء: <Box component="span" fontWeight={700}>{cost.toFixed(1)}</Box>
+                              </Typography>
+                              <Chip
+                                size="small"
+                                label={`ربح/وحدة: ${marginLabel}`}
+                                color={
+                                  sale <= 0 ? "default" : !hasExplicitCost ? "warning" : margin >= 0 ? "success" : "error"
+                                }
+                                variant="outlined"
+                                sx={{ fontWeight: 800, maxWidth: "100%" }}
+                              />
+                            </Stack>
+                          );
+                        })()}
                       </TableCell>
                       <TableCell align="center">
                         <Stack direction="row" justifyContent="center" alignItems="center" sx={{ gap: 0.5 }}>
@@ -647,7 +695,10 @@ export default function InventoryPage({ mode, onToggleMode }) {
                             setRestockForm({
                               paidQty: "",
                               bonusQty: "",
-                              unitPrice: String(item.price ?? ""),
+                              unitPrice: (() => {
+                                const u = unitInventoryCost(item);
+                                return u > 0 ? String(Math.round(u * 10000) / 10000) : "";
+                              })(),
                             });
                             setRestockError("");
                             setRestockSuccess("");
@@ -822,6 +873,19 @@ export default function InventoryPage({ mode, onToggleMode }) {
               </Grid>
               <Grid size={{ xs: 12, sm: 6 }}>
                 <TextField
+                  label="سعر شراء الوحدة (شيكل)"
+                  type="text"
+                  inputMode="decimal"
+                  value={newItem.costPrice}
+                  onChange={(e) => setNewItem((p) => ({ ...p, costPrice: normalizeOneDecimal(e.target.value) }))}
+                  fullWidth
+                  size="small"
+                  helperText="يُخصم من الخزنة = الكمية المشتراة × هذا السعر — يُحفظ كمتوسط تكلفة للوحدة في المخزون"
+                  inputProps={{ style: { textAlign: "right" } }}
+                />
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <TextField
                   label="سعر البيع (شيكل)"
                   type="text"
                   inputMode="decimal"
@@ -829,6 +893,7 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   onChange={(e) => setNewItem((p) => ({ ...p, price: normalizeOneDecimal(e.target.value) }))}
                   fullWidth
                   size="small"
+                  helperText="سعر الكاشير — الربح = سعر البيع − متوسط تكلفة الوحدة"
                   inputProps={{ style: { textAlign: "right" } }}
                 />
               </Grid>
@@ -1007,10 +1072,15 @@ export default function InventoryPage({ mode, onToggleMode }) {
                     <Typography variant="body2" fontWeight={800} color={purchaseCost > 0 ? "warning.main" : "text.secondary"} sx={{ mt: 0.4 }}>
                       {purchaseCost > 0
                         ? `هذه الإضافة ستخصم من الخزنة: ${purchaseCost.toFixed(2)} شيكل`
-                        : "أدخل كمية المشتراة والسعر لحساب الخصم المتوقع"}
+                        : "أدخل كمية المشتراة وسعر الشراء لحساب الخصم المتوقع"}
                     </Typography>
                   </>
                 )}
+                {stockQtyTotal > 0 && saleUnitPrice > 0 && purchaseUnitCost >= 0 ? (
+                  <Typography variant="caption" color="success.dark" display="block" sx={{ mt: 0.5, fontWeight: 700 }}>
+                    ربح متوقع للوحدة (بعد دمج البونص في متوسط التكلفة): {expectedMarginPerUnit != null ? `${expectedMarginPerUnit.toFixed(1)} شيكل` : "—"}
+                  </Typography>
+                ) : null}
                 {stockQtyTotal > 0 ? (
                   <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.75 }}>
                     إجمالي ما يُدخل للمخزون: {stockQtyTotal.toFixed(1)} (مشتراة {paidPurchaseQty.toFixed(1)}
@@ -1048,6 +1118,10 @@ export default function InventoryPage({ mode, onToggleMode }) {
                     setPurchaseError("أدخل كمية مشتراة أو بونص");
                     return;
                   }
+                  if (purchaseUnitCost <= 0) {
+                    setPurchaseError("أدخل سعر شراء الوحدة أكبر من صفر لحساب التكلفة والخصم من الخزنة");
+                    return;
+                  }
                   if (purchaseCost <= 0) {
                     setPurchaseError("قيمة الشراء غير صحيحة");
                     return;
@@ -1062,6 +1136,10 @@ export default function InventoryPage({ mode, onToggleMode }) {
                 const variantTrim = String(newItem.variantLabel || "").trim();
                 const baseName = String(newItem.name || "").trim();
                 const saleOpts = buildPersistedSaleOptions(newItem.saleOptionRows, newId);
+                const blendedUnitCost =
+                  stockQtyTotal > 0
+                    ? weightedAverageUnitCost(0, 0, paidPurchaseQty, purchaseUnitCost, bonusStockQty)
+                    : 0;
                 const newRow = {
                   id: newId,
                   name: baseName,
@@ -1071,6 +1149,7 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   qty: stockQtyTotal,
                   min: Number(newItem.min || 0),
                   price: Number(newItem.price || 0),
+                  ...(stockQtyTotal > 0 ? { costPrice: blendedUnitCost } : {}),
                   active: true,
                   image: newItem.imageUrl?.trim() || "",
                   createdAt: new Date().toISOString(),
@@ -1137,7 +1216,9 @@ export default function InventoryPage({ mode, onToggleMode }) {
                         qtyPaid: paidPurchaseQty,
                         qtyBonus: bonusStockQty,
                         qty: stockQtyTotal,
-                        unitPrice: Number(newItem.price || 0),
+                        unitPrice: purchaseUnitCost,
+                        saleUnitPrice: saleUnitPrice,
+                        avgUnitCost: blendedUnitCost,
                         total: Number(purchaseCost.toFixed(2)),
                       },
                     ],
@@ -1160,7 +1241,7 @@ export default function InventoryPage({ mode, onToggleMode }) {
                       : `فاتورة ${purchaseInvoice.id} بقيمة ${purchaseInvoice.total.toFixed(1)} شيكل بواسطة ${purchaseInvoice.purchasedBy}`,
                     details: `الصنف: ${productDisplayName(newRow)} | المخزون: ${stockQtyTotal.toFixed(1)} (مشتراة ${paidPurchaseQty.toFixed(1)}${
                       bonusStockQty > 0 ? ` + بونص ${bonusStockQty.toFixed(1)}` : ""
-                    }) | السعر: ${Number(newItem.price || 0).toFixed(1)} شيكل`,
+                    }) | شراء ${purchaseUnitCost.toFixed(1)} ش/وحدة | بيع ${saleUnitPrice.toFixed(1)} ش | متوسط تكلفة مخزون ${blendedUnitCost.toFixed(2)} ش/وحدة`,
                     createdAt: new Date().toISOString(),
                     fromManagement: true,
                     managementLabel:
@@ -1188,6 +1269,7 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   qty: "",
                   bonusQty: "",
                   min: "",
+                  costPrice: "",
                   price: "",
                   imageUrl: "",
                   barcode: "",
@@ -1377,9 +1459,22 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   return;
                 }
                 const buyerLabel = purchaserDisplayName(currentUser);
+                const oldQty = parseNonNegativeNumber(restockTarget.qty);
+                const oldUnitCost = unitInventoryCost(restockTarget);
+                const newAvgCost = weightedAverageUnitCost(
+                  oldQty,
+                  oldUnitCost,
+                  restockPaidQty,
+                  restockUnitPrice,
+                  restockBonusQty,
+                );
                 const nextItems = items.map((it) =>
                   it.id === restockTarget.id
-                    ? { ...it, qty: Number(it.qty || 0) + restockStockTotal }
+                    ? {
+                        ...it,
+                        qty: Number(it.qty || 0) + restockStockTotal,
+                        costPrice: newAvgCost,
+                      }
                     : it,
                 );
                 persistProducts(nextItems);
@@ -1428,6 +1523,7 @@ export default function InventoryPage({ mode, onToggleMode }) {
                       qtyBonus: restockBonusQty,
                       qty: restockStockTotal,
                       unitPrice: restockUnitPrice,
+                      avgUnitCostAfter: newAvgCost,
                       total: Number(restockPurchaseCost.toFixed(2)),
                       note: "تزويد مخزون",
                     },
@@ -1470,7 +1566,14 @@ export default function InventoryPage({ mode, onToggleMode }) {
                 } catch {
                   localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify([notification]));
                 }
-                setRestockForm({ paidQty: "", bonusQty: "", unitPrice: String(restockTarget.price ?? "") });
+                setRestockForm({
+                  paidQty: "",
+                  bonusQty: "",
+                  unitPrice: (() => {
+                    const u = newAvgCost;
+                    return u > 0 ? String(Math.round(u * 10000) / 10000) : "";
+                  })(),
+                });
                 setRestockSuccess(
                   superCashier
                     ? `تم تزويد المخزون وتسجيل التوريد باسمك`
@@ -1511,8 +1614,8 @@ export default function InventoryPage({ mode, onToggleMode }) {
                 <strong>{deleteDialogProduct ? productDisplayName(deleteDialogProduct) : ""}</strong>؟
               </Typography>
               <Alert severity="info" sx={{ textAlign: "right" }}>
-                قيمة المخزون الحالية تُحسب تقريباً: الكمية × سعر البيع. عند اختيار «إرجاع للخزنة» تُضاف هذه القيمة إلى رصيد الصندوق
-                (كاش).
+                قيمة المخزون تُحسب: الكمية × متوسط تكلفة الوحدة (سعر الشراء المحفوظ للصنف). عند «إرجاع للخزنة» تُضاف هذه القيمة إلى
+                رصيد الصندوق (كاش) — وليس بسعر البيع.
               </Alert>
               <Typography variant="h6" fontWeight={800} color="primary.main">
                 {deleteDialogProduct
@@ -1520,7 +1623,8 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   : "—"}
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                الكمية الحالية: {deleteDialogProduct ? Number(deleteDialogProduct.qty || 0) : "—"} — سعر البيع:{" "}
+                الكمية الحالية: {deleteDialogProduct ? Number(deleteDialogProduct.qty || 0) : "—"} — متوسط تكلفة الوحدة:{" "}
+                {deleteDialogProduct ? unitInventoryCost(deleteDialogProduct).toFixed(2) : "—"} شيكل — سعر البيع:{" "}
                 {deleteDialogProduct ? Number(deleteDialogProduct.price || 0).toFixed(2) : "—"} شيكل
               </Typography>
             </Stack>
@@ -1655,6 +1759,23 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   size="small"
                   disabled={!isAdmin(currentUser)}
                   helperText={!isAdmin(currentUser) ? "تعديل السعر للمدير فقط — راجع المدير" : ""}
+                  inputProps={{ style: { textAlign: "right" }, step: "0.1", min: "0" }}
+                />
+              </Grid>
+              <Grid size={{ xs: 12, sm: 6 }}>
+                <TextField
+                  label="متوسط تكلفة الوحدة (شراء)"
+                  type="number"
+                  value={editForm.costPrice}
+                  onChange={(e) => setEditForm((p) => ({ ...p, costPrice: normalizeOneDecimal(e.target.value) }))}
+                  fullWidth
+                  size="small"
+                  disabled={!isAdmin(currentUser)}
+                  helperText={
+                    !isAdmin(currentUser)
+                      ? "للمدير فقط — يُستخدم لحساب قيمة المخزون والربح"
+                      : "لا يخصم من الخزنة عند الحفظ — تصحيح متوسط التكلفة يدوياً إن لزم"
+                  }
                   inputProps={{ style: { textAlign: "right" }, step: "0.1", min: "0" }}
                 />
               </Grid>
@@ -1831,6 +1952,15 @@ export default function InventoryPage({ mode, onToggleMode }) {
                 const q = Number(normalizeOneDecimal(editForm.qty));
                 const mn = Number(normalizeOneDecimal(editForm.min));
                 const pr = Number(normalizeOneDecimal(editForm.price));
+                const costTrim = String(editForm.costPrice ?? "").trim();
+                let costVal = null;
+                if (isAdmin(currentUser) && costTrim !== "") {
+                  costVal = Number(normalizeOneDecimal(editForm.costPrice));
+                  if (Number.isNaN(costVal) || costVal < 0) {
+                    showAppToast("متوسط تكلفة الوحدة غير صحيح", "error");
+                    return;
+                  }
+                }
                 if (Number.isNaN(q) || q < 0 || Number.isNaN(mn) || mn < 0 || Number.isNaN(pr) || pr < 0) {
                   showAppToast("تحقق من الكمية والحد الأدنى والسعر", "error");
                   return;
@@ -1869,6 +1999,9 @@ export default function InventoryPage({ mode, onToggleMode }) {
                   else delete row.usageFrequency;
                   if (usageTipsTrim) row.usageTips = usageTipsTrim;
                   else delete row.usageTips;
+                  if (isAdmin(currentUser) && costVal !== null) {
+                    row.costPrice = Number(costVal.toFixed(4));
+                  }
                   return row;
                 });
                 if (isAdmin(currentUser) && Number(editTarget.price) !== Number(pr)) {

@@ -73,6 +73,7 @@ import { productDisplayName } from "../utils/productDisplayName";
 import { appendAudit } from "../utils/auditLog";
 import { negativeAmountTextSx } from "../utils/negativeAmountStyle";
 import { notifyStoreBalanceChanged } from "../utils/storeBalanceSync";
+import { unitInventoryCost } from "../utils/inventoryCost";
 import {
   deleteCashierDraft,
   readDraftsForCashier,
@@ -165,11 +166,14 @@ function mapApiProductRow(row) {
   const uh = String(row.usage_how_to || row.usageHowTo || "").trim();
   const uf = String(row.usage_frequency || row.usageFrequency || "").trim();
   const ut = String(row.usage_tips || row.usageTips || "").trim();
+  const costRaw = row.cost_price ?? row.costPrice ?? row.purchase_price ?? row.purchasePrice;
+  const costNum = Number(costRaw);
   return {
     id: row.id,
     name: row.name,
     desc: row.description || "",
     price: Number(row.price || 0),
+    ...(Number.isFinite(costNum) && costNum >= 0 ? { costPrice: costNum } : {}),
     category: catName,
     categoryId: catId,
     qty: Number(row.stock ?? 0),
@@ -200,6 +204,14 @@ function mergeCashierProductsWithLocalStorage(apiList) {
     const lHow = String(loc.usageHowTo || "").trim();
     const lFreq = String(loc.usageFrequency || "").trim();
     const lTips = String(loc.usageTips || "").trim();
+    const localCostRaw = loc.costPrice ?? loc.cost_price;
+    const localCostNum = Number(localCostRaw);
+    const mergedCost =
+      localCostRaw != null && localCostRaw !== "" && Number.isFinite(localCostNum) && localCostNum >= 0
+        ? localCostNum
+        : p.costPrice != null
+          ? Number(p.costPrice)
+          : undefined;
     return {
       ...p,
       qty: loc.qty != null ? Number(loc.qty) : p.qty,
@@ -208,6 +220,7 @@ function mergeCashierProductsWithLocalStorage(apiList) {
       saleOptions: loc.saleOptions ?? p.saleOptions,
       saleType: loc.saleType || p.saleType,
       active: loc.active !== false,
+      ...(mergedCost != null && Number.isFinite(mergedCost) ? { costPrice: mergedCost } : {}),
       ...(lHow ? { usageHowTo: lHow } : {}),
       ...(lFreq ? { usageFrequency: lFreq } : {}),
       ...(lTips ? { usageTips: lTips } : {}),
@@ -992,6 +1005,33 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
     }
     setIsCheckoutSubmitting(true);
     const creditCust = debtCustomers.find((c) => String(c.id) === String(creditCustomerId));
+    const discountAllocFactor = subTotalBeforeDiscount > 0 ? total / subTotalBeforeDiscount : 0;
+    const builtItems = cart.map((item) => {
+      const src = visibleProducts.find((p) => Number(p.id) === Number(item.id)) || {};
+      const qty = roundCartQty(item.qty);
+      const sellUnit = Number(item.price);
+      const uc = unitInventoryCost(src);
+      const lineGross = Number((qty * sellUnit).toFixed(2));
+      const lineCost = Number((qty * uc).toFixed(2));
+      const lineNetRevenue = Number((lineGross * discountAllocFactor).toFixed(2));
+      const lineProfit = Number((lineNetRevenue - lineCost).toFixed(2));
+      return {
+        productId: item.id,
+        name: item.name,
+        qty,
+        price: sellUnit,
+        total: lineGross,
+        unitCost: Number(Number(uc).toFixed(4)),
+        lineCost,
+        lineProfit,
+        saleType: item.saleType || "strip",
+        saleTypeLabel: item.saleTypeLabel || saleTypeLabelMap[item.saleType] || saleTypeLabelMap.optional,
+        ...(item.saleOptionId ? { saleOptionId: item.saleOptionId } : {}),
+        ...(item.saleOptionLabel ? { saleOptionLabel: item.saleOptionLabel } : {}),
+      };
+    });
+    const invoiceTotalCost = Number(builtItems.reduce((s, it) => s + Number(it.lineCost || 0), 0).toFixed(2));
+    const invoiceTotalProfit = Number(builtItems.reduce((s, it) => s + Number(it.lineProfit || 0), 0).toFixed(2));
     const invoice = {
       id: `INV-${Date.now()}`,
       soldBy: purchaserDisplayName(currentUser),
@@ -1003,22 +1043,14 @@ export default function CashierPage({ mode = "light", onToggleMode }) {
       discountPercent: discountPct,
       discountFixed: discountFix,
       total: Number(total.toFixed(2)),
+      totalCost: invoiceTotalCost,
+      totalProfit: invoiceTotalProfit,
       status: "مكتمل",
       soldAt: new Date().toISOString(),
       ...(paymentMethod === "credit" && creditCust
         ? { creditCustomerId: creditCust.id, creditCustomerName: creditCust.name }
         : {}),
-      items: cart.map((item) => ({
-        productId: item.id,
-        name: item.name,
-        qty: roundCartQty(item.qty),
-        price: Number(item.price),
-        total: Number((roundCartQty(item.qty) * Number(item.price)).toFixed(2)),
-        saleType: item.saleType || "strip",
-        saleTypeLabel: item.saleTypeLabel || saleTypeLabelMap[item.saleType] || saleTypeLabelMap.optional,
-        ...(item.saleOptionId ? { saleOptionId: item.saleOptionId } : {}),
-        ...(item.saleOptionLabel ? { saleOptionLabel: item.saleOptionLabel } : {}),
-      })),
+      items: builtItems,
     };
 
     try {
