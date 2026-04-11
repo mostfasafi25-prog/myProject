@@ -7,13 +7,24 @@ use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
- * يضمن أن Laravel يعامل طلبات مجموعة api كـ JSON (expectsJson / wantsJson)
- * حتى لا تُرجع استثناءات أو تحقق كصفحة HTML (مشكلة ظهرت من Vercel مع POST /api/login).
+ * يطبّق قبل مطابقة المسارات: أي طلب لـ api/* يُعامل كـ JSON (expectsJson)
+ * حتى أخطاء 404 وصيانة وغيرها لا تُرجع redirect/HTML.
  */
-class ForceJsonApiRequest
+class ForceJsonAcceptForApiPath
 {
+    private function isApiPath(Request $request): bool
+    {
+        $p = $request->path();
+
+        return $p === 'api' || str_starts_with($p, 'api/');
+    }
+
     public function handle(Request $request, Closure $next): Response
     {
+        if (! $this->isApiPath($request)) {
+            return $next($request);
+        }
+
         $accept = (string) $request->header('Accept', '');
         if (! str_contains($accept, 'application/json')) {
             $request->headers->set('Accept', 'application/json, text/plain, */*');

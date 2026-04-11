@@ -8,7 +8,7 @@ use Symfony\Component\HttpFoundation\Response;
 
 /**
  * 1) OPTIONS (preflight) لـ api/* → 204 وهيدرز CORS فوراً.
- * 2) أي استجابة api/* بلا Access-Control-Allow-Origin → يُضاف * (احتياط إن تعطّل HandleCors).
+ * 2) أي استجابة api/* → يُعاد ضبط Access-Control-Allow-Origin (احتياط إن لم يضفها HandleCors على POST).
  */
 class PreflightCors
 {
@@ -42,13 +42,23 @@ class PreflightCors
         /** @var Response $response */
         $response = $next($request);
 
-        if ($this->isApiPath($request) && ! $response->headers->get('Access-Control-Allow-Origin')) {
+        if ($this->isApiPath($request)) {
             $origin = (string) $request->headers->get('Origin');
             if ($origin !== '' && preg_match('#^https://[a-zA-Z0-9.-]+\.vercel\.app$#', $origin)) {
                 $response->headers->set('Access-Control-Allow-Origin', $origin);
-                $response->headers->set('Vary', 'Origin');
+            } elseif ($origin !== '' && preg_match('#^http://localhost(:\d+)?$#', $origin)) {
+                $response->headers->set('Access-Control-Allow-Origin', $origin);
             } else {
                 $response->headers->set('Access-Control-Allow-Origin', '*');
+            }
+            $varyParts = array_filter(array_map('trim', explode(',', (string) $response->headers->get('Vary', ''))));
+            $varyParts[] = 'Origin';
+            $response->headers->set('Vary', implode(', ', array_unique($varyParts)));
+            if (! $response->headers->has('Access-Control-Allow-Methods')) {
+                $response->headers->set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+            }
+            if (! $response->headers->has('Access-Control-Allow-Headers')) {
+                $response->headers->set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, X-CSRF-TOKEN');
             }
         }
 

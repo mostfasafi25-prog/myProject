@@ -82,19 +82,31 @@ $request = Request::capture();
 $response = $kernel->handle($request);
 
 $__p = $request->path();
-$__originHdr = null;
 if ($__p === 'api' || str_starts_with($__p, 'api/')) {
-    if (! $response->headers->get('Access-Control-Allow-Origin')) {
-        $__originHdr = (string) $request->headers->get('Origin');
-        if ($__originHdr !== '' && preg_match('#^https://[a-zA-Z0-9.-]+\.vercel\.app$#', $__originHdr)) {
-            $response->headers->set('Access-Control-Allow-Origin', $__originHdr);
-            $response->headers->set('Vary', 'Origin');
-        } else {
-            $response->headers->set('Access-Control-Allow-Origin', '*');
-        }
+    /*
+    | إجبار رؤوس CORS على الرد النهائي — Fruitcake/HandleCors أحياناً لا يضيفها على POST
+    | (فيُرفض الرد في المتصفح ويظهر Network Error في axios رغم أن السيرفر أجاب).
+    */
+    $__originHdr = (string) $request->headers->get('Origin');
+    if ($__originHdr !== '' && preg_match('#^https://[a-zA-Z0-9.-]+\.vercel\.app$#', $__originHdr)) {
+        $response->headers->set('Access-Control-Allow-Origin', $__originHdr);
+    } elseif ($__originHdr !== '' && preg_match('#^http://localhost(:\d+)?$#', $__originHdr)) {
+        $response->headers->set('Access-Control-Allow-Origin', $__originHdr);
+    } else {
+        $response->headers->set('Access-Control-Allow-Origin', '*');
+    }
+    $__varyParts = array_filter(array_map('trim', explode(',', (string) $response->headers->get('Vary', ''))));
+    $__varyParts[] = 'Origin';
+    $response->headers->set('Vary', implode(', ', array_unique($__varyParts)));
+    unset($__varyParts, $__originHdr);
+    if (! $response->headers->has('Access-Control-Allow-Methods')) {
+        $response->headers->set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    }
+    if (! $response->headers->has('Access-Control-Allow-Headers')) {
+        $response->headers->set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, X-CSRF-TOKEN');
     }
 }
-unset($__p, $__originHdr);
+unset($__p);
 
 $response->send();
 

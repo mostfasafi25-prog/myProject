@@ -7,4 +7,12 @@ if [ -z "$DATABASE_URL" ]; then
 fi
 php artisan migrate --force
 php artisan db:seed --class=AdminCashierSeeder --force
-exec php artisan serve --host=0.0.0.0 --port="${PORT:-8000}"
+
+PORT="${PORT:-8000}"
+export PORT
+envsubst '$PORT' < /var/www/html/docker/nginx/default.conf.template > /etc/nginx/sites-enabled/laravel.conf
+
+if [ "$#" -eq 0 ]; then
+  set -- /usr/bin/supervisord -n -c /etc/supervisor/supervisord.conf
+fi
+exec "$@"

@@ -35,6 +35,7 @@ import { Axios } from "../../Api/Axios";
 import { PHARMACY_DISPLAY_NAME } from "../../config/appBranding";
 import { appendUserLoginNotification } from "../../utils/cashierShiftNotification";
 import { mergeUserWithProfileExtras } from "../../utils/staffProfileExtras";
+import { formatApiError, formatIncompleteLoginResponse } from "../../utils/formatApiError";
 
 export default function Login() {
   const theme = useTheme();
@@ -60,8 +61,17 @@ export default function Login() {
       setLoading(true);
       const response = await Axios.post("login", { username, password });
 
-      const token = response?.data?.token;
-      let user = response?.data?.user;
+      let payload = response?.data;
+      if (typeof payload === "string") {
+        try {
+          payload = JSON.parse(payload);
+        } catch {
+          // يبقى نصاً للتحقق من HTML أدناه
+        }
+      }
+
+      const token = payload?.token;
+      let user = payload?.user;
 
       console.info("[صيدلية][تسجيل دخول] بعد الرد", {
         username,
@@ -71,12 +81,27 @@ export default function Login() {
       });
 
       if (!token || !user?.role) {
-        const raw = response?.data;
+        const raw = payload;
         const looksLikeHtml = typeof raw === "string" && raw.trimStart().startsWith("<");
+        if (raw && typeof raw === "object" && typeof raw.error === "string") {
+          const h = response?.headers;
+          const ct =
+            h?.["content-type"] ||
+            h?.["Content-Type"] ||
+            (typeof h?.get === "function" ? h.get("content-type") : "") ||
+            "";
+          setError(
+            [raw.error, `HTTP ${response?.status ?? "?"}`, ct ? `Content-Type: ${ct}` : ""]
+              .filter(Boolean)
+              .join("\n"),
+          );
+          return;
+        }
         setError(
           looksLikeHtml
-            ? "السيرفر أرجع صفحة HTML بدل JSON — تحقق من عنوان الـ API وLogs على Render."
-            : "استجابة تسجيل الدخول غير مكتملة",
+            ? "السيرفر أرجع صفحة HTML بدل JSON — تحقق من عنوان الـ API وLogs على Render.\n" +
+                formatIncompleteLoginResponse(response)
+            : formatIncompleteLoginResponse(response),
         );
         return;
       }
@@ -118,16 +143,8 @@ export default function Login() {
         setError("نوع المستخدم غير مدعوم");
       }
     } catch (err) {
-      const msg = err?.message || "";
-      const serverMsg = err?.response?.data?.error;
-      console.warn("[صيدلية][تسجيل دخول] فشل", err?.response?.status, serverMsg || msg);
-      if (!err?.response && msg.includes("Network")) {
-        setError("تعذر الاتصال بالخادم — CORS أو إضافة متصفح أو السيرفر متوقف.");
-      } else if (msg.includes("JSON") || msg.includes("Unexpected token")) {
-        setError("السيرفر لم يرجع JSON صالحاً — راجع Network → Response لطلب login.");
-      } else {
-        setError(serverMsg || "فشل تسجيل الدخول");
-      }
+      console.warn("[صيدلية][تسجيل دخول] فشل", err?.response?.status, err?.response?.data, err);
+      setError(formatApiError(err, "تسجيل الدخول"));
     } finally {
       setLoading(false);
     }
@@ -268,7 +285,11 @@ export default function Login() {
               </ToggleButtonGroup>
             </Box>
 
-            {error ? <Alert severity="error">{error}</Alert> : null}
+            {error ? (
+              <Alert severity="error" sx={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                {error}
+              </Alert>
+            ) : null}
 
             <TextField
               label="اسم المستخدم"

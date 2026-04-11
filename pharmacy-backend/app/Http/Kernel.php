@@ -16,6 +16,7 @@ class Kernel extends HttpKernel
     protected $middleware = [
         // \App\Http\Middleware\TrustHosts::class,
         \App\Http\Middleware\TrustProxies::class,
+        \App\Http\Middleware\ForceJsonAcceptForApiPath::class,
         \App\Http\Middleware\PreflightCors::class,
         \Illuminate\Http\Middleware\HandleCors::class,
         \App\Http\Middleware\PreventRequestsDuringMaintenance::class,
@@ -40,10 +41,10 @@ class Kernel extends HttpKernel
         ],
 
         'api' => [
-            \App\Http\Middleware\ForceJsonApiRequest::class,
             \Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful::class,
             'throttle:api',
             \Illuminate\Routing\Middleware\SubstituteBindings::class,
+            \App\Http\Middleware\NormalizeApiJsonResponseHeaders::class,
         ],
     ];
 

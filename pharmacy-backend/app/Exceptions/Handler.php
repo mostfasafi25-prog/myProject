@@ -47,4 +47,17 @@ class Handler extends ExceptionHandler
             //
         });
     }
+
+    /**
+     * @param  \Illuminate\Http\Request  $request
+     */
+    protected function shouldReturnJson($request, Throwable $e)
+    {
+        $path = $request->path();
+        if ($path === 'api' || str_starts_with($path, 'api/')) {
+            return true;
+        }
+
+        return parent::shouldReturnJson($request, $e);
+    }
 }
