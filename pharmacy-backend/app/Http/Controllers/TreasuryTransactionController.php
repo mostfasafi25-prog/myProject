@@ -21,7 +21,7 @@ class TreasuryTransactionController extends Controller
                 'end_date' => 'nullable|date|after_or_equal:start_date',
                 'type' => 'nullable|in:income,expense',
                 'category' => 'nullable|string',
-                'payment_method' => 'nullable|in:cash,bank_transfer,check,card',
+                'payment_method' => 'nullable|in:cash,app,bank_transfer,check,card',
                 'search' => 'nullable|string',
                 'per_page' => 'nullable|integer|min:1|max:100',
             ]);
@@ -119,7 +119,7 @@ class TreasuryTransactionController extends Controller
                 'amount' => 'required|numeric|min:0.01',
                 'description' => 'required|string|max:500',
                 'category' => 'required|in:deposit,sales_income,other_income',
-                'payment_method' => 'nullable|in:cash,bank_transfer,check,card',
+                'payment_method' => 'nullable|in:cash,app,bank_transfer,check,card',
                 'transaction_date' => 'nullable|date',
                 'metadata' => 'nullable|array',
             ]);
@@ -143,8 +143,14 @@ class TreasuryTransactionController extends Controller
                 ], 400);
             }
 
-            // زيادة الرصيد
-            $treasury->balance += $request->amount;
+            // زيادة الرصيد (كاش / تطبيق)
+            $pm = strtolower((string) ($request->payment_method ?? 'cash'));
+            $amt = (float) $request->amount;
+            if ($pm === 'app') {
+                $treasury->applyLiquidityDelta(0, $amt);
+            } else {
+                $treasury->applyLiquidityDelta($amt, 0);
+            }
             $treasury->total_income += $request->amount;
             $treasury->save();
 
@@ -156,7 +162,7 @@ class TreasuryTransactionController extends Controller
                 'amount' => $request->amount,
                 'description' => $request->description,
                 'category' => $request->category,
-                'payment_method' => $request->payment_method ?? 'cash',
+                'payment_method' => $pm === 'app' ? 'app' : ($request->payment_method ?? 'cash'),
                 'transaction_date' => $request->transaction_date ?? now(),
                 'created_by' => auth()->id(),
                 'metadata' => $request->metadata,
@@ -193,7 +199,7 @@ class TreasuryTransactionController extends Controller
                 'amount' => 'required|numeric|min:0.01',
                 'description' => 'required|string|max:500',
                 'category' => 'required|in:withdraw,purchase_expense,salary_expense,other_expense',
-                'payment_method' => 'nullable|in:cash,bank_transfer,check,card',
+                'payment_method' => 'nullable|in:cash,app,bank_transfer,check,card',
                 'transaction_date' => 'nullable|date',
                 'metadata' => 'nullable|array',
             ]);
@@ -216,17 +222,16 @@ class TreasuryTransactionController extends Controller
                 ], 400);
             }
 
-            // التحقق من الرصيد الكافي
-            if ($treasury->balance < $request->amount) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'رصيد الخزنة غير كافي',
-                    'available_balance' => $treasury->balance
-                ], 400);
-            }
+            // السماح بالخصم حتى لو أصبح الرصيد سالباً
 
             // خصم المبلغ
-            $treasury->balance -= $request->amount;
+            $pm = strtolower((string) ($request->payment_method ?? 'cash'));
+            $amt = (float) $request->amount;
+            if ($pm === 'app') {
+                $treasury->applyLiquidityDelta(0, -$amt);
+            } else {
+                $treasury->applyLiquidityDelta(-$amt, 0);
+            }
             $treasury->total_expenses += $request->amount;
             $treasury->save();
 
@@ -238,7 +243,7 @@ class TreasuryTransactionController extends Controller
                 'amount' => $request->amount,
                 'description' => $request->description,
                 'category' => $request->category,
-                'payment_method' => $request->payment_method ?? 'cash',
+                'payment_method' => $pm === 'app' ? 'app' : ($request->payment_method ?? 'cash'),
                 'transaction_date' => $request->transaction_date ?? now(),
                 'created_by' => auth()->id(),
                 'metadata' => $request->metadata,

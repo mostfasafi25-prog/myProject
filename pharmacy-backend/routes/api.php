@@ -11,6 +11,10 @@ use App\Http\Controllers\UserController;
 use App\Http\Controllers\AdminDashboardController;
 use App\Http\Controllers\CategoryController;
 use App\Http\Controllers\CashierShiftCloseController;
+use App\Http\Controllers\ImageUploadController;
+use App\Http\Controllers\SupplierController;
+use App\Http\Controllers\PurchaseController;
+use App\Http\Controllers\TreasuryController;
 
 /*
 |--------------------------------------------------------------------------
@@ -70,6 +74,7 @@ Route::post('/login/verify-otp', [AuthController::class, 'verifyLoginOtp']);
 Route::middleware($apiAuthMiddleware)->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::get('/me', [AuthController::class, 'me']);
+    Route::put('orders/credit-customers/{customerId}/credit-limit', [OrderController::class, 'updateCreditLimit']);
     Route::get('/chatbase/identity-token', [AuthController::class, 'chatbaseIdentityToken']);
     Route::post('/change-password', [AuthController::class, 'changePassword']);
     Route::get('/users/pending-approvals', [AuthController::class, 'pendingApprovals']);
@@ -80,13 +85,47 @@ Route::middleware($apiAuthMiddleware)->group(function () {
     Route::delete('/users/{id}', [UserController::class, 'destroy']);
 
     Route::apiResource('products', ProductController::class);
+    Route::get('/products/stats', [ProductController::class, 'stats']);
+    Route::post('/products/reset-all', [ProductController::class, 'resetAllProducts']);
     /** أقسام المبيعات/المشتريات للكاشير والواجهات — بيانات حقيقية من الجدول */
     Route::get('/categories/main', [CategoryController::class, 'getMainCategoriesSimple']);
     Route::get('/orders/stats/summary', [OrderController::class, 'stats']);
+    Route::get('/orders/credit-customers', [OrderController::class, 'creditCustomersSummary']);
+    Route::post('/orders/credit-customers', [OrderController::class, 'createCreditCustomer']);
+    Route::get('/orders/credit-customers/{customerId}/movements', [OrderController::class, 'creditCustomerMovements']);
+    Route::post('/orders/credit-customers/{customerId}/pay', [OrderController::class, 'applyCreditPayment']);
     Route::get('/dashboard/summary', [AdminDashboardController::class, 'summary']);
     Route::apiResource('orders', OrderController::class)->only(['index', 'store', 'show']);
+    Route::post('/orders/{id}/return', [OrderController::class, 'returnOrder']);
+    Route::post('/orders/{id}/return-full', [OrderController::class, 'returnOrderFull']);
 
     /** إنهاء دوام الكاشير — يُحفظ في السيرفر ولا يضيع عند تحديث الصفحة */
     Route::get('/cashier-shifts', [CashierShiftCloseController::class, 'index']);
     Route::post('/cashier-shifts', [CashierShiftCloseController::class, 'store']);
+    
+    /** رفع الصور للمنتجات */
+    Route::post('/upload/product-image', [ImageUploadController::class, 'uploadProductImage']);
+    Route::post('/upload/multiple-images', [ImageUploadController::class, 'uploadMultipleImages']);
+    Route::delete('/upload/delete-image', [ImageUploadController::class, 'deleteImage']);
+    
+    /** الموردين */
+    Route::apiResource('suppliers', SupplierController::class);
+    Route::post('suppliers/{supplier}/pay-debt', [SupplierController::class, 'payDebt']);
+    
+    /** المشتريات */
+    Route::apiResource('purchases', PurchaseController::class);
+    Route::post('purchases/{purchase}/return-items', [PurchaseController::class, 'returnItems']);
+    Route::post('purchases/{purchase}/full-return', [PurchaseController::class, 'fullReturn']);
+    Route::delete('/purchases-all', [PurchaseController::class, 'destroyAll']);
+    
+    /** الخزنة */
+    Route::apiResource('treasury', TreasuryController::class);
+    Route::get('/treasury-balance', [TreasuryController::class, 'getSimpleBalance']);
+    Route::post('/treasury-init', [TreasuryController::class, 'initTreasury']);
+    Route::post('/system/reset-all', [TreasuryController::class, 'resetEverything']);
+      // ✅ أضف هاتين السطرين هنا
+      Route::post('/treasury/manual-deposit', [TreasuryController::class, 'manualDeposit']);
+      Route::post('/treasury/manual-withdraw', [TreasuryController::class, 'manualWithdraw']);
+    /** الأقسام */
+    Route::apiResource('categories', CategoryController::class);
 });

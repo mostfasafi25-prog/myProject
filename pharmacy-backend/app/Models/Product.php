@@ -12,6 +12,42 @@ class Product extends Model
     use HasFactory;
 
     protected $guarded = [];
+    
+    protected $fillable = [
+        'name',
+        'code',
+        'description',
+        'image_url',
+        'price',
+        'purchase_price',
+        'cost_price',
+        'profit_amount',
+        'category_id',
+        'supplier_id',
+        'stock',
+        'min_stock',
+        'max_stock',
+        'reorder_point',
+        'unit',
+        'allow_split_sales',
+        'strip_unit_count',
+        'split_item_name',
+        'split_sale_options',
+        'pieces_per_strip',
+        'strips_per_box',
+        'purchase_unit',
+        'sale_unit',
+        'sku',
+        'barcode',
+        'has_addons',
+        'is_active',
+        'split_sale_price',  // 👈 أضف هذا السطر
+        'full_unit_name',
+        'divide_into',
+        'allow_small_pieces',
+        'pieces_count',
+
+    ];
 
     protected $casts = [
         'price' => 'decimal:2',
@@ -22,7 +58,17 @@ class Product extends Model
         'max_stock' => 'decimal:2',
         'reorder_point' => 'decimal:2',
         'has_addons' => 'boolean',
-        'is_active' => 'boolean'
+        'is_active' => 'boolean',
+        'allow_split_sales' => 'boolean',
+        'strip_unit_count' => 'decimal:3',
+        'split_sale_options' => 'array',
+        'pieces_per_strip' => 'decimal:3',
+        'strips_per_box' => 'decimal:3',
+        'split_sale_price' => 'decimal:2',  // 👈 أضف هذا السطر
+        'divide_into' => 'integer',
+        'allow_small_pieces' => 'boolean',
+        'pieces_count' => 'integer',
+
     ];
 
     /**
@@ -110,6 +156,112 @@ class Product extends Model
     public function isOutOfStock(): bool
     {
         return $this->stock <= 0;
+    }
+
+    /**
+     * عدد القطع (الحبات) في وحدة البيع الافتراضية — يطابق منطق OrderController::convertSaleQuantityToPieces.
+     * cost_price و purchase_price يُفترض أنهما بنفس وحدة البيع (علبة / شريط / حبة).
+     */
+    public function piecesPerSaleUnit(): float
+    {
+        $unit = strtolower((string) ($this->sale_unit ?: $this->unit ?: 'piece'));
+        $piecesPerStrip = (float) ($this->pieces_per_strip ?: $this->strip_unit_count ?: 1);
+        $piecesPerStrip = $piecesPerStrip > 0 ? $piecesPerStrip : 1.0;
+        $stripsPerBox = (float) ($this->strips_per_box ?: 1);
+        $stripsPerBox = $stripsPerBox > 0 ? $stripsPerBox : 1.0;
+
+        if ($unit === 'box') {
+            return $stripsPerBox * $piecesPerStrip;
+        }
+        if ($unit === 'strip' || $unit === 'pack') {
+            return $piecesPerStrip;
+        }
+
+        return 1.0;
+    }
+
+    /**
+     * قيمة المخزون عندما يكون stock بالحبات و cost_price بوحدة البيع (علبة مثلاً).
+     */
+    public function stockInventoryValue(): float
+    {
+        $stock = (float) $this->stock;
+        $cost = (float) ($this->cost_price ?? $this->purchase_price ?? 0);
+        if ($stock <= 0 || $cost <= 0) {
+            return 0.0;
+        }
+        $perSale = $this->piecesPerSaleUnit();
+        $perSale = $perSale > 0 ? $perSale : 1.0;
+
+        return $stock * ($cost / $perSale);
+    }
+
+    /**
+     * تكلفة الحبة الواحدة (المخزون بالحبات) من cost_price المعرَّفة بوحدة البيع.
+     */
+    public function costPricePerInventoryPiece(): float
+    {
+        $cost = (float) ($this->cost_price ?? $this->purchase_price ?? 0);
+        if ($cost <= 0) {
+            return 0.0;
+        }
+        $per = $this->piecesPerSaleUnit();
+        $per = $per > 0 ? $per : 1.0;
+
+        return $cost / $per;
+    }
+
+    /**
+     * تحويل كمية البيع (علبة/شريط/حبة) إلى عدد الحبات في المخزون — يطابق OrderController السابق.
+     */
+    public function saleQuantityToInventoryPieces(float $quantity, ?string $saleUnit): float
+    {
+        $qty = max(0.0, (float) $quantity);
+        $unit = strtolower((string) ($saleUnit ?: $this->sale_unit ?: $this->unit ?: 'piece'));
+        if ($unit === 'piece') {
+            $unit = 'pill';
+        }
+        $piecesPerStrip = (float) ($this->pieces_per_strip ?: $this->strip_unit_count ?: 1);
+        $piecesPerStrip = $piecesPerStrip > 0 ? $piecesPerStrip : 1.0;
+        $stripsPerBox = (float) ($this->strips_per_box ?: 1);
+        $stripsPerBox = $stripsPerBox > 0 ? $stripsPerBox : 1.0;
+
+        if ($unit === 'box') {
+            return $qty * $stripsPerBox * $piecesPerStrip;
+        }
+        if ($unit === 'strip' || $unit === 'pack') {
+            return $qty * $piecesPerStrip;
+        }
+
+        return $qty;
+    }
+
+    /**
+     * تكلفة وحدة البيع للسطر (سعر الشراء المحفوظ يخص وحدة المنتج sale_unit، مثلاً العلبة).
+     */
+    public function unitCostForSaleType(?string $lineSaleType): float
+    {
+        $cost = (float) ($this->cost_price ?? $this->purchase_price ?? 0);
+        if ($cost <= 0) {
+            return 0.0;
+        }
+
+        $refUnit = strtolower((string) ($this->sale_unit ?: $this->unit ?: 'piece'));
+        if ($refUnit === 'piece') {
+            $refUnit = 'pill';
+        }
+        $lineUnit = strtolower((string) ($lineSaleType ?: $refUnit));
+        if ($lineUnit === 'piece') {
+            $lineUnit = 'pill';
+        }
+
+        $piecesRef = $this->saleQuantityToInventoryPieces(1.0, $refUnit);
+        $piecesLine = $this->saleQuantityToInventoryPieces(1.0, $lineUnit);
+        if ($piecesRef <= 0.0000001) {
+            return round($cost, 4);
+        }
+
+        return round($cost * ($piecesLine / $piecesRef), 4);
     }
 
     /**

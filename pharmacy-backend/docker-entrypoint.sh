@@ -6,7 +6,6 @@ if [ -z "$DATABASE_URL" ]; then
   exit 1
 fi
 php artisan migrate --force
-php artisan db:seed --class=AdminCashierSeeder --force
 
 PORT="${PORT:-8000}"
 export PORT

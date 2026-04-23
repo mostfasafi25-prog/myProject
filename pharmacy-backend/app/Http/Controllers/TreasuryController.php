@@ -157,6 +157,120 @@ class TreasuryController extends Controller
     }
     
     /**
+     * جلب الرصيد البسيط للخزنة (للفحص السريع)
+     */
+    public function getSimpleBalance()
+    {
+        try {
+            $treasury = Treasury::first();
+            
+            if (!$treasury) {
+                return response()->json([
+                    'success' => true,
+                    'data' => [
+                        'balance' => 0,
+                        'exists' => false,
+                        'message' => 'لا توجد خزنة مسجلة - يجب إنشاء خزنة أولاً'
+                    ]
+                ]);
+            }
+            
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'balance' => $treasury->balance,
+                    'balance_cash' => $treasury->balance_cash ?? $treasury->balance,
+                    'balance_app' => $treasury->balance_app ?? 0,
+                    'total_income' => $treasury->total_income,
+                    'total_expenses' => $treasury->total_expenses,
+                    'exists' => true,
+                    'treasury_id' => $treasury->id
+                ]
+            ]);
+            
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'فشل في جلب رصيد الخزنة',
+                'error' => env('APP_DEBUG') ? $e->getMessage() : null
+            ], 500);
+        }
+    }
+    
+    /**
+     * إنشاء خزنة جديدة إذا لم تكن موجودة
+     */
+    public function initTreasury(Request $request)
+    {
+        try {
+            $validator = Validator::make($request->all(), [
+                'initial_balance' => 'nullable|numeric|min:0',
+                'name' => 'nullable|string|max:255'
+            ]);
+            
+            if ($validator->fails()) {
+                return response()->json([
+                    'success' => false,
+                    'errors' => $validator->errors()
+                ], 422);
+            }
+            
+            $treasury = Treasury::first();
+            
+            if ($treasury) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'الخزنة موجودة بالفعل',
+                    'data' => [
+                        'treasury' => $treasury,
+                        'created' => false
+                    ]
+                ]);
+            }
+            
+            $initBal = (float) ($request->initial_balance ?? 0);
+            $treasury = Treasury::create([
+                'name' => $request->name ?? 'الخزنة الرئيسية',
+                'balance' => $initBal,
+                'balance_cash' => $initBal,
+                'balance_app' => 0,
+                'total_income' => $initBal,
+                'total_expenses' => 0,
+                'is_active' => true
+            ]);
+            
+            // تسجيل المعاملة الافتتاحية
+            if ($request->initial_balance > 0) {
+                TreasuryTransaction::create([
+                    'treasury_id' => $treasury->id,
+                    'type' => 'income',
+                    'amount' => $request->initial_balance,
+                    'description' => 'رصيد افتتاحي للخزنة',
+                    'category' => 'initial_balance',
+                    'transaction_date' => now(),
+                    'status' => 'completed'
+                ]);
+            }
+            
+            return response()->json([
+                'success' => true,
+                'message' => 'تم إنشاء الخزنة بنجاح',
+                'data' => [
+                    'treasury' => $treasury,
+                    'created' => true
+                ]
+            ], 201);
+            
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'فشل في إنشاء الخزنة',
+                'error' => env('APP_DEBUG') ? $e->getMessage() : null
+            ], 500);
+        }
+    }
+    
+    /**
      * جلب إحصائيات الموظفين
      */
     private function getEmployeesStats()
@@ -201,7 +315,8 @@ public function manualDeposit(Request $request)
     $validator = Validator::make($request->all(), [
         'amount' => 'required|numeric|min:0.01',
         'description' => 'required|string|max:500',
-        'transaction_date' => 'nullable|date'
+        'transaction_date' => 'nullable|date',
+        'payment_method' => 'nullable|in:cash,app',
     ]);
     
     if ($validator->fails()) {
@@ -220,15 +335,23 @@ public function manualDeposit(Request $request)
         if (!$treasury) {
             $treasury = Treasury::create([
                 'balance' => 0,
+                'balance_cash' => 0,
+                'balance_app' => 0,
                 'total_income' => 0,
                 'total_expenses' => 0
             ]);
         }
         
         $oldBalance = $treasury->balance;
+        $pm = strtolower((string) ($request->payment_method ?? 'cash'));
+        $amt = (float) $request->amount;
         
         // تحديث رصيد الخزنة فقط بدون تعديل total_income
-        $treasury->balance += $request->amount;
+        if ($pm === 'app') {
+            $treasury->applyLiquidityDelta(0, $amt);
+        } else {
+            $treasury->applyLiquidityDelta($amt, 0);
+        }
         $treasury->save();
         
         // تسجيل المعاملة باستخدام القيم المسموحة في ENUM الحالي
@@ -241,7 +364,7 @@ public function manualDeposit(Request $request)
             'transaction_date' => $request->transaction_date ?? now(),
             'transaction_number' => 'MANUAL-' . time(),
             'status' => 'completed',
-            'payment_method' => 'cash',
+            'payment_method' => $pm === 'app' ? 'app' : 'cash',
             'created_by' => auth()->id() ?? 1,
             'reference_type' => 'manual_deposit',
             'reference_id' => rand(1000, 9999),
@@ -294,7 +417,8 @@ public function manualWithdraw(Request $request)
     $validator = Validator::make($request->all(), [
         'amount' => 'required|numeric|min:0.01',
         'description' => 'required|string|max:500',
-        'transaction_date' => 'nullable|date'
+        'transaction_date' => 'nullable|date',
+        'payment_method' => 'nullable|in:cash,app',
     ]);
     
     if ($validator->fails()) {
@@ -318,19 +442,15 @@ public function manualWithdraw(Request $request)
         }
         
         $oldBalance = $treasury->balance;
+        $pm = strtolower((string) ($request->payment_method ?? 'cash'));
+        $amt = (float) $request->amount;
         
-        // التحقق من الرصيد الكافي
-        if ($treasury->balance < $request->amount) {
-            return response()->json([
-                'success' => false,
-                'message' => 'الرصيد غير كافي للسحب',
-                'current_balance' => $treasury->balance,
-                'required_amount' => $request->amount
-            ], 400);
+        // تحديث رصيد الخزنة فقط بدون تعديل total_expenses (يُسمَح برصيد سالب)
+        if ($pm === 'app') {
+            $treasury->applyLiquidityDelta(0, -$amt);
+        } else {
+            $treasury->applyLiquidityDelta(-$amt, 0);
         }
-        
-        // تحديث رصيد الخزنة فقط بدون تعديل total_expenses
-        $treasury->balance -= $request->amount;
         $treasury->save();
         
         // تسجيل المعاملة باستخدام القيم المسموحة في ENUM الحالي
@@ -343,7 +463,7 @@ public function manualWithdraw(Request $request)
             'transaction_date' => $request->transaction_date ?? now(),
             'transaction_number' => 'MANUAL-W-' . time(),
             'status' => 'completed',
-            'payment_method' => 'cash',
+            'payment_method' => $pm === 'app' ? 'app' : 'cash',
             'created_by' => auth()->id() ?? 1,
             'reference_type' => 'manual_withdraw',
             'reference_id' => rand(1000, 9999),
@@ -423,21 +543,8 @@ public function payMealCost(Request $request)
         $oldBalance = $treasury->balance;
         $cost = $request->total_cost;
         
-        // التحقق من الرصيد الكافي
-        if ($treasury->balance < $cost) {
-            return response()->json([
-                'success' => false,
-                'message' => 'رصيد الخزنة غير كافي',
-                'details' => [
-                    'المطلوب' => number_format($cost, 2),
-                    'المتوفر' => number_format($treasury->balance, 2),
-                    'النقص' => number_format($cost - $treasury->balance, 2)
-                ]
-            ], 400);
-        }
-        
-        // خصم المبلغ من الخزنة
-        $treasury->balance -= $cost;
+        // خصم المبلغ من الخزنة (يُسمَح برصيد سالب) — يُسجَّل كخصم من كاش افتراضياً
+        $treasury->adjustCashLegacy(-$cost);
         $treasury->total_expenses += $cost;
         $treasury->save();
         
@@ -694,6 +801,8 @@ public function manualBalanceUpdate(Request $request)
         if (!$treasury) {
             $treasury = Treasury::create([
                 'balance' => 0,
+                'balance_cash' => 0,
+                'balance_app' => 0,
                 'total_income' => 0,
                 'total_expenses' => 0
             ]);
@@ -703,8 +812,9 @@ public function manualBalanceUpdate(Request $request)
         $newBalance = $request->new_balance;
         $difference = $newBalance - $oldBalance;
         
-        // تحديث رصيد الخزنة فقط بدون تعديل الإحصائيات
-        $treasury->balance = $newBalance;
+        // تحديث رصيد الخزنة فقط بدون تعديل الإحصائيات (الفرق على الكاش مع الإبقاء على رصيد التطبيق)
+        $treasury->balance_cash = round($newBalance - (float) ($treasury->balance_app ?? 0), 2);
+        $treasury->balance = round((float) $treasury->balance_cash + (float) ($treasury->balance_app ?? 0), 2);
         $treasury->save();
         
         // تحديد نوع المعاملة
@@ -792,14 +902,22 @@ public function resetEverything(Request $request)
         // 6. تصفير الخزنة
         $treasury = Treasury::first();
         if ($treasury) {
+            $treasury->balance_cash = 0;
+            $treasury->balance_app = 0;
             $treasury->balance = 0;
             $treasury->total_income = 0;
             $treasury->total_expenses = 0;
             $treasury->save();
         }
 
-        // 7. تصفير المنتجات
-        \App\Models\Product::query()->update(['stock' => 0]);
+        // 7. حذف ربط الأقسام بالأصناف
+        if (\Schema::hasTable('category_product')) {
+            DB::table('category_product')->delete();
+        }
+
+        // 8. حذف الأصناف والأقسام بالكامل
+        \App\Models\Product::query()->delete();
+        \App\Models\Category::query()->delete();
 
         DB::commit();
 
@@ -812,7 +930,8 @@ public function resetEverything(Request $request)
                 'المشتريات' => 0,
                 'المعاملات' => 0,
                 'رصيد_الخزنة' => 0,
-                'كمية_المنتجات' => 'جميعها صفر'
+                'الأصناف' => 0,
+                'الأقسام' => 0
             ]
         ]);
 
@@ -839,7 +958,8 @@ public function deposit(Request $request)
     $validator = Validator::make($request->all(), [
         'amount' => 'required|numeric|min:0.01',
         'description' => 'required|string|max:500',
-        'type' => 'required|in:deposit,withdraw' // deposit: إضافة, withdraw: سحب
+        'type' => 'required|in:deposit,withdraw', // deposit: إضافة, withdraw: سحب
+        'payment_method' => 'nullable|in:cash,app',
     ]);
     
     if ($validator->fails()) {
@@ -858,30 +978,32 @@ public function deposit(Request $request)
         if (!$treasury) {
             $treasury = Treasury::create([
                 'balance' => 0,
+                'balance_cash' => 0,
+                'balance_app' => 0,
                 'total_income' => 0,
                 'total_expenses' => 0
             ]);
         }
         
         $oldBalance = $treasury->balance;
+        $pm = strtolower((string) ($request->payment_method ?? 'cash'));
+        $amt = (float) $request->amount;
         
         // تحديث الرصيد حسب النوع
         if ($request->type === 'deposit') {
-            $treasury->balance += $request->amount;
+            if ($pm === 'app') {
+                $treasury->applyLiquidityDelta(0, $amt);
+            } else {
+                $treasury->applyLiquidityDelta($amt, 0);
+            }
             $treasury->total_income += $request->amount;
             $message = 'تم إضافة المبلغ إلى الخزنة';
         } else {
-            // تحقق إذا كان الرصيد كافي للسحب
-            if ($treasury->balance < $request->amount) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'الرصيد غير كافي للسحب',
-                    'current_balance' => $treasury->balance,
-                    'required_amount' => $request->amount
-                ], 400);
+            if ($pm === 'app') {
+                $treasury->applyLiquidityDelta(0, -$amt);
+            } else {
+                $treasury->applyLiquidityDelta(-$amt, 0);
             }
-            
-            $treasury->balance -= $request->amount;
             $treasury->total_expenses += $request->amount;
             $message = 'تم سحب المبلغ من الخزنة';
         }
@@ -1313,9 +1435,9 @@ public function paySalaryByType(Request $request)
             ], 400);
         }
         
-        // خصم المبلغ من الخزنة
+        // خصم المبلغ من الخزنة (افتراضياً من الكاش)
         $oldBalance = $treasury->balance;
-        $treasury->balance -= $amount;
+        $treasury->adjustCashLegacy(-$amount);
         $treasury->total_expenses += $amount;
         $treasury->save();
         
@@ -1705,9 +1827,14 @@ public function paySalaryByType(Request $request)
             // حساب تكلفة البضاعة المباعة
             foreach ($orders as $order) {
                 foreach ($order->items as $item) {
+                    $unitCost = (float) ($item->unit_cost ?? 0);
+                    if ($unitCost > 0.00001) {
+                        $totalCost += (float) $item->quantity * $unitCost;
+                        continue;
+                    }
                     $product = $item->product;
                     if ($product && $product->cost_price) {
-                        $totalCost += $item->quantity * $product->cost_price;
+                        $totalCost += (float) $item->quantity * (float) $product->cost_price;
                     }
                 }
             }
@@ -1953,7 +2080,7 @@ public function paySalaries(Request $request)
                 'new_balance' => $oldBalance - $amount
             ]);
             
-            $treasury->balance -= $amount;
+            $treasury->adjustCashLegacy(-$amount);
             $treasury->total_expenses += $amount;
             $treasury->save();
             
@@ -2143,7 +2270,7 @@ public function payAllSalaries(Request $request)
             }
             
             // خصم المبلغ
-            $treasury->balance -= $totalSalaries;
+            $treasury->adjustCashLegacy(-$totalSalaries);
             $treasury->total_expenses += $totalSalaries;
             $treasury->save();
             
@@ -2212,6 +2339,8 @@ public function reset(Request $request)
         $oldBalance = $treasury->balance;
 
         // تحديث رصيد الخزنة إلى صفر فقط
+        $treasury->balance_cash = 0;
+        $treasury->balance_app = 0;
         $treasury->balance = 0;
         $treasury->save();
 

@@ -642,21 +642,9 @@ public function updateSubCategory(Request $request, $parentId = null, $subId = n
             \Log::info('💰 حالة الخزنة', [
                 'balance' => $treasury->balance,
                 'required' => $totalCost,
-                'sufficient' => $treasury->balance >= $totalCost
             ]);
-            
-            if ($treasury->balance < $totalCost) {
-                return response()->json([
-                    'success' => false,
-                    'message' => '❌ رصيد الخزنة غير كافي',
-                    'details' => [
-                        'المطلوب' => number_format($totalCost, 2) . ' ₪',
-                        'المتوفر' => number_format($treasury->balance, 2) . ' ₪',
-                        'العجز' => number_format($totalCost - $treasury->balance, 2) . ' ₪'
-                    ]
-                ], 400);
-            }
-            
+            // لا نمنع العملية لعجز الخزنة — الخصم يُنفَّذ وقد يصبح الرصيد سالباً
+
             // ⭐⭐ بدأ المعاملة
             DB::beginTransaction();
             
@@ -668,9 +656,9 @@ public function updateSubCategory(Request $request, $parentId = null, $subId = n
                 
                 if ($result->getStatusCode() === 200 && ($resultContent['success'] ?? false)) {
                     
-                    // ⭐⭐ خصم المبلغ من الخزنة
+                    // ⭐⭐ خصم المبلغ من الخزنة (كاش)
                     $oldBalance = $treasury->balance;
-                    $treasury->balance -= $totalCost;
+                    $treasury->adjustCashLegacy(-$totalCost);
                     $treasury->total_expenses += $totalCost;
                     $treasury->save();
                     
@@ -1434,7 +1422,7 @@ public function getCategoryWithProducts($id)
                     'total_products' => $category->products_count,
                     'active_products' => $category->products()->where('is_active', true)->count(),
                     'low_stock_products' => $category->products()->whereRaw('stock <= reorder_point')->count(),
-                    'total_stock_value' => $category->products()->sum(DB::raw('stock * cost_price'))
+                    'total_stock_value' => round($category->products()->get(['stock', 'cost_price', 'sale_unit', 'unit', 'strips_per_box', 'pieces_per_strip', 'strip_unit_count'])->sum(fn ($p) => $p->stockInventoryValue()), 2)
                 ]
             ],
             'message' => 'تم جلب بيانات القسم بنجاح'
@@ -2341,6 +2329,12 @@ DB::raw('SUM(CASE WHEN parent_id IS NOT NULL THEN 1 ELSE 0 END) as subcategories
  * جلب الأقسام الرئيسية فقط (بدون فلاتر بحث)
  * استخدم ?scope=purchase لأقسام المشتريات أو ?scope=sales لأقسام المبيعات
  */
+
+/**
+ * جلب الأقسام الرئيسية فقط (بدون فلاتر بحث)
+ * استخدم ?scope=purchase لأقسام المشتريات أو ?scope=sales لأقسام المبيعات
+ * استخدم ?include_inactive=1 لعرض الأقسام المعطلة أيضاً
+ */
 public function getMainCategoriesSimple(Request $request)
 {
     try {
@@ -2348,19 +2342,34 @@ public function getMainCategoriesSimple(Request $request)
         if (!in_array($scope, ['purchase', 'sales'], true)) {
             $scope = 'purchase';
         }
-        $categories = Category::whereNull('parent_id')
-            ->where('is_active', true)
-            ->when($scope, function ($q) use ($scope) {
-                $q->where('scope', $scope);
-            })
-            ->orderBy('sort_order')
+        
+        // ✅ أضف هذا السطر: التحقق من include_inactive
+        $includeInactive = filter_var($request->get('include_inactive', false), FILTER_VALIDATE_BOOLEAN);
+        
+        // roots_only=1: سلوك قديم (رئيسية فقط). الافتراضي: كل الأقسام النشطة في النطاق حتى تظهر الفروع في المخزون/الكاشير.
+        $rootsOnly = filter_var($request->get('roots_only', false), FILTER_VALIDATE_BOOLEAN);
+        
+        $q = Category::query()
+            ->where('scope', $scope);
+        
+        // ✅ تعديل هنا: إذا كان include_inactive = true، لا نفلتر is_active
+        if (!$includeInactive) {
+            $q->where('is_active', true);
+        }
+        
+        if ($rootsOnly) {
+            $q->whereNull('parent_id');
+        }
+        
+        $categories = $q->orderBy('sort_order')
             ->orderBy('name')
-            ->get(['id', 'name', 'icon', 'sort_order', 'scope']);
+            ->get(['id', 'name', 'icon', 'sort_order', 'scope', 'parent_id', 'is_active']); // ✅ أضف is_active
 
         return response()->json([
             'success' => true,
             'data' => $categories,
             'scope' => $scope,
+            'include_inactive' => $includeInactive,
             'message' => $scope === 'sales' ? 'تم جلب أقسام المبيعات بنجاح' : 'تم جلب أقسام المشتريات بنجاح'
         ]);
     } catch (\Exception $e) {

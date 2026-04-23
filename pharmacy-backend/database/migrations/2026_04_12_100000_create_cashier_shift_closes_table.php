@@ -16,7 +16,7 @@ return new class extends Migration
             /** يطابق id الصف من الواجهة (مثل ACT-…) لمنع التكرار */
             $table->string('client_row_id', 128)->unique();
             $table->timestamp('shift_started_at')->nullable();
-            $table->timestamp('shift_ended_at');
+            $table->timestamp('shift_ended_at')->nullable();
             $table->unsignedInteger('invoice_count')->default(0);
             $table->decimal('total', 14, 2)->default(0);
             $table->decimal('cash', 14, 2)->default(0);

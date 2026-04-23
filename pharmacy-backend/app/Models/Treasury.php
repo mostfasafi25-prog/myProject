@@ -14,6 +14,8 @@ class Treasury extends Model
 
     protected $fillable = [
         'balance',
+        'balance_cash',
+        'balance_app',
         'total_income',
         'total_expenses',
          'total_profit',
@@ -23,9 +25,27 @@ class Treasury extends Model
 
     protected $casts = [
         'balance' => 'decimal:2',
+        'balance_cash' => 'decimal:2',
+        'balance_app' => 'decimal:2',
         'total_income' => 'decimal:2',
         'total_expenses' => 'decimal:2'
     ];
+
+    /**
+     * تعديل سيولة الكاش والتطبيق معاً؛ balance = balance_cash + balance_app
+     */
+    public function applyLiquidityDelta(float $deltaCash, float $deltaApp): void
+    {
+        $this->balance_cash = round((float) ($this->balance_cash ?? 0) + $deltaCash, 2);
+        $this->balance_app = round((float) ($this->balance_app ?? 0) + $deltaApp, 2);
+        $this->balance = round((float) $this->balance_cash + (float) $this->balance_app, 2);
+    }
+
+    /** عمليات قديمة تُفترض نقدية (رواتب، سحب يدوي افتراضي، إلخ) */
+    public function adjustCashLegacy(float $delta): void
+    {
+        $this->applyLiquidityDelta($delta, 0);
+    }
 
     /**
      * الحصول على السجل الفعال (أو إنشاء واحد جديد)
@@ -34,6 +54,8 @@ class Treasury extends Model
     {
         return self::firstOrCreate([], [
             'balance' => 0,
+            'balance_cash' => 0,
+            'balance_app' => 0,
             'total_income' => 0,
             'total_expenses' => 0
         ]);
@@ -93,14 +115,9 @@ class Treasury extends Model
      * @param string|null $transactionDate تاريخ المعاملة
      * @param object|null $referenceModel نموذج مرجعي
      * @return $this
-     * @throws Exception إذا كان الرصيد غير كافي
      */
     public function addExpense($amount, $description, $category = 'other', $purchaseId = null, $orderId = null, $transactionDate = null, $referenceModel = null)
     {
-        if ($this->balance < $amount) {
-            throw new \Exception('لا يوجد رصيد كافي. الرصيد الحالي: ' . $this->balance);
-        }
-
         $this->balance -= $amount;
         $this->total_expenses += $amount;
         $this->save();

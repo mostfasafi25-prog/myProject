@@ -36,14 +36,15 @@ public function index(Request $request)
             ->with(['categories:id,name']) // ⭐ هنا التعديل
             ->withCount('purchaseItems');
         
-        // ⭐ فلترة حسب النطاق: مشتريات فقط أو مبيعات فقط
-        if ($request->get('scope') === 'purchase') {
+        // ⭐ فلترة حسب النطاق: مشتريات فقط أو مبيعات فقط — scope=all يعرض كل الأصناف (لوحات الإدارة)
+        $scope = $request->get('scope');
+        if ($scope === 'purchase') {
             $query->where(function ($q) {
                 $q->whereHas('category', fn($c) => $c->where('scope', 'purchase'))
                     ->orWhereHas('categories', fn($c) => $c->where('scope', 'purchase'))
                     ->orWhereNull('category_id');
             });
-        } elseif ($request->get('scope') === 'sales') {
+        } elseif ($scope === 'sales') {
             $query->where(function ($q) {
                 $q->whereHas('category', fn($c) => $c->where('scope', 'sales'))
                     ->orWhereHas('categories', fn($c) => $c->where('scope', 'sales'));
@@ -90,43 +91,6 @@ public function index(Request $request)
         $query->orderBy('name');
         $products = $query->paginate($perPage);
         
-        // ⭐⭐ حساب الإحصائيات
-        $statsQuery = Product::query();
-        
-        // تطبيق نفس الفلاتر على الإحصائيات
-        if ($categoryId) {
-            $statsQuery->whereHas('categories', function ($q) use ($categoryId) {
-                $q->where('categories.id', $categoryId);
-            });
-        }
-        
-        if ($search) {
-            $statsQuery->where(function ($q) use ($search) {
-                $q->where('name', 'LIKE', "%{$search}%")
-                  ->orWhere('description', 'LIKE', "%{$search}%")
-                  ->orWhere('sku', 'LIKE', "%{$search}%")
-                  ->orWhere('barcode', 'LIKE', "%{$search}%");
-            });
-        }
-        
-        // حساب الإحصائيات العامة
-        $totalStats = Product::select([
-            DB::raw('COUNT(*) as total_products'),
-            DB::raw('SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) as active_products'),
-            DB::raw('SUM(CASE WHEN is_active = 0 THEN 1 ELSE 0 END) as inactive_products'),
-            DB::raw('SUM(CASE WHEN stock <= reorder_point AND stock > 0 THEN 1 ELSE 0 END) as low_stock'),
-            DB::raw('SUM(CASE WHEN stock <= 0 THEN 1 ELSE 0 END) as out_of_stock'),
-            DB::raw('SUM(stock) as total_stock'),
-            DB::raw('SUM(stock * cost_price) as inventory_value')
-        ])->first();
-        
-        // إحصائيات بعد الفلاتر
-        $filteredStats = $statsQuery->select([
-            DB::raw('COUNT(*) as filtered_count'),
-            DB::raw('SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) as filtered_active'),
-            DB::raw('SUM(CASE WHEN is_active = 0 THEN 1 ELSE 0 END) as filtered_inactive')
-        ])->first();
-        
         \Log::info('📊 Products Query Result', [
             'total' => $products->total(),
             'category_filter' => $categoryId,
@@ -141,23 +105,6 @@ public function index(Request $request)
                 'per_page' => $products->perPage(),
                 'current_page' => $products->currentPage(),
                 'last_page' => $products->lastPage(),
-            ],
-            'stats' => [
-                'general' => [
-                    'total_products' => (int) ($totalStats->total_products ?? 0),
-                    'active_products' => (int) ($totalStats->active_products ?? 0),
-                    'inactive_products' => (int) ($totalStats->inactive_products ?? 0),
-                    'low_stock' => (int) ($totalStats->low_stock ?? 0),
-                    'out_of_stock' => (int) ($totalStats->out_of_stock ?? 0),
-                    'total_stock' => (float) ($totalStats->total_stock ?? 0),
-                    'inventory_value' => (float) ($totalStats->inventory_value ?? 0)
-                ],
-                'filtered' => [
-                    'total' => (int) ($filteredStats->filtered_count ?? 0),
-                    'active' => (int) ($filteredStats->filtered_active ?? 0),
-                    'inactive' => (int) ($filteredStats->filtered_inactive ?? 0),
-                    'showing' => count($products->items())
-                ]
             ],
             'filters' => [
                 'search' => $search,
@@ -191,194 +138,260 @@ public function index(Request $request)
     /**
      * إنشاء منتج جديد
      */
-public function store(Request $request)
-{
-    // ⭐ LOG 1: البيانات الواردة
-    \Log::info('📦 STORE REQUEST:', ['data' => $request->all()]);
-    
-    // ⭐⭐ التحقق أولاً إذا كان الاسم موجود مسبقاً
-    $existingProduct = Product::where('name', $request->name)->first();
-    if ($existingProduct) {
-        \Log::warning('❌ DUPLICATE PRODUCT NAME:', [
-            'requested_name' => $request->name,
-            'existing_id' => $existingProduct->id,
-            'existing_code' => $existingProduct->code
+    public function store(Request $request)
+    {
+        // ⭐ LOG 1: البيانات الواردة
+        \Log::info('📦 STORE REQUEST:', ['data' => $request->all()]);
+        
+        // ⭐⭐ التحقق أولاً إذا كان الاسم موجود مسبقاً
+        $existingProduct = Product::where('name', $request->name)->first();
+        if ($existingProduct) {
+            \Log::warning('❌ DUPLICATE PRODUCT NAME:', [
+                'requested_name' => $request->name,
+                'existing_id' => $existingProduct->id,
+                'existing_code' => $existingProduct->code
+            ]);
+            
+            return response()->json([
+                'success' => false,
+                'message' => 'خطأ في إضافة المنتج',
+                'errors' => [
+                    'name' => ['اسم المنتج "' . $request->name . '" موجود مسبقاً (الكود: ' . $existingProduct->code . ')']
+                ]
+            ], 422);
+        }
+        
+        // ⭐⭐⭐ التعديل 1: جعل price اختياري في قواعد التحقق
+        $validator = Validator::make($request->all(), [
+            'name' => 'required|string|max:255|unique:products,name',
+            'code' => 'nullable|string|unique:products,code',
+            'description' => 'nullable|string',
+            'image_url' => 'nullable|string|max:50000',
+            'price' => ['nullable', 'numeric', 'regex:/^\d+(\.\d{1,2})?$/', 'min:0'], // ⭐ تم التعديل: required → nullable
+            'purchase_price' => ['nullable', 'numeric', 'regex:/^\d+(\.\d{1,2})?$/', 'min:0'],
+            'cost_price' => ['nullable', 'numeric', 'regex:/^\d+(\.\d{1,2})?$/', 'min:0'],
+            'profit_amount' => ['nullable', 'numeric', 'regex:/^\d+(\.\d{1,2})?$/', 'min:0'],
+            'category_id' => 'nullable|exists:categories,id',
+'stock' => ['nullable', 'numeric', 'regex:/^-?\d+(\.\d{1,2})?$/'],
+            'min_stock' => ['nullable', 'numeric', 'regex:/^\d+(\.\d{1,2})?$/', 'min:0'],
+            'max_stock' => ['nullable', 'numeric', 'regex:/^\d+(\.\d{1,2})?$/', 'min:0'],
+            'reorder_point' => ['nullable', 'numeric', 'regex:/^\d+(\.\d{1,2})?$/', 'min:0'],
+            'unit' => 'required|string|in:piece,kg,gram,liter,ml,box,pack,meter,cm,strip,pill,bottle,sachet',
+            'pieces_per_strip' => ['nullable', 'numeric', 'regex:/^\d+(\.\d{1,3})?$/', 'min:1'],
+            'strips_per_box' => ['nullable', 'numeric', 'regex:/^\d+(\.\d{1,3})?$/', 'min:1'],
+            'purchase_unit' => 'nullable|string|in:box,strip,pill,piece',
+            'sale_unit' => 'nullable|string|in:box,strip,pill,piece',
+            'allow_split_sales' => 'nullable|boolean',
+            'split_sale_price' => ['nullable', 'numeric', 'regex:/^\d+(\.\d{1,2})?$/', 'min:0'],
+            'strip_unit_count' => 'nullable|numeric|min:1',
+            'split_item_name' => 'nullable|string|max:50',
+            'split_sale_options' => 'nullable|array',
+            'split_sale_options.*.id' => 'nullable|string|max:40',
+            'split_sale_options.*.label' => 'required_with:split_sale_options|string|max:80',
+            'split_sale_options.*.price' => ['required_with:split_sale_options', 'numeric', 'regex:/^\d+(\.\d{1,2})?$/', 'min:0'],
+            'split_sale_options.*.saleType' => 'nullable|string|in:pill,strip,box,bottle,sachet,piece',
+            'sku' => 'nullable|string|max:100|unique:products,sku',
+            'barcode' => 'nullable|string|max:100|unique:products,barcode',
+            'has_addons' => 'boolean',
+            'is_active' => 'boolean',
+            'categories' => 'nullable|array',
+            'categories.*' => 'exists:categories,id',
+            'full_unit_name' => 'nullable|string|max:120',
+            'divide_into' => 'nullable|integer|min:1',
+            'allow_small_pieces' => 'nullable|boolean',
+            'pieces_count' => 'nullable|integer|min:0',
+        ], [
+            'name.unique' => 'اسم المنتج "{{value}}" موجود مسبقاً في النظام',
+            'code.unique' => 'الكود "{{value}}" مستخدم مسبقاً',
+            'sku.unique' => 'الرقم التسلسلي "{{value}}" مستخدم مسبقاً',
+            'barcode.unique' => 'الباركود "{{value}}" مستخدم مسبقاً',
         ]);
         
-        return response()->json([
-            'success' => false,
-            'message' => 'خطأ في إضافة المنتج',
-            'errors' => [
-                'name' => ['اسم المنتج "' . $request->name . '" موجود مسبقاً (الكود: ' . $existingProduct->code . ')']
-            ]
-        ], 422);
-    }
-    
-    $validator = Validator::make($request->all(), [
-        'name' => 'required|string|max:255|unique:products,name',
-        'code' => 'nullable|string|unique:products,code',
-        'description' => 'nullable|string',
-        'image_url' => 'nullable|string|max:2048',
-        'price' => ['required', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0'],
-        'purchase_price' => ['nullable', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0'],
-        'cost_price' => ['nullable', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0'],
-        'profit_amount' => ['nullable', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0'], // ⭐ جديد: فقط رقم الربح
-        'category_id' => 'nullable|exists:categories,id',
-        'stock' => ['nullable', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0'],
-        'min_stock' => ['nullable', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0'],
-        'max_stock' => ['nullable', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0'],
-        'reorder_point' => ['nullable', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0'],
-        'unit' => 'required|string|in:piece,kg,gram,liter,ml,box,pack,meter,cm',
-        'sku' => 'nullable|string|max:100|unique:products,sku',
-        'barcode' => 'nullable|string|max:100|unique:products,barcode',
-        'has_addons' => 'boolean',
-        'is_active' => 'boolean',
-        'categories' => 'nullable|array',
-        'categories.*' => 'exists:categories,id'
-    ], [
-        'name.unique' => 'اسم المنتج "{{value}}" موجود مسبقاً في النظام',
-        'code.unique' => 'الكود "{{value}}" مستخدم مسبقاً',
-        'sku.unique' => 'الرقم التسلسلي "{{value}}" مستخدم مسبقاً',
-        'barcode.unique' => 'الباركود "{{value}}" مستخدم مسبقاً',
-    ]);
-    
-    if ($validator->fails()) {
-        // ⭐ LOG 2: فشل التحقق
-        \Log::warning('❌ VALIDATION FAILED:', $validator->errors()->toArray());
+        // ⭐⭐⭐ التعديل 2: التأكد من أن price موجود في الـ request (حتى لو كان null)
+        if (!$request->has('price') || $request->price === null || $request->price === '') {
+            $request->merge(['price' => null]);
+        }
         
-        // ⭐⭐ تحسين رسائل الخطأ
-        $errors = $validator->errors()->toArray();
-        $formattedErrors = [];
-        
-        foreach ($errors as $field => $messages) {
-            if ($field === 'name') {
-                $formattedErrors[$field] = ['⚠️ ' . $messages[0] . ' - الرجاء اختيار اسم مختلف'];
-            } elseif ($field === 'code') {
-                $formattedErrors[$field] = ['🔢 ' . $messages[0] . ' - هذا الكود مستخدم بالفعل'];
-            } elseif ($field === 'sku') {
-                $formattedErrors[$field] = ['🏷️ ' . $messages[0] . ' - هذا الرقم التسلسلي مستخدم'];
-            } elseif ($field === 'barcode') {
-                $formattedErrors[$field] = ['📊 ' . $messages[0] . ' - هذا الباركود مستخدم'];
-            } else {
-                $formattedErrors[$field] = $messages;
+        if ($validator->fails()) {
+            // ⭐ LOG 2: فشل التحقق
+            \Log::warning('❌ VALIDATION FAILED:', $validator->errors()->toArray());
+            
+            // ⭐⭐ تحسين رسائل الخطأ
+         
+            $errors = $validator->errors()->toArray();
+            $formattedErrors = [];
+            if (isset($errors['name']) && str_contains($errors['name'][0], 'already taken')) {
+                $errors['name'] = ['اسم المنتج "' . $request->name . '" موجود مسبقاً في النظام'];
+            }
+            foreach ($errors as $field => $messages) {
+                if ($field === 'name') {
+                    $formattedErrors[$field] = ['⚠️ ' . $messages[0] . ' - الرجاء اختيار اسم مختلف'];
+                } elseif ($field === 'code') {
+                    $formattedErrors[$field] = ['🔢 ' . $messages[0] . ' - هذا الكود مستخدم بالفعل'];
+                } elseif ($field === 'sku') {
+                    $formattedErrors[$field] = ['🏷️ ' . $messages[0] . ' - هذا الرقم التسلسلي مستخدم'];
+                } elseif ($field === 'barcode') {
+                    $formattedErrors[$field] = ['📊 ' . $messages[0] . ' - هذا الباركود مستخدم'];
+                } else {
+                    $formattedErrors[$field] = $messages;
+                }
+            }
+            
+            return response()->json([
+                'success' => false,
+                'message' => 'تحقق من الأخطاء التالية:',
+                'errors' => $formattedErrors
+            ], 422);
+        }
+
+        if ($request->boolean('allow_split_sales')) {
+            $div = (int) ($request->input('divide_into', 0));
+            if ($div < 1) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'تحقق من بيانات التجزئة',
+                    'errors' => [
+                        'divide_into' => ['أدخل عدد الأجزاء المتساوية للوحدة الكاملة (مثال: 2 لنصف، 4 لربع)'],
+                    ],
+                ], 422);
+            }
+            // ⭐ جعل pieces_count اختياري - لا نتحقق منه
+            // فقط نتحقق إذا كان المستخدم أدخل قيمة أقل من 1
+            if ($request->boolean('allow_small_pieces') && $request->has('pieces_count') && (int) $request->input('pieces_count') < 0) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'تحقق من بيانات التجزئة',
+                    'errors' => [
+                        'pieces_count' => ['عدد القطع يجب أن يكون 1 على الأقل'],
+                    ],
+                ], 422);
+            }
+        }
+    
+        // ⭐ المنتجات لأقسام المشتريات فقط
+        $categoryIds = array_filter(array_merge(
+            $request->category_id ? [$request->category_id] : [],
+            $request->categories ?? []
+        ));
+        foreach ($categoryIds as $cid) {
+            $cat = Category::find($cid);
+            if ($cat && ($cat->scope ?? 'purchase') !== 'purchase') {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'المنتجات ترتبط بأقسام المشتريات فقط. القسم المختار ليس من أقسام المشتريات.',
+                    'errors' => ['category_id' => ['اختر قسماً من أقسام المشتريات']]
+                ], 422);
             }
         }
         
-        return response()->json([
-            'success' => false,
-            'message' => 'تحقق من الأخطاء التالية:',
-            'errors' => $formattedErrors
-        ], 422);
-    }
+        try {
+            // ⭐ LOG 3: قبل الإنشاء
+            \Log::info('✅ CREATING PRODUCT...', [
+                'name' => $request->name,
+                'category_id' => $request->category_id
+            ]);
+            
+            $code = $request->code;
+            if (empty($code)) {
+                $lastProduct = Product::orderBy('id', 'desc')->first();
+                $sequence = $lastProduct ? $lastProduct->id + 1 : 1;
+                $code = 'PRD-' . date('Ymd') . '-' . str_pad($sequence, 4, '0', STR_PAD_LEFT);
+            }
+            
+            // ⭐⭐⭐ التعديل 3: حساب سعر البيع مع دعم القيمة null
+            $costPrice = $request->cost_price ?? $request->purchase_price;
+            $price = $request->price; // يمكن أن تكون null
+            
+            // إذا تم إدخال رقم الربح، نحسب السعر من التكلفة + الربح
+            if ($request->filled('profit_amount') && $costPrice) {
+                $price = $costPrice + $request->profit_amount;
+            }
+            
+            // عمود price في قاعدة البيانات غير قابل لـ null، لذلك نضع قيمة افتراضية آمنة
+            if ($price === null || $price === '') {
+                $price = null;
+            }
+            
+            $productPayload = [
+                'name' => $request->name,
+                'code' => $code,
+                'description' => $request->description,
+                'image_url' => $request->image_url,
+                'price' => $price, // ⭐ تم التعديل: يمكن أن تكون null
+                'purchase_price' => $request->purchase_price,
+                'cost_price' => $costPrice,
+                'profit_amount' => $request->profit_amount ?? ($price && $costPrice ? $price - $costPrice : null),
+                'category_id' => $request->category_id,
+                'stock' => $request->stock ?? 0,
+                'min_stock' => $request->min_stock ?? 0,
+                'max_stock' => $request->max_stock,
+                'reorder_point' => $request->reorder_point ?? 0,
+                'unit' => $request->unit ?? $request->sale_unit ?? 'box',
+                'allow_split_sales' => $request->boolean('allow_split_sales', false),
+                'sku' => $request->sku,
+                'barcode' => $request->barcode,
+                'has_addons' => $request->boolean('has_addons', false),
+                'is_active' => $request->boolean('is_active', true),
+            ];
 
-    // ⭐ المنتجات لأقسام المشتريات فقط
-    $categoryIds = array_filter(array_merge(
-        $request->category_id ? [$request->category_id] : [],
-        $request->categories ?? []
-    ));
-    foreach ($categoryIds as $cid) {
-        $cat = Category::find($cid);
-        if ($cat && ($cat->scope ?? 'purchase') !== 'purchase') {
-            return response()->json([
-                'success' => false,
-                'message' => 'المنتجات ترتبط بأقسام المشتريات فقط. القسم المختار ليس من أقسام المشتريات.',
-                'errors' => ['category_id' => ['اختر قسماً من أقسام المشتريات']]
-            ], 422);
-        }
-    }
-    
-    try {
-        // ⭐ LOG 3: قبل الإنشاء
-        \Log::info('✅ CREATING PRODUCT...', [
-            'name' => $request->name,
-            'category_id' => $request->category_id
-        ]);
-        
-        $code = $request->code;
-        if (empty($code)) {
-            $lastProduct = Product::orderBy('id', 'desc')->first();
-            $sequence = $lastProduct ? $lastProduct->id + 1 : 1;
-            $code = 'PRD-' . date('Ymd') . '-' . str_pad($sequence, 4, '0', STR_PAD_LEFT);
-        }
-        
-        // ⭐⭐ حساب سعر البيع إذا تم إدخال رقم الربح
-        $price = $request->price;
-        $costPrice = $request->cost_price ?? $request->purchase_price;
-        
-        if ($request->filled('profit_amount') && $costPrice) {
-            // ⭐ حساب السعر = سعر التكلفة + الربح المطلوب
-            $price = $costPrice + $request->profit_amount;
-        }
-        
-        $product = Product::create([
-            'name' => $request->name,
-            'code' => $code,
-            'description' => $request->description,
-            'image_url' => $request->image_url,
-            'price' => $price, // ⭐ تم التعديل
-            'purchase_price' => $request->purchase_price,
-            'cost_price' => $costPrice,
-            'profit_amount' => $request->profit_amount ?? ($price - $costPrice), // ⭐ جديد: خزن رقم الربح
-            'category_id' => $request->category_id,
-            'stock' => $request->stock ?? 0,
-            'min_stock' => $request->min_stock ?? 0,
-            'max_stock' => $request->max_stock,
-            'reorder_point' => $request->reorder_point ?? 0,
-            'unit' => $request->unit ?? 'piece',
-            'sku' => $request->sku,
-            'barcode' => $request->barcode,
-            'has_addons' => $request->boolean('has_addons', false),
-            'is_active' => $request->boolean('is_active', true)
-        ]);
-        
-        if ($request->has('categories') && is_array($request->categories)) {
-            $product->categories()->attach($request->categories);
-        }
-        
-        // ⭐ LOG 4: النجاح
-        \Log::info('🎉 PRODUCT CREATED:', [
-            'id' => $product->id,
-            'name' => $product->name,
-            'code' => $product->code,
-            'stock' => $product->stock,
-            'profit_amount' => $product->profit_amount, // ⭐ جديد
-            'price' => $product->price,
-            'cost_price' => $product->cost_price
-        ]);
-        
-        return response()->json([
-            'success' => true,
-            'message' => 'تم إنشاء المنتج "' . $product->name . '" بنجاح',
-            'data' => $product->load(['category:id,name', 'categories:id,name']),
-            'profit_info' => [ // ⭐ جديد
+            if (\Schema::hasColumn('products', 'split_sale_price')) {
+                $productPayload['split_sale_price'] = $request->split_sale_price;
+            }
+
+            foreach ($this->packagingFieldsForPersistence($request, null) as $key => $value) {
+                if (\Schema::hasColumn('products', $key)) {
+                    $productPayload[$key] = $value;
+                }
+            }
+
+            $product = Product::create($productPayload);
+            
+            if ($request->has('categories') && is_array($request->categories)) {
+                $product->categories()->attach($request->categories);
+            }
+            
+            // ⭐ LOG 4: النجاح
+            \Log::info('🎉 PRODUCT CREATED:', [
+                'id' => $product->id,
+                'name' => $product->name,
+                'code' => $product->code,
+                'stock' => $product->stock,
                 'profit_amount' => $product->profit_amount,
                 'price' => $product->price,
                 'cost_price' => $product->cost_price
-            ]
-        ], 201);
-        
-    } catch (\Exception $e) {
-        // ⭐ LOG 5: الخطأ
-        \Log::error('🔥 STORE ERROR:', [
-            'message' => $e->getMessage(),
-            'file' => $e->getFile(),
-            'line' => $e->getLine(),
-            'trace' => $e->getTraceAsString()
-        ]);
-        
-        return response()->json([
-            'success' => false,
-            'message' => '❌ حدث خطأ غير متوقع أثناء إنشاء المنتج',
-            'error' => env('APP_DEBUG') ? [
+            ]);
+            
+            return response()->json([
+                'success' => true,
+                'message' => 'تم إنشاء المنتج "' . $product->name . '" بنجاح',
+                'data' => $product->load(['category:id,name', 'categories:id,name']),
+                'profit_info' => [
+                    'profit_amount' => $product->profit_amount,
+                    'price' => $product->price,
+                    'cost_price' => $product->cost_price
+                ]
+            ], 201);
+            
+        } catch (\Exception $e) {
+            // ⭐ LOG 5: الخطأ
+            \Log::error('🔥 STORE ERROR:', [
                 'message' => $e->getMessage(),
                 'file' => $e->getFile(),
-                'line' => $e->getLine()
-            ] : null
-        ], 500);
+                'line' => $e->getLine(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            
+            return response()->json([
+                'success' => false,
+                'message' => '❌ حدث خطأ غير متوقع أثناء إنشاء المنتج',
+                'error' => env('APP_DEBUG') ? [
+                    'message' => $e->getMessage(),
+                    'file' => $e->getFile(),
+                    'line' => $e->getLine()
+                ] : null
+            ], 500);
+        }
     }
-}
-
-
 
 
 
@@ -406,7 +419,8 @@ public function getProductsByCategory($categoryId)
     ->orWhere('category_id', $categoryId)
     ->select([
         'id', 'name', 'description', 'image_url', 'price', 'purchase_price', // ⭐ أضف purchase_price
-        'cost_price', 'stock', 'unit', 'sku', 'barcode',
+        'cost_price', 'stock', 'unit', 'sale_unit', 'sku', 'barcode',
+        'strips_per_box', 'pieces_per_strip', 'strip_unit_count',
         'category_id', 'supplier_id', 'min_stock', 'max_stock',
         'reorder_point', 'is_active'
     ])
@@ -419,9 +433,7 @@ public function getProductsByCategory($categoryId)
         $stats = [
             'total_products' => $products->count(),
             'total_stock' => $products->sum('stock'),
-            'total_value' => $products->sum(function($product) {
-                return $product->stock * $product->cost_price;
-            }),
+            'total_value' => $products->sum(fn ($product) => $product->stockInventoryValue()),
             'low_stock' => $products->filter(function($product) {
                 return $product->stock <= $product->reorder_point && $product->stock > 0;
             })->count(),
@@ -489,6 +501,14 @@ public function getProductsByCategory($categoryId)
                     DB::raw('MAX(created_at) as last_purchase_date')
                 ])->first();
             
+            if ($purchaseStats) {
+                $mult = $product->piecesPerSaleUnit();
+                $perPieceAvg = (float) ($purchaseStats->average_purchase_price ?? 0);
+                $purchaseStats->average_purchase_price_per_piece = $perPieceAvg;
+                $purchaseStats->average_purchase_price_per_sale_unit = $mult > 0
+                    ? round($perPieceAvg * $mult, 2)
+                    : $perPieceAvg;
+            }
             $product->purchase_stats = $purchaseStats;
             
             return response()->json([
@@ -509,118 +529,351 @@ public function getProductsByCategory($categoryId)
     /**
      * تحديث منتج محدد
      */
-   public function update(Request $request, $id)
-{
-    $product = Product::find($id);
-    
-    if (!$product) {
-        return response()->json([
-            'success' => false,
-            'message' => 'المنتج غير موجود'
-        ], 404);
-    }
-    
-    $validator = Validator::make($request->all(), [
-        'name' => 'sometimes|string|max:255|unique:products,name,' . $id, // ⭐ إضافة استثناء
-        'description' => 'nullable|string',
-        'image_url' => 'nullable|string|max:2048',
-        'code' => 'sometimes|string|max:100|unique:products,code,' . $id, // ⭐ إضافة استثناء هنا
-        'price' => ['sometimes', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0'],
-        'purchase_price' => ['nullable', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0'],
-        'cost_price' => ['nullable', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0'],
-        'category_id' => 'nullable|exists:categories,id',
-        'supplier_id' => 'nullable|exists:suppliers,id',
-        'stock' => ['sometimes', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0'],
-        'min_stock' => ['nullable', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0'],
-        'max_stock' => ['nullable', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0'],
-        'reorder_point' => ['nullable', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0'],
-        'unit' => 'sometimes|string|in:piece,kg,liter,box,pack,meter',
-        'sku' => 'nullable|string|max:100|unique:products,sku,' . $id,
-        'barcode' => 'nullable|string|max:100|unique:products,barcode,' . $id,
-        'has_addons' => 'boolean',
-        'is_active' => 'boolean',
-        'categories' => 'nullable|array', // ⭐ إضافة هذا
-        'categories.*' => 'exists:categories,id' // ⭐ إضافة هذا
-    ]);
-    
-    if ($validator->fails()) {
-        return response()->json([
-            'success' => false,
-            'message' => 'خطأ في التحقق من البيانات',
-            'errors' => $validator->errors()
-        ], 422);
-    }
-
-    // ⭐ المنتجات لأقسام المشتريات فقط
-    $categoryIds = array_filter(array_merge(
-        $request->has('category_id') ? [$request->category_id] : [],
-        $request->categories ?? []
-    ));
-    foreach ($categoryIds as $cid) {
-        $cat = Category::find($cid);
-        if ($cat && ($cat->scope ?? 'purchase') !== 'purchase') {
+    public function update(Request $request, $id)
+    {
+        $product = Product::find($id);
+        
+        if (!$product) {
             return response()->json([
                 'success' => false,
-                'message' => 'المنتجات ترتبط بأقسام المشتريات فقط.',
-                'errors' => ['category_id' => ['اختر قسماً من أقسام المشتريات']]
+                'message' => 'المنتج غير موجود'
+            ], 404);
+        }
+        
+        $validator = Validator::make($request->all(), [
+            'name' => 'sometimes|string|max:255|unique:products,name,' . $id,
+            'description' => 'nullable|string',
+            'image_url' => 'nullable|string|max:50000',
+            'code' => 'sometimes|string|max:100|unique:products,code,' . $id,
+            'price' => ['sometimes', 'nullable', 'numeric', 'regex:/^\d+(\.\d{1,2})?$/', 'min:0'], // ⭐ أضف nullable
+            'purchase_price' => ['nullable', 'numeric', 'regex:/^\d+(\.\d{1,2})?$/', 'min:0'],
+            'cost_price' => ['nullable', 'numeric', 'regex:/^\d+(\.\d{1,2})?$/', 'min:0'],
+            'profit_amount' => ['nullable', 'numeric', 'regex:/^\d+(\.\d{1,2})?$/', 'min:0'], // ⭐ أضف هذا
+            'split_sale_price' => ['nullable', 'numeric', 'regex:/^\d+(\.\d{1,2})?$/', 'min:0'],
+            'category_id' => 'nullable|exists:categories,id',
+            'supplier_id' => 'nullable|exists:suppliers,id',
+'stock' => ['sometimes', 'numeric', 'regex:/^-?\d+(\.\d{1,2})?$/'],
+            'min_stock' => ['nullable', 'numeric', 'regex:/^\d+(\.\d{1,2})?$/', 'min:0'],
+            'max_stock' => ['nullable', 'numeric', 'regex:/^\d+(\.\d{1,2})?$/', 'min:0'],
+            'reorder_point' => ['nullable', 'numeric', 'regex:/^\d+(\.\d{1,2})?$/', 'min:0'],
+            'unit' => 'sometimes|string|in:piece,kg,gram,liter,ml,box,pack,meter,cm,strip,pill,bottle,sachet',
+            'allow_split_sales' => 'nullable|boolean',
+            'strip_unit_count' => 'nullable|numeric|min:1',
+            'pieces_per_strip' => ['nullable', 'numeric', 'regex:/^\d+(\.\d{1,3})?$/', 'min:1'],
+            'strips_per_box' => ['nullable', 'numeric', 'regex:/^\d+(\.\d{1,3})?$/', 'min:1'],
+            'purchase_unit' => 'nullable|string|in:box,strip,pill,piece',
+            'sale_unit' => 'nullable|string|in:box,strip,pill,piece',
+            'split_item_name' => 'nullable|string|max:50',
+            'split_sale_options' => 'nullable|array',
+            'split_sale_options.*.id' => 'nullable|string|max:40',
+            'split_sale_options.*.label' => 'required_with:split_sale_options|string|max:80',
+            'split_sale_options.*.price' => ['required_with:split_sale_options', 'numeric', 'regex:/^\d+(\.\d{1,2})?$/', 'min:0'],
+            'split_sale_options.*.saleType' => 'nullable|string|in:pill,strip,box,bottle,sachet,piece',
+            'sku' => 'nullable|string|max:100|unique:products,sku,' . $id,
+            'barcode' => 'nullable|string|max:100|unique:products,barcode,' . $id,
+            'has_addons' => 'boolean',
+            'is_active' => 'boolean',
+            'categories' => 'nullable|array',
+            'categories.*' => 'exists:categories,id',
+            'full_unit_name' => 'nullable|string|max:120',
+            'divide_into' => 'nullable|integer|min:1',
+            'allow_small_pieces' => 'nullable|boolean',
+            'pieces_count' => 'nullable|integer|min:0',
+        ]);
+        
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'خطأ في التحقق من البيانات',
+                'errors' => $validator->errors()
             ], 422);
         }
-    }
+
+        $effectiveAllowSplit = $request->has('allow_split_sales')
+            ? $request->boolean('allow_split_sales')
+            : (bool) $product->allow_split_sales;
+        if ($effectiveAllowSplit) {
+            $div = $request->has('divide_into')
+                ? (int) $request->input('divide_into')
+                : (int) ($product->divide_into ?? $product->strips_per_box ?? 0);
+            if ($div < 1) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'تحقق من بيانات التجزئة',
+                    'errors' => [
+                        'divide_into' => ['أدخل عدد الأجزاء المتساوية للوحدة الكاملة (مثال: 2 لنصف، 4 لربع)'],
+                    ],
+                ], 422);
+            }
+            $effectiveSmall = $request->has('allow_small_pieces')
+                ? $request->boolean('allow_small_pieces')
+                : (bool) $product->allow_small_pieces;
+                if ($effectiveSmall) {
+                    $pc = $request->has('pieces_count')
+                        ? (int) $request->input('pieces_count')
+                        : (int) ($product->pieces_count ?? 0);
+                    // ⭐ جعل pieces_count اختياري - لا نتحقق منه إذا كان 0
+                    // فقط نتحقق إذا كان المستخدم أدخل قيمة أقل من 1 (وليس إذا كانت القيمة صفراً من النظام)
+                    if ($pc < 0) {
+                        return response()->json([
+                            'success' => false,
+                            'message' => 'تحقق من بيانات التجزئة',
+                            'errors' => [
+                                'pieces_count' => ['عدد القطع يجب أن يكون 1 على الأقل إذا كنت تريد تفعيل القطع الصغيرة'],
+                            ],
+                        ], 422);
+                    }
+                    // ⭐ إذا كان pc = 0، نمرره بدون خطأ (يعني لا توجد قطع صغيرة)
+                }
+        }
     
-    try {
-        // تحديث البيانات الأساسية
-        $product->update([
-            'name' => $request->name ?? $product->name,
-            'description' => $request->has('description') ? $request->description : $product->description,
-            'image_url' => $request->has('image_url') ? $request->image_url : $product->image_url,
-            'code' => $request->has('code') ? $request->code : $product->code,
-            'price' => $request->price ?? $product->price,
-            'purchase_price' => $request->has('purchase_price') ? $request->purchase_price : $product->purchase_price,
-            'cost_price' => $request->has('cost_price') ? $request->cost_price : $product->cost_price,
-            'category_id' => $request->has('category_id') ? $request->category_id : $product->category_id,
-            'supplier_id' => $request->has('supplier_id') ? $request->supplier_id : $product->supplier_id,
-            'stock' => $request->stock ?? $product->stock,
-            'min_stock' => $request->has('min_stock') ? $request->min_stock : $product->min_stock,
-            'max_stock' => $request->has('max_stock') ? $request->max_stock : $product->max_stock,
-            'reorder_point' => $request->has('reorder_point') ? $request->reorder_point : $product->reorder_point,
-            'unit' => $request->unit ?? $product->unit,
-            'sku' => $request->has('sku') ? $request->sku : $product->sku,
-            'barcode' => $request->has('barcode') ? $request->barcode : $product->barcode,
-            'has_addons' => $request->has('has_addons') ? $request->boolean('has_addons') : $product->has_addons,
-            'is_active' => $request->has('is_active') ? $request->boolean('is_active') : $product->is_active
-        ]);
-        
-        // ⭐⭐ تحديث الأقسام المتعددة
-        if ($request->has('categories')) {
-            $product->categories()->sync($request->categories);
+        // ⭐ المنتجات لأقسام المشتريات فقط
+        $categoryIds = array_filter(array_merge(
+            $request->has('category_id') ? [$request->category_id] : [],
+            $request->categories ?? []
+        ));
+        foreach ($categoryIds as $cid) {
+            $cat = Category::find($cid);
+            if ($cat && ($cat->scope ?? 'purchase') !== 'purchase') {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'المنتجات ترتبط بأقسام المشتريات فقط.',
+                    'errors' => ['category_id' => ['اختر قسماً من أقسام المشتريات']]
+                ], 422);
+            }
         }
         
-        // ⭐⭐ إعادة تحميل العلاقات
-        $product->load(['categories:id,name']);
-        
-        return response()->json([
-            'success' => true,
-            'message' => 'تم تحديث المنتج بنجاح',
-            'data' => $product
-        ]);
-        
-    } catch (\Exception $e) {
-        \Log::error('🔥 UPDATE ERROR:', [
-            'id' => $id,
-            'error' => $e->getMessage(),
-            'trace' => $e->getTraceAsString()
-        ]);
-        
-        return response()->json([
-            'success' => false,
-            'message' => 'حدث خطأ أثناء تحديث المنتج',
-            'error' => env('APP_DEBUG') ? $e->getMessage() : null
-        ], 500);
+        try {
+            // ⭐⭐ حساب السعر والربح إذا تغيرت التكلفة أو الربح
+            $costPrice = $request->has('cost_price') 
+                ? $request->cost_price 
+                : ($request->has('purchase_price') 
+                    ? $request->purchase_price 
+                    : $product->cost_price);
+            
+            $price = $request->has('price') ? $request->price : $product->price;
+            $profitAmount = $request->has('profit_amount') ? $request->profit_amount : $product->profit_amount;
+            
+            // إذا تم إدخال رقم ربح جديد، نعيد حساب السعر
+            if ($request->has('profit_amount') && $costPrice) {
+                $price = $costPrice + $request->profit_amount;
+                $profitAmount = $request->profit_amount;
+            }
+            
+            // إذا تم تغيير سعر التكلفة فقط، نعيد حساب الربح
+            if ($request->has('cost_price') && !$request->has('profit_amount') && $price && $costPrice) {
+                $profitAmount = $price - $costPrice;
+            }
+            
+            // تحديث البيانات الأساسية
+            $updatePayload = [
+                'name' => $request->name ?? $product->name,
+                'description' => $request->has('description') ? $request->description : $product->description,
+                'image_url' => $request->has('image_url') ? $request->image_url : $product->image_url,
+                'code' => $request->has('code') ? $request->code : $product->code,
+                'price' => $price,
+                'purchase_price' => $request->has('purchase_price') ? $request->purchase_price : $product->purchase_price,
+                'cost_price' => $costPrice,
+                'profit_amount' => $profitAmount, // ⭐ تحديث رقم الربح
+                'category_id' => $request->has('category_id') ? $request->category_id : $product->category_id,
+                'supplier_id' => $request->has('supplier_id') ? $request->supplier_id : $product->supplier_id,
+                'stock' => $request->stock ?? $product->stock,
+                'min_stock' => $request->has('min_stock') ? $request->min_stock : $product->min_stock,
+                'max_stock' => $request->has('max_stock') ? $request->max_stock : $product->max_stock,
+                'reorder_point' => $request->has('reorder_point') ? $request->reorder_point : $product->reorder_point,
+                'unit' => $request->unit ?? $request->sale_unit ?? $product->unit,
+                'allow_split_sales' => $request->has('allow_split_sales') ? $request->boolean('allow_split_sales') : $product->allow_split_sales,
+                'sku' => $request->has('sku') ? $request->sku : $product->sku,
+                'barcode' => $request->has('barcode') ? $request->barcode : $product->barcode,
+                'has_addons' => $request->has('has_addons') ? $request->boolean('has_addons') : $product->has_addons,
+                'is_active' => $request->has('is_active') ? $request->boolean('is_active') : $product->is_active
+            ];
+            
+            // ⭐⭐ دعم split_sale_price (جديد)
+            if ($request->has('split_sale_price') && \Schema::hasColumn('products', 'split_sale_price')) {
+                $updatePayload['split_sale_price'] = $request->split_sale_price;
+            }
+
+            foreach ($this->packagingFieldsForPersistence($request, $product) as $key => $value) {
+                if (\Schema::hasColumn('products', $key)) {
+                    $updatePayload[$key] = $value;
+                }
+            }
+            
+            $product->update($updatePayload);
+            
+            // ⭐⭐ تحديث الأقسام المتعددة
+            if ($request->has('categories')) {
+                $product->categories()->sync($request->categories);
+            }
+            
+            // ⭐⭐ إعادة تحميل العلاقات
+            $product->load(['categories:id,name']);
+            
+            return response()->json([
+                'success' => true,
+                'message' => 'تم تحديث المنتج بنجاح',
+                'data' => $product
+            ]);
+            
+        } catch (\Exception $e) {
+            \Log::error('🔥 UPDATE ERROR:', [
+                'id' => $id,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            
+            return response()->json([
+                'success' => false,
+                'message' => 'حدث خطأ أثناء تحديث المنتج',
+                'error' => env('APP_DEBUG') ? $e->getMessage() : null
+            ], 500);
+        }
     }
-}
-    
 
+    /**
+     * حقول التعبئة كما في صفحة المشتريات + اشتقاق strips_per_box / pieces_per_strip / split_sale_options للكاشير.
+     *
+     * @return array<string, mixed>
+     */
+    private function packagingFieldsForPersistence(Request $request, ?Product $existing = null): array
+    {
+        $allowSplit = $request->has('allow_split_sales')
+            ? $request->boolean('allow_split_sales')
+            : (bool) ($existing?->allow_split_sales ?? false);
 
+        $rawFull = $request->input('full_unit_name');
+        if ($rawFull !== null && $rawFull !== '') {
+            $fullUnitName = (string) $rawFull;
+        } else {
+            $fullUnitName = $existing?->full_unit_name;
+        }
+        if ($fullUnitName === '') {
+            $fullUnitName = null;
+        }
+
+        $divideInto = $request->has('divide_into')
+            ? max(0, (int) $request->input('divide_into'))
+            : (int) ($existing?->divide_into ?? 0);
+        if ($divideInto < 1 && $existing) {
+            $divideInto = (int) ($existing->strips_per_box ?? 0);
+        }
+
+        $allowSmall = $request->has('allow_small_pieces')
+            ? $request->boolean('allow_small_pieces')
+            : (bool) ($existing?->allow_small_pieces ?? false);
+
+        $piecesCount = $request->has('pieces_count')
+            ? max(0, (int) $request->input('pieces_count'))
+            : (int) ($existing?->pieces_count ?? 0);
+
+        if ($piecesCount < 1 && $existing) {
+            $ps = (int) ($existing->pieces_per_strip ?? 0);
+            $sb = (int) ($existing->strips_per_box ?? 0);
+            if ($ps > 0 && $sb > 0) {
+                $piecesCount = $ps * $sb;
+            } elseif ($ps > 0) {
+                $piecesCount = $ps;
+            }
+        }
+
+        // واجهة قديمة: strip_unit_count فقط
+        if (
+            $existing === null
+            && $request->boolean('allow_split_sales')
+            && !$request->has('divide_into')
+            && $request->filled('strip_unit_count')
+            && !$request->has('pieces_count')
+        ) {
+            $divideInto = max(1, $divideInto);
+            $allowSmall = true;
+            $piecesCount = max($piecesCount, (int) $request->input('strip_unit_count'));
+        }
+
+        if (!$allowSplit) {
+            return [
+                'full_unit_name' => $fullUnitName,
+                'divide_into' => $divideInto > 0 ? $divideInto : null,
+                'allow_small_pieces' => false,
+                'pieces_count' => $piecesCount > 0 ? $piecesCount : null,
+                'strip_unit_count' => null,
+                'split_item_name' => null,
+                'split_sale_options' => null,
+                'pieces_per_strip' => null,
+                'strips_per_box' => null,
+                'purchase_unit' => $request->input('purchase_unit', $existing?->purchase_unit ?? 'box'),
+                'sale_unit' => $request->input('sale_unit', $existing?->sale_unit ?? 'box'),
+                'unit' => $request->input('unit', $existing?->unit ?? 'box'),
+            ];
+        }
+
+        $allowSmall = $allowSmall && $allowSplit;
+        $divideInto = max(1, $divideInto);
+        $stripsPerBox = $divideInto;
+
+        $piecesPerStrip = 1;
+        $stripUnitCount = null;
+        $splitItemName = null;
+        $pcsStored = null;
+
+        if ($allowSmall && $piecesCount > 0) {
+            $piecesPerStrip = max(1, (int) round($piecesCount / max(1, $stripsPerBox)));
+            $stripUnitCount = $piecesPerStrip;
+            $pcsStored = $piecesCount;
+            $splitItemName = 'حبة';
+        } elseif ($allowSmall && $piecesCount <= 0) {
+            // ⭐ إذا تم تفعيل القطع الصغيرة ولكن لم يتم إدخال عدد القطع
+            // نستخدم قيمة افتراضية (مثلاً 1) أو نتركها null
+            $pcsStored = null;
+            $piecesPerStrip = 1;
+            $stripUnitCount = 1;
+            $splitItemName = 'حبة';
+        }
+
+        $customSplitOptions = null;
+        if ($request->has('split_sale_options') && is_array($request->input('split_sale_options'))) {
+            $tmp = [];
+            foreach ($request->input('split_sale_options') as $idx => $row) {
+                if (!is_array($row)) {
+                    continue;
+                }
+                $label = trim((string) ($row['label'] ?? ''));
+                $price = isset($row['price']) ? (float) $row['price'] : null;
+                if ($label === '' || $price === null || $price < 0) {
+                    continue;
+                }
+                $tmp[] = [
+                    'id' => (string) ($row['id'] ?? ('opt_' . $idx)),
+                    'label' => $label,
+                    'price' => round($price, 2),
+                    'saleType' => (string) ($row['saleType'] ?? ''),
+                ];
+            }
+            if (!empty($tmp)) {
+                $customSplitOptions = array_values($tmp);
+            }
+        }
+
+        $splitOptions = ['box'];
+        if ($stripsPerBox > 1) $splitOptions[] = 'strip';
+        if ($allowSmall && $piecesCount > 0) $splitOptions[] = 'pill';
+        $splitOptions = array_values(array_unique($splitOptions));
+
+        return [
+            'full_unit_name' => $fullUnitName,
+            'divide_into' => $divideInto,
+            'allow_small_pieces' => $allowSmall,
+            'pieces_count' => $pcsStored,
+            'strips_per_box' => $stripsPerBox,
+            'pieces_per_strip' => $piecesPerStrip,
+            'strip_unit_count' => $stripUnitCount,
+            'split_sale_options' => $customSplitOptions ?? $splitOptions,
+            'split_item_name' => $splitItemName,
+            'purchase_unit' => 'box',
+            'sale_unit' => 'box',
+            'unit' => 'box',
+        ];
+    }
 
     /**
  * استعادة منتج محذوف
@@ -780,7 +1033,7 @@ public function destroy($id)
                 $refundAmount = round($refundAmount, 2);
 
                 if ($refundAmount > 0 && $treasury) {
-                    $treasury->balance += $refundAmount;
+                    $treasury->adjustCashLegacy($refundAmount);
                     $treasury->save();
                     TreasuryTransaction::create([
                         'treasury_id' => $treasury->id,
@@ -808,7 +1061,7 @@ public function destroy($id)
                 if ($purchase->items()->count() === 0) {
                     $remainingPaid = $paidAmount - $refundAmount;
                     if ($remainingPaid > 0 && $treasury) {
-                        $treasury->balance += $remainingPaid;
+                        $treasury->adjustCashLegacy($remainingPaid);
                         $treasury->save();
                     }
                     TreasuryTransaction::where('purchase_id', $purchase->id)
@@ -910,8 +1163,8 @@ public function destroy($id)
                 ->paginate($perPage);
             
             $totalValue = Product::whereRaw('stock <= reorder_point AND stock > 0')
-                ->select(DB::raw('SUM(stock * cost_price) as total_value'))
-                ->first()->total_value ?? 0;
+                ->get(['stock', 'cost_price', 'sale_unit', 'unit', 'strips_per_box', 'pieces_per_strip', 'strip_unit_count'])
+                ->sum(fn ($p) => $p->stockInventoryValue());
             
             return response()->json([
                 'success' => true,
@@ -1115,16 +1368,24 @@ public function destroy($id)
     public function stats()
     {
         try {
-            $stats = Product::select([
+            $statsRow = Product::select([
                 DB::raw('COUNT(*) as total_products'),
                 DB::raw('SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) as active_products'),
                 DB::raw('SUM(CASE WHEN stock <= reorder_point AND stock > 0 THEN 1 ELSE 0 END) as low_stock_products'),
                 DB::raw('SUM(CASE WHEN stock <= 0 THEN 1 ELSE 0 END) as out_of_stock_products'),
                 DB::raw('SUM(stock) as total_stock'),
-                DB::raw('SUM(stock * cost_price) as total_inventory_value'),
                 DB::raw('AVG(price) as average_price'),
                 DB::raw('AVG(cost_price) as average_cost_price')
             ])->first();
+
+            $totalInventoryValue = Product::query()
+                ->get(['stock', 'cost_price', 'sale_unit', 'unit', 'strips_per_box', 'pieces_per_strip', 'strip_unit_count'])
+                ->sum(fn ($p) => $p->stockInventoryValue());
+
+            $summary = array_merge(
+                $statsRow ? $statsRow->toArray() : [],
+                ['total_inventory_value' => round($totalInventoryValue, 2)]
+            );
             
             // إحصائيات حسب الفئة
             $byCategory = Product::join('categories', 'products.category_id', '=', 'categories.id')
@@ -1145,7 +1406,7 @@ public function destroy($id)
             return response()->json([
                 'success' => true,
                 'data' => [
-                    'summary' => $stats,
+                    'summary' => $summary,
                     'by_category' => $byCategory,
                     'by_supplier' => $bySupplier
                 ],
@@ -1384,5 +1645,39 @@ public function enable($id)
     }
 }
 
+/**
+ * تصفير الأصناف (حذف جميع المنتجات وربطها بالأقسام) بشكل مركزي من الباك اند.
+ */
+public function resetAllProducts()
+{
+    try {
+        DB::beginTransaction();
+
+        if (\Schema::hasTable('category_product')) {
+            DB::table('category_product')->delete();
+        }
+
+        DB::table('products')->delete();
+
+        DB::commit();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'تم تصفير جميع الأصناف بنجاح'
+        ]);
+    } catch (\Exception $e) {
+        DB::rollBack();
+        \Log::error('🔥 RESET PRODUCTS ERROR:', [
+            'error' => $e->getMessage(),
+            'trace' => $e->getTraceAsString()
+        ]);
+
+        return response()->json([
+            'success' => false,
+            'message' => 'فشل تصفير الأصناف',
+            'error' => env('APP_DEBUG') ? $e->getMessage() : null
+        ], 500);
+    }
+}
 
 }

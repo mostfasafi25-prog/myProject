@@ -12,20 +12,23 @@ class Purchase extends Model
 
     protected $fillable = [
         'invoice_number',
+        'supplier_id',
+        'supplier_balance_delta',
+        'treasury_cash_debit',
         'purchase_date',
         'due_date',
         'total_amount',
         'discount',
         'tax',
         'grand_total',
-        'paid_amount',    
-
+        'paid_amount',
         'due_amount',
-        'remaining_amount', 
-    'category_id', // ⭐ أضف هذا
-
+        'remaining_amount',
+        'category_id',
         'status',
         'payment_method',
+        'cash_amount',
+        'app_amount',
         'notes',
         'created_by'
     ];
@@ -37,9 +40,22 @@ class Purchase extends Model
         'grand_total' => 'decimal:2',
         'paid_amount' => 'decimal:2',
         'due_amount' => 'decimal:2',
+        'remaining_amount' => 'decimal:2',
+        'supplier_balance_delta' => 'decimal:2',
+        'treasury_cash_debit' => 'decimal:2',
+        'cash_amount' => 'decimal:2',
+        'app_amount' => 'decimal:2',
         'purchase_date' => 'date',
         'due_date' => 'date'
     ];
+
+    /**
+     * علاقة الشراء مع المورد
+     */
+    public function supplier()
+    {
+        return $this->belongsTo(Supplier::class);
+    }
 
     /**
      * علاقة الشراء مع القسم

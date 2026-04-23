@@ -14,6 +14,7 @@ class PurchaseItem extends Model
         'product_id',
         'product_name',
         'quantity',
+        'returned_quantity',
         'unit_price',
         'total_price',
         'discount',
@@ -23,6 +24,7 @@ class PurchaseItem extends Model
 
     protected $casts = [
         'quantity' => 'decimal:2',
+        'returned_quantity' => 'decimal:2',
         'unit_price' => 'decimal:2',
         'total_price' => 'decimal:2',
         'discount' => 'decimal:2',

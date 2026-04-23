@@ -3,6 +3,9 @@
 namespace App\Http\Controllers;
 
 use App\Models\Supplier;
+use App\Models\Purchase;
+use App\Models\Treasury;
+use App\Models\TreasuryTransaction;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
@@ -53,7 +56,7 @@ class SupplierController extends Controller
             'email' => 'nullable|email|max:255',
             'address' => 'nullable|string|max:500',
             'tax_number' => 'nullable|string|max:50',
-            'balance' => 'nullable|numeric|min:0',
+            'balance' => 'nullable|numeric',
             'notes' => 'nullable|string',
             'is_active' => 'boolean'
         ]);
@@ -136,7 +139,7 @@ class SupplierController extends Controller
             'email' => 'nullable|email|max:255',
             'address' => 'nullable|string|max:500',
             'tax_number' => 'nullable|string|max:50',
-            'balance' => 'nullable|numeric|min:0',
+            'balance' => 'nullable|numeric',
             'notes' => 'nullable|string',
             'is_active' => 'boolean'
         ]);
@@ -482,6 +485,156 @@ class SupplierController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => 'حدث خطأ في جلب الموردين النشطين',
+                'error' => env('APP_DEBUG') ? $e->getMessage() : null
+            ], 500);
+        }
+    }
+
+    public function payDebt(Request $request, Supplier $supplier)
+    {
+        try {
+            $validated = $request->validate([
+                'amount' => 'required|numeric|min:0.01',
+                'payment_method' => 'required|in:cash,app,mixed',
+                'cash_amount' => 'nullable|numeric|min:0',
+                'app_amount' => 'nullable|numeric|min:0',
+                'notes' => 'nullable|string'
+            ]);
+
+            $amount = $validated['amount'];
+            $paymentMethod = $validated['payment_method'];
+            $cashAmount = $validated['cash_amount'] ?? 0;
+            $appAmount = $validated['app_amount'] ?? 0;
+
+            // Validate mixed payment amounts
+            if ($paymentMethod === 'mixed') {
+                if (abs($cashAmount + $appAmount - $amount) > 0.01) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'مجموع الكاش والتطبيق يجب أن يساوي إجمالي المبلغ'
+                    ], 422);
+                }
+            }
+
+            // Get supplier's pending/partially paid purchases
+            $purchases = Purchase::where('supplier_id', $supplier->id)
+                ->whereIn('status', ['pending', 'partially_paid'])
+                ->orderBy('purchase_date', 'asc')
+                ->get();
+
+            $totalRemaining = $purchases->sum('remaining_amount');
+
+            if ($amount > $totalRemaining) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'مبلغ التسديد أكبر من إجمالي الدين المتبقي'
+                ], 422);
+            }
+
+            DB::beginTransaction();
+
+            $remainingToPay = $amount;
+            $paidPurchases = [];
+
+            foreach ($purchases as $purchase) {
+                if ($remainingToPay <= 0) break;
+
+                $purchaseRemaining = $purchase->remaining_amount;
+                $payForThis = min($purchaseRemaining, $remainingToPay);
+
+                $newPaidAmount = $purchase->paid_amount + $payForThis;
+                $newRemainingAmount = $purchase->total_amount - $newPaidAmount;
+
+                // Determine new status
+                if ($newRemainingAmount <= 0.01) {
+                    $purchase->status = 'completed';
+                } elseif ($newPaidAmount > 0) {
+                    $purchase->status = 'partially_paid';
+                }
+
+                $purchase->paid_amount = $newPaidAmount;
+                $purchase->remaining_amount = max(0, $newRemainingAmount);
+                $purchase->save();
+
+                $paidPurchases[] = [
+                    'purchase_id' => $purchase->id,
+                    'invoice_number' => $purchase->invoice_number,
+                    'amount_paid' => $payForThis
+                ];
+
+                $remainingToPay -= $payForThis;
+            }
+
+            // Update supplier balance if exists
+            if ($supplier->balance) {
+                $supplier->balance = max(0, $supplier->balance - $amount);
+                $supplier->save();
+            }
+
+            $treasury = Treasury::first();
+            if ($treasury) {
+                $deductCash = 0.0;
+                $deductApp = 0.0;
+                if ($paymentMethod === 'cash') {
+                    $deductCash = round($amount, 2);
+                } elseif ($paymentMethod === 'app') {
+                    $deductApp = round($amount, 2);
+                } else {
+                    $deductCash = round((float) $cashAmount, 2);
+                    $deductApp = round((float) $appAmount, 2);
+                }
+                $totalDeduct = round($deductCash + $deductApp, 2);
+                if (abs($totalDeduct - round($amount, 2)) > 0.05) {
+                    DB::rollBack();
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'مجموع خصم الكاش والتطبيق لا يطابق المبلغ',
+                    ], 422);
+                }
+                foreach (
+                    [
+                        ['amt' => $deductCash, 'method' => 'cash', 'suffix' => ' — كاش'],
+                        ['amt' => $deductApp, 'method' => 'app', 'suffix' => ' — تطبيق'],
+                    ] as $leg
+                ) {
+                    if ($leg['amt'] > 0.00001) {
+                        TreasuryTransaction::create([
+                            'treasury_id' => $treasury->id,
+                            'type' => 'expense',
+                            'amount' => $leg['amt'],
+                            'description' => ($validated['notes'] ?? "تسديد دين مورد: {$supplier->name}") . $leg['suffix'],
+                            'category' => 'purchase_expense',
+                            'payment_method' => $leg['method'],
+                            'transaction_date' => now(),
+                            'created_by' => auth()->id() ?? 1,
+                        ]);
+                    }
+                }
+                if ($totalDeduct > 0.00001) {
+                    $treasury->applyLiquidityDelta(-$deductCash, -$deductApp);
+                    $treasury->total_expenses += $totalDeduct;
+                    $treasury->save();
+                }
+            }
+
+            DB::commit();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'تم تسديد الدين بنجاح',
+                'data' => [
+                    'amount_paid' => $amount,
+                    'payment_method' => $paymentMethod,
+                    'purchases_updated' => $paidPurchases,
+                    'supplier_new_balance' => $supplier->balance
+                ]
+            ]);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json([
+                'success' => false,
+                'message' => 'حدث خطأ في تسديد الدين',
                 'error' => env('APP_DEBUG') ? $e->getMessage() : null
             ], 500);
         }

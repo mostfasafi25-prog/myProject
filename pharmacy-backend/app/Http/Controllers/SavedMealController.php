@@ -541,7 +541,7 @@ public function index()
             // إضافة المبلغ للخزنة
             $treasury = Treasury::first();
             $oldBalance = $treasury->balance;
-            $treasury->balance += $totalAmount;
+            $treasury->adjustCashLegacy($totalAmount);
             $treasury->total_income += $totalAmount;
             $treasury->save();
             
@@ -782,7 +782,7 @@ public function index()
             
             // 4. خصم من الخزنة
             $oldBalance = $treasury->balance;
-            $treasury->balance -= $totalCost;
+            $treasury->adjustCashLegacy(-$totalCost);
             $treasury->total_expenses += $totalCost;
             $treasury->save();
             
@@ -945,7 +945,7 @@ public function index()
             // إضافة المبلغ للخزنة
             $treasury = Treasury::first();
             $oldBalance = $treasury->balance;
-            $treasury->balance += $saleAmount;
+            $treasury->adjustCashLegacy($saleAmount);
             $treasury->total_income += $saleAmount;
             $treasury->save();
             
@@ -1157,7 +1157,7 @@ public function index()
             
             // 4. خصم من الخزنة
             $oldBalance = $treasury->balance;
-            $treasury->balance -= $totalCost;
+            $treasury->adjustCashLegacy(-$totalCost);
             $treasury->total_expenses += $totalCost;
             $treasury->save();
             
@@ -1403,7 +1403,7 @@ public function index()
             
             // خصم من الخزنة
             $oldBalance = $treasury->balance;
-            $treasury->balance -= $totalCost;
+            $treasury->adjustCashLegacy(-$totalCost);
             $treasury->total_expenses += $totalCost;
             $treasury->save();
             

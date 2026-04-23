@@ -119,7 +119,7 @@ class PreparedMealController extends Controller
                 $treasury->total_expenses -= $totalCost;
                 
                 // 2. إضافة المبلغ للرصيد
-                $treasury->balance += $totalCost;
+                $treasury->adjustCashLegacy($totalCost);
                 $treasury->save();
                 
                 // 3. تسجيل معاملة الدخل (استرجاع الأموال)
@@ -270,7 +270,7 @@ class PreparedMealController extends Controller
             // تحديث الخزنة
             $treasury = Treasury::first();
             if ($treasury) {
-                $treasury->balance += $request->paid_amount;
+                $treasury->adjustCashLegacy((float) $request->paid_amount);
                 $treasury->total_income += $request->paid_amount;
                 $treasury->save();
                 

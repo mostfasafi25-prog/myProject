@@ -4,12 +4,15 @@ namespace App\Http\Controllers;
 
 use App\Models\Purchase;
 use App\Models\PurchaseItem;
+use App\Models\PurchaseReturn;
 use App\Models\Product;
+use App\Models\Supplier;
 use App\Models\Treasury;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use App\Models\TreasuryTransaction;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 
 class PurchaseController extends Controller
 {
@@ -21,8 +24,10 @@ class PurchaseController extends Controller
             $search = $request->get('search');
             $startDate = $request->get('start_date');
             $endDate = $request->get('end_date');
+            $supplierId = $request->get('supplier_id');
+            $status = $request->get('status');
             
-            $query = Purchase::with(['items']);
+            $query = Purchase::with(['items', 'supplier']);
             
             if ($search) {
                 $query->where('invoice_number', 'LIKE', "%{$search}%")
@@ -37,6 +42,17 @@ class PurchaseController extends Controller
             
             if ($endDate) {
                 $query->whereDate('purchase_date', '<=', $endDate);
+            }
+            
+            if ($supplierId !== null && $supplierId !== '') {
+                // حماية ضد قيم مورد نصية/محلية (مثل SUP-123) حتى لا تسقط الاستعلامات
+                if (ctype_digit((string) $supplierId) && Schema::hasColumn('purchases', 'supplier_id')) {
+                    $query->where('supplier_id', (int) $supplierId);
+                }
+            }
+            
+            if ($status && in_array($status, ['pending', 'partially_paid', 'completed', 'returned'])) {
+                $query->where('status', $status);
             }
             
             $purchases = $query->orderBy('purchase_date', 'desc')
@@ -174,28 +190,39 @@ class PurchaseController extends Controller
 public function store(Request $request)
 {
     try {
-        // ✅ لا تطلب remaining_amount من المستخدم، احسبه تلقائياً
+        // ✅ تحديث validation ليدعم mixed payment
         $request->validate([
             'invoice_number' => 'required|string|unique:purchases',
             'items' => 'required|array|min:1',
             'items.*.product_id' => 'required|integer|exists:products,id',
             'items.*.product_name' => 'required|string',
-            'items.*.quantity' => ['required', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0.1'],
-            'items.*.unit_price' => ['required', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0'],
-            'items.*.total_price' => ['required', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0'],
-            'total_amount' => ['required', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0'],
-            'paid_amount' => ['required', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0'],
-            'status' => 'required|in:pending,completed,cancelled,partially_paid', // ⭐ أضف partially_paid
+            'items.*.quantity' => ['required', 'numeric', 'regex:/^\d+(\.\d+)?$/', 'min:0.1'],
+            'items.*.unit_price' => ['required', 'numeric', 'regex:/^-?\d+(\.\d+)?$/'],
+            'items.*.total_price' => ['required', 'numeric', 'regex:/^-?\d+(\.\d+)?$/'],
+            'total_amount' => ['required', 'numeric', 'regex:/^\d+(\.\d+)?$/', 'min:0'],
+            'paid_amount' => ['required', 'numeric', 'regex:/^\d+(\.\d+)?$/', 'min:0'],
+            'remaining_amount' => ['nullable', 'numeric', 'regex:/^\d+(\.\d+)?$/', 'min:0'],
+            'supplier_id' => 'nullable|integer|exists:suppliers,id',
+            'status' => 'required|in:pending,completed,cancelled,partially_paid',
             'purchase_date' => 'required|date',
             'notes' => 'nullable|string',
-            'payment_method' => 'required|in:cash,app,credit,bank_transfer,check',
+            'payment_method' => 'required|in:cash,app,credit,bank_transfer,check,mixed',
+            'cash_amount' => ['nullable', 'numeric', 'regex:/^\d+(\.\d+)?$/', 'min:0'],
+            'app_amount' => ['nullable', 'numeric', 'regex:/^\d+(\.\d+)?$/', 'min:0'],
             'treasury_note' => 'nullable|string',
         ]);
 
+        if ((float) $request->paid_amount > (float) $request->total_amount + 0.0001) {
+            return response()->json([
+                'success' => false,
+                'message' => 'المبلغ المدفوع لا يمكن أن يكون أكبر من إجمالي الفاتورة'
+            ], 422);
+        }
+
         DB::beginTransaction();
 
-        // حساب المبالغ تلقائياً
-        $remainingAmount = $request->total_amount - $request->paid_amount;
+        // حساب المبالغ
+        $remainingAmount = $request->remaining_amount ?? ($request->total_amount - $request->paid_amount);
         $status = $request->status;
         
         // تحديد الحالة التلقائية إذا لم يتم تحديدها
@@ -212,15 +239,18 @@ public function store(Request $request)
         // 1. إنشاء الفاتورة
         $purchase = Purchase::create([
             'invoice_number' => $request->invoice_number,
+            'supplier_id' => $request->supplier_id,
             'total_amount' => $request->total_amount,
-            'grand_total' => $request->total_amount, // ⭐ إذا كنت لا تستخدم discount/tax
+            'grand_total' => $request->total_amount,
             'paid_amount' => $request->paid_amount,
-            'remaining_amount' => $remainingAmount, // ⭐ تمت إضافته
-            'due_amount' => $remainingAmount, // ⭐ للتوافق مع الحقل الموجود
+            'remaining_amount' => $remainingAmount,
+            'due_amount' => $remainingAmount,
             'status' => $status,
             'purchase_date' => $request->purchase_date,
             'notes' => $request->notes ?? '',
             'payment_method' => $request->payment_method,
+            'cash_amount' => $request->cash_amount ?? 0,
+            'app_amount' => $request->app_amount ?? 0,
             'user_id' => auth()->id() ?? 1,
             'created_by' => auth()->id() ?? 1,
             'category_id' => $request->category_id ?? 1,
@@ -231,52 +261,141 @@ public function store(Request $request)
             $qty = (float) ($item['quantity'] ?? 0);
             $unitPrice = (float) ($item['unit_price'] ?? 0);
             $totalPrice = (float) ($item['total_price'] ?? 0);
+            $product = Product::find($item['product_id']);
+            $purchaseUnit = $item['purchase_unit'] ?? $item['unit'] ?? ($product?->purchase_unit ?? null);
+            $qtyInPieces = $this->convertQuantityToPieces($product, $qty, $purchaseUnit);
+            $effectiveQty = max(0.0, $qtyInPieces);
+            $effectiveUnitPrice = $effectiveQty > 0 ? ($totalPrice > 0 ? $totalPrice / $effectiveQty : $unitPrice) : $unitPrice;
             PurchaseItem::create([
                 'purchase_id' => $purchase->id,
                 'product_id' => $item['product_id'],
                 'product_name' => $item['product_name'],
-                'quantity' => $qty,
-                'unit_price' => $unitPrice,
-                'total_price' => $totalPrice,
-                'subtotal' => $totalPrice,
+                'quantity' => $effectiveQty,
+                'unit_price' => $effectiveUnitPrice,
+                'total_price' => $effectiveQty * $effectiveUnitPrice,
+                'subtotal' => $effectiveQty * $effectiveUnitPrice,
                 'discount' => 0,
                 'tax' => 0,
             ]);
 
             // زيادة المخزون وتحديث سعر التكلفة/الشراء لآخر شراء
-            $product = Product::find($item['product_id']);
+            // effectiveUnitPrice = تكلفة الحبة (لأن الكمية تُحوَّل إلى قطع). يُخزَّن cost_price/purchase_price
+            // بنفس وحدة البيع (sale_unit) مثل price حتى الربح ونقطة البيع والتقارير تتفق مع «سعر العلبة».
             if ($product) {
-                $product->increment('stock', $qty);
+                $product->increment('stock', $effectiveQty);
+                $product->refresh();
+                $costPerPiece = $effectiveUnitPrice;
+                $perSaleUnit = max(0.000001, $product->piecesPerSaleUnit());
+                $alignedCost = round($costPerPiece * $perSaleUnit, 2);
+                $salePrice = (float) $product->price;
+                $profitAmount = $product->profit_amount;
+                if ($salePrice > 0.00001) {
+                    $profitAmount = round($salePrice - $alignedCost, 2);
+                }
                 $product->update([
-                    'purchase_price' => $unitPrice,
-                    'cost_price' => $unitPrice,
+                    'purchase_price' => $alignedCost,
+                    'cost_price' => $alignedCost,
+                    'profit_amount' => $profitAmount,
                 ]);
             }
         }
 
-        // 3. خصم من الخزنة (نفس الكود)
-        if ($request->status === 'completed' && $request->paid_amount > 0) {
+        // 3. محفظة المورد: رصيد سالب = دين نُسدّده بالمدفوع (كامل المبلغ من الخزنة)؛ رصيد موجب = دفعة مسبقة تُخصم من الخزنة
+        $paidTotal = round((float) $request->paid_amount, 2);
+        $treasuryDeduction = $paidTotal;
+        $prepaidUsed = 0.0;
+        $debtReduced = 0.0;
+        $supplierBalanceDelta = null;
+        $supplierWalletBefore = null;
+
+        if ($request->supplier_id && $paidTotal > 0.00001) {
+            $supplier = Supplier::lockForUpdate()->find($request->supplier_id);
+            if ($supplier) {
+                $supplierWalletBefore = round((float) $supplier->balance, 2);
+                $bal = $supplierWalletBefore;
+
+                if ($bal < -0.00001) {
+                    $debtReduced = round(min($paidTotal, -$bal), 2);
+                    $supplier->balance = round($bal + $paidTotal, 2);
+                    $supplier->save();
+                    $treasuryDeduction = $paidTotal;
+                    $prepaidUsed = 0.0;
+                } elseif ($bal > 0.00001) {
+                    $prepaidUsed = min($paidTotal, $bal);
+                    $supplier->balance = round($bal - $prepaidUsed, 2);
+                    $supplier->save();
+                    $treasuryDeduction = round($paidTotal - $prepaidUsed, 2);
+                }
+
+                $supplierBalanceDelta = round((float) $supplier->fresh()->balance - $supplierWalletBefore, 2);
+            }
+        }
+
+        if (Schema::hasColumn('purchases', 'supplier_balance_delta')) {
+            $purchase->supplier_balance_delta = $supplierBalanceDelta;
+        }
+        if (Schema::hasColumn('purchases', 'treasury_cash_debit')) {
+            $purchase->treasury_cash_debit = round(max(0.0, $treasuryDeduction), 2);
+        }
+        if (Schema::hasColumn('purchases', 'supplier_balance_delta') || Schema::hasColumn('purchases', 'treasury_cash_debit')) {
+            $purchase->save();
+        }
+
+        if ($treasuryDeduction > 0.00001) {
             $treasury = Treasury::first();
             if ($treasury) {
-                if ($treasury->balance < $request->paid_amount) {
-                    throw new \Exception('رصيد الخزنة غير كافي');
+                $pm = strtolower((string) $request->payment_method);
+                $tCash = 0.0;
+                $tApp = 0.0;
+                if ($pm === 'app') {
+                    $tApp = round($treasuryDeduction, 2);
+                } elseif ($pm === 'mixed') {
+                    $c = (float) ($request->cash_amount ?? 0);
+                    $a = (float) ($request->app_amount ?? 0);
+                    if ($paidTotal > 0.00001 && $c + $a > 0.00001 && abs($c + $a - $paidTotal) < 0.06) {
+                        $tCash = round($treasuryDeduction * ($c / $paidTotal), 2);
+                        $tApp = round($treasuryDeduction - $tCash, 2);
+                    } else {
+                        $tCash = round($treasuryDeduction, 2);
+                    }
+                } else {
+                    $tCash = round($treasuryDeduction, 2);
                 }
-                
-                $treasury->balance -= $request->paid_amount;
+
+                $treasury->applyLiquidityDelta(-$tCash, -$tApp);
+                $treasury->total_expenses += round($tCash + $tApp, 2);
                 $treasury->save();
-                
-                TreasuryTransaction::create([
-                    'treasury_id' => $treasury->id,
-                    'type' => 'expense',
-                    'amount' => $request->paid_amount,
-                    'description' => $request->treasury_note ?? "دفع فاتورة شراء #{$request->invoice_number}",
-    'category' => 'purchase_expense', // ← غير من purchases إلى purchase_expense
-                    'purchase_id' => $purchase->id,
-                    'reference_type' => 'purchase',
-                    'reference_id' => $purchase->id,
-                    'created_by' => auth()->id() ?? 1,
-    'transaction_date' => now()->toDateString(), // ⭐ تاريخ فقط
-                ]);
+
+                $baseNote = $request->treasury_note ?? "دفع فاتورة شراء #{$request->invoice_number}";
+                if ($prepaidUsed > 0.00001) {
+                    $baseNote .= ' — منها ' . number_format($prepaidUsed, 2) . ' من رصيد مسبق للمورد';
+                }
+                if ($debtReduced > 0.00001) {
+                    $baseNote .= ' — منها ' . number_format($debtReduced, 2) . ' تسديد دين سابق للمورد';
+                }
+
+                foreach (
+                    [
+                        ['amt' => $tCash, 'method' => 'cash', 'suffix' => ' — كاش'],
+                        ['amt' => $tApp, 'method' => 'app', 'suffix' => ' — تطبيق'],
+                    ] as $part
+                ) {
+                    if ($part['amt'] > 0.00001) {
+                        TreasuryTransaction::create([
+                            'treasury_id' => $treasury->id,
+                            'type' => 'expense',
+                            'amount' => $part['amt'],
+                            'description' => $baseNote . $part['suffix'],
+                            'category' => 'purchase_expense',
+                            'purchase_id' => $purchase->id,
+                            'reference_type' => 'purchase',
+                            'reference_id' => $purchase->id,
+                            'created_by' => auth()->id() ?? 1,
+                            'transaction_date' => now()->toDateString(),
+                            'payment_method' => $part['method'],
+                        ]);
+                    }
+                }
             }
         }
 
@@ -285,7 +404,14 @@ public function store(Request $request)
         return response()->json([
             'success' => true,
             'message' => 'تم إضافة المشتريات بنجاح',
-            'data' => $purchase->load('items'),
+            'data' => $purchase->load(['items', 'supplier']),
+            'treasury_breakdown' => [
+                'paid_total' => $paidTotal,
+                'from_supplier_prepaid' => $prepaidUsed,
+                'debt_reduced' => $debtReduced,
+                'supplier_balance_delta' => $supplierBalanceDelta,
+                'from_main_treasury' => max(0.0, $treasuryDeduction),
+            ],
         ], 201);
 
     } catch (\Exception $e) {
@@ -381,7 +507,7 @@ public function getSalesStatistics(Request $request)
             foreach ($purchases as $purchase) {
                 Log::debug('🛒 فاتورة:', [
                     'purchase_id' => $purchase->id,
-                    'items_count' => $purchases->items->count()
+                    'items_count' => $purchase->items->count()
                 ]);
                 
                 foreach ($purchase->items as $item) {
@@ -628,50 +754,60 @@ private function getPurchasesByDay($period = 'month')
                 }
             }
 
-            // 2. تراجع عن تحويلات الخزنة
-            if ($purchase->paid_amount > 0) {
-                $totalPaidAmount += $purchase->paid_amount;
-                
-                // حذف تحويلات الخزنة المرتبطة
-                $deletedTransactions = TreasuryTransaction::where('purchase_id', $purchase->id)
-                    ->orWhere(function($q) use ($purchase) {
-                        $q->where('reference_type', 'purchase')
-                          ->where('reference_id', $purchase->id);
-                    })
-                    ->delete();
+            // 2. تراجع محفظة المورد والخزنة
+            $treasuryRestore = $this->mainTreasuryDebitRemaining($purchase);
+            $totalPaidAmount += $treasuryRestore;
 
-                // إرجاع المبلغ للخزنة
-                $treasury = Treasury::first();
-                if ($treasury) {
-                    $oldBalance = $treasury->balance;
-                    $treasury->balance += $purchase->paid_amount;
-                    $treasury->save();
-                    $newBalance = $treasury->fresh()->balance;
-                    
-                    $affectedTreasuries[$treasury->id] = [
-                        'name' => $treasury->name,
-                        'old_balance' => $oldBalance,
-                        'amount_added' => $purchase->paid_amount,
-                        'new_balance' => $newBalance
-                    ];
-                    
-                    Log::channel('purchases')->debug('🏦 تحديث رصيد الخزنة', [
-                        'request_id' => $requestId,
-                        'purchase_id' => $purchase->id,
-                        'treasury_id' => $treasury->id,
-                        'treasury_name' => $treasury->name,
-                        'old_balance' => $oldBalance,
-                        'added_amount' => $purchase->paid_amount,
-                        'new_balance' => $newBalance,
-                        'deleted_transactions' => $deletedTransactions
-                    ]);
-                } else {
-                    Log::error('🚨 الخزنة غير موجودة', [
-                        'request_id' => $requestId,
-                        'purchase_id' => $purchase->id,
-                        'paid_amount' => $purchase->paid_amount
-                    ]);
+            if ($purchase->supplier_id
+                && Schema::hasColumn('purchases', 'supplier_balance_delta')
+                && $purchase->supplier_balance_delta !== null
+                && abs((float) $purchase->supplier_balance_delta) > 0.00001) {
+                $sup = Supplier::lockForUpdate()->find($purchase->supplier_id);
+                if ($sup) {
+                    $sup->balance = round((float) $sup->balance - (float) $purchase->supplier_balance_delta, 2);
+                    $sup->save();
                 }
+            }
+
+            [$netCashRestore, $netAppRestore] = $this->purchaseTreasuryRestoreCashAppBeforeTransactionDelete($purchase, $treasuryRestore);
+
+            $deletedTransactions = TreasuryTransaction::where('purchase_id', $purchase->id)
+                ->orWhere(function ($q) use ($purchase) {
+                    $q->where('reference_type', 'purchase')
+                        ->where('reference_id', $purchase->id);
+                })
+                ->delete();
+
+            $treasury = Treasury::first();
+            if ($treasury && ($netCashRestore > 0.00001 || $netAppRestore > 0.00001)) {
+                $oldBalance = $treasury->balance;
+                $treasury->applyLiquidityDelta($netCashRestore, $netAppRestore);
+                $treasury->save();
+                $newBalance = $treasury->fresh()->balance;
+
+                $affectedTreasuries[$treasury->id] = [
+                    'name' => $treasury->name,
+                    'old_balance' => $oldBalance,
+                    'amount_added' => round($netCashRestore + $netAppRestore, 2),
+                    'new_balance' => $newBalance,
+                ];
+
+                Log::channel('purchases')->debug('🏦 تحديث رصيد الخزنة', [
+                    'request_id' => $requestId,
+                    'purchase_id' => $purchase->id,
+                    'treasury_id' => $treasury->id,
+                    'treasury_name' => $treasury->name,
+                    'old_balance' => $oldBalance,
+                    'added_amount' => round($netCashRestore + $netAppRestore, 2),
+                    'new_balance' => $newBalance,
+                    'deleted_transactions' => $deletedTransactions,
+                ]);
+            } elseif (!$treasury && $treasuryRestore > 0.00001) {
+                Log::error('🚨 الخزنة غير موجودة', [
+                    'request_id' => $requestId,
+                    'purchase_id' => $purchase->id,
+                    'treasury_restore' => $treasuryRestore,
+                ]);
             }
 
             // 3. حذف عناصر الفاتورة
@@ -822,35 +958,46 @@ private function getPurchasesByDay($period = 'month')
                 }
             }
 
-            // 2. تراجع عن تحويلات الخزنة إذا كان هناك مبلغ مدفوع
-            if ($purchase->paid_amount > 0) {
-                // حذف تحويلات الخزنة المرتبطة
-                $deletedTransactions = TreasuryTransaction::where('purchase_id', $purchase->id)
-                    ->orWhere(function($q) use ($purchase) {
-                        $q->where('reference_type', 'purchase')
-                          ->where('reference_id', $purchase->id);
-                    })
-                    ->delete();
+            // 2. تراجع محفظة المورد ثم الخزنة (المبلغ الفعلي المخصوم من الخزنة وليس بالضرورة paid_amount)
+            $treasuryRestore = $this->mainTreasuryDebitRemaining($purchase);
 
-                // إرجاع المبلغ للخزنة
-                $treasury = Treasury::first();
-                if ($treasury) {
-                    $oldBalance = $treasury->balance;
-                    $treasury->balance += $purchase->paid_amount;
-                    $treasury->save();
-                    $newBalance = $treasury->fresh()->balance;
-                    
-                    Log::channel('purchases')->debug('🏦 تحديث رصيد الخزنة', [
-                        'request_id' => $requestId,
-                        'purchase_id' => $purchase->id,
-                        'treasury_id' => $treasury->id,
-                        'treasury_name' => $treasury->name,
-                        'old_balance' => $oldBalance,
-                        'added_amount' => $purchase->paid_amount,
-                        'new_balance' => $newBalance,
-                        'deleted_transactions' => $deletedTransactions
-                    ]);
+            if ($purchase->supplier_id
+                && Schema::hasColumn('purchases', 'supplier_balance_delta')
+                && $purchase->supplier_balance_delta !== null
+                && abs((float) $purchase->supplier_balance_delta) > 0.00001) {
+                $sup = Supplier::lockForUpdate()->find($purchase->supplier_id);
+                if ($sup) {
+                    $sup->balance = round((float) $sup->balance - (float) $purchase->supplier_balance_delta, 2);
+                    $sup->save();
                 }
+            }
+
+            [$netCashRestore, $netAppRestore] = $this->purchaseTreasuryRestoreCashAppBeforeTransactionDelete($purchase, $treasuryRestore);
+
+            $deletedTransactions = TreasuryTransaction::where('purchase_id', $purchase->id)
+                ->orWhere(function ($q) use ($purchase) {
+                    $q->where('reference_type', 'purchase')
+                        ->where('reference_id', $purchase->id);
+                })
+                ->delete();
+
+            $treasury = Treasury::first();
+            if ($treasury && ($netCashRestore > 0.00001 || $netAppRestore > 0.00001)) {
+                $oldBalance = $treasury->balance;
+                $treasury->applyLiquidityDelta($netCashRestore, $netAppRestore);
+                $treasury->save();
+                $newBalance = $treasury->fresh()->balance;
+
+                Log::channel('purchases')->debug('🏦 تحديث رصيد الخزنة', [
+                    'request_id' => $requestId,
+                    'purchase_id' => $purchase->id,
+                    'treasury_id' => $treasury->id,
+                    'treasury_name' => $treasury->name,
+                    'old_balance' => $oldBalance,
+                    'added_amount' => round($netCashRestore + $netAppRestore, 2),
+                    'new_balance' => $newBalance,
+                    'deleted_transactions' => $deletedTransactions,
+                ]);
             }
 
             // 3. حذف عناصر الفاتورة
@@ -935,6 +1082,7 @@ private function getPurchasesByDay($period = 'month')
     {
         try {
             $purchase = Purchase::with([
+                'supplier:id,name',
                 'category:id,name',
                 'items.product:id,name,unit,sku,barcode',
                 'createdBy:id,name'
@@ -959,5 +1107,464 @@ private function getPurchasesByDay($period = 'month')
                 'error' => env('APP_DEBUG') ? $e->getMessage() : null
             ], 500);
         }
+    }
+
+    /**
+     * Return specific items from a purchase
+     */
+    public function returnItems(Request $request, Purchase $purchase)
+    {
+        try {
+            if (!Schema::hasTable('purchase_returns') || !Schema::hasColumn('purchase_items', 'returned_quantity')) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'ميزة الإرجاع غير مفعلة بعد. يرجى تشغيل ترحيلات قاعدة البيانات (migrations) الخاصة بالإرجاع.'
+                ], 422);
+            }
+
+            $validated = $request->validate([
+                'items' => 'required|array|min:1',
+                'items.*.purchase_item_id' => 'required|integer|exists:purchase_items,id',
+                'items.*.quantity' => 'required|numeric|min:0.1',
+                'reason' => 'nullable|string'
+            ]);
+
+            // Check if purchase is already returned
+            if ($purchase->status === 'returned') {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'لا يمكن إرجاع أصناف من فاتورة تم إرجاعها بالكامل مسبقاً'
+                ], 422);
+            }
+
+            DB::beginTransaction();
+
+            $returnedTotal = 0;
+            $returnedItems = [];
+            $paidBeforeReturn = (float) $purchase->paid_amount;
+            $cashPaidBeforeReturn = (float) ($purchase->cash_amount ?? 0);
+            $appPaidBeforeReturn = (float) ($purchase->app_amount ?? 0);
+
+            foreach ($validated['items'] as $item) {
+                $purchaseItem = PurchaseItem::where('purchase_id', $purchase->id)
+                    ->where('id', $item['purchase_item_id'])
+                    ->first();
+                
+                if (!$purchaseItem || $purchaseItem->purchase_id !== $purchase->id) {
+                    continue;
+                }
+
+                // Check if return quantity is valid
+                $availableQty = $purchaseItem->quantity - ($purchaseItem->returned_quantity ?? 0);
+                if ($item['quantity'] > $availableQty) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => "الكمية المطلوب إرجاعها للصنف {$purchaseItem->product_name} أكبر من المتاح"
+                    ], 422);
+                }
+
+                // Update purchase item returned quantity
+                $purchaseItem->returned_quantity = ($purchaseItem->returned_quantity ?? 0) + $item['quantity'];
+                $purchaseItem->save();
+
+                // Update product stock (decrease)
+                $product = Product::find($purchaseItem->product_id);
+                if ($product) {
+                    $product->stock = max(0, (float) $product->stock - (float) $item['quantity']);
+                    $product->save();
+                }
+
+                // Calculate returned amount
+                $returnedAmount = $item['quantity'] * $purchaseItem->unit_price;
+                $returnedTotal += $returnedAmount;
+
+                $returnedItems[] = [
+                    'product_name' => $purchaseItem->product_name,
+                    'quantity' => $item['quantity'],
+                    'unit_price' => $purchaseItem->unit_price,
+                    'total' => $returnedAmount
+                ];
+            }
+
+            if ($returnedTotal <= 0 || count($returnedItems) === 0) {
+                DB::rollBack();
+                return response()->json([
+                    'success' => false,
+                    'message' => 'لم يتم تحديد أصناف صالحة للإرجاع'
+                ], 422);
+            }
+
+            // Create return record
+            PurchaseReturn::create([
+                'purchase_id' => $purchase->id,
+                'supplier_id' => $purchase->supplier_id,
+                'return_date' => now(),
+                'total_amount' => $returnedTotal,
+                'items' => $returnedItems,
+                'reason' => $validated['reason'] ?? 'إرجاع أصناف',
+                'created_by' => auth()->id() ?? 1
+            ]);
+
+            // Update purchase totals
+            $newTotalAmount = max(0, (float) $purchase->total_amount - $returnedTotal);
+            $newPaidAmount = min($paidBeforeReturn, $newTotalAmount);
+            $refundAmount = max(0, $paidBeforeReturn - $newPaidAmount);
+            $newRemainingAmount = max(0, $newTotalAmount - $newPaidAmount);
+
+            // توزيع الاسترجاع على الكاش/التطبيق بنفس نسبة الدفع الأصلية
+            $cashRefund = 0.0;
+            if ($refundAmount > 0 && $paidBeforeReturn > 0) {
+                $cashRefund = round($refundAmount * ($cashPaidBeforeReturn / $paidBeforeReturn), 2);
+            }
+            $cashRefund = min($cashRefund, $cashPaidBeforeReturn, $refundAmount);
+            $appRefund = max(0, $refundAmount - $cashRefund);
+            $newCashAmount = max(0, $cashPaidBeforeReturn - $cashRefund);
+            $newAppAmount = max(0, $appPaidBeforeReturn - $appRefund);
+
+            $treasuryRemaining = $this->mainTreasuryDebitRemaining($purchase);
+            $treasuryCashRefund = 0.0;
+            if ($refundAmount > 0.00001 && $paidBeforeReturn > 0.00001 && $treasuryRemaining > 0.00001) {
+                $treasuryCashRefund = round($refundAmount * ($treasuryRemaining / $paidBeforeReturn), 2);
+            }
+            $treasuryCashRefund = max(0.0, min($treasuryCashRefund, $treasuryRemaining, $refundAmount));
+
+            $purchase->total_amount = $newTotalAmount;
+            $purchase->grand_total = $newTotalAmount;
+            $purchase->paid_amount = $newPaidAmount;
+            $purchase->remaining_amount = $newRemainingAmount;
+            $purchase->due_amount = $newRemainingAmount;
+            $purchase->cash_amount = $newCashAmount;
+            $purchase->app_amount = $newAppAmount;
+
+            if ($newTotalAmount <= 0.01) {
+                $purchase->status = $this->supportsReturnedStatus() ? 'returned' : 'completed';
+            } elseif ($newRemainingAmount <= 0.01) {
+                $purchase->status = 'completed';
+            } elseif ($newPaidAmount > 0.01) {
+                $purchase->status = 'partially_paid';
+            } else {
+                $purchase->status = 'pending';
+            }
+
+            if (Schema::hasColumn('purchases', 'treasury_cash_debit')) {
+                $purchase->treasury_cash_debit = max(0.0, round($treasuryRemaining - $treasuryCashRefund, 2));
+            }
+
+            $purchase->save();
+
+            if ($treasuryCashRefund > 0.00001) {
+                $treasury = Treasury::first();
+                if ($treasury) {
+                    $ratioBase = max(0.00001, $paidBeforeReturn);
+                    $refundCash = round($treasuryCashRefund * ($cashPaidBeforeReturn / $ratioBase), 2);
+                    $refundApp = round($treasuryCashRefund - $refundCash, 2);
+                    $treasury->applyLiquidityDelta($refundCash, $refundApp);
+                    $treasury->save();
+
+                    foreach (
+                        [
+                            ['amt' => $refundCash, 'method' => 'cash', 'suffix' => ' — كاش'],
+                            ['amt' => $refundApp, 'method' => 'app', 'suffix' => ' — تطبيق'],
+                        ] as $leg
+                    ) {
+                        if ($leg['amt'] > 0.00001) {
+                            TreasuryTransaction::create([
+                                'treasury_id' => $treasury->id,
+                                'type' => 'income',
+                                'amount' => $leg['amt'],
+                                'description' => "استرجاع إلى الخزنة (إرجاع أصناف): {$purchase->invoice_number}" . $leg['suffix'],
+                                'category' => 'other_income',
+                                'purchase_id' => $purchase->id,
+                                'reference_type' => 'purchase_return',
+                                'reference_id' => $purchase->id,
+                                'payment_method' => $leg['method'],
+                                'transaction_date' => now()->toDateString(),
+                                'created_by' => auth()->id() ?? 1,
+                            ]);
+                        }
+                    }
+                }
+            }
+
+            DB::commit();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'تم إرجاع الأصناف بنجاح',
+                'data' => [
+                    'returned_total' => $returnedTotal,
+                    'refund_amount' => $refundAmount,
+                    'cash_refund' => $cashRefund,
+                    'treasury_cash_refund' => $treasuryCashRefund,
+                    'items' => $returnedItems,
+                    'purchase_new_total' => $purchase->total_amount
+                ]
+            ]);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json([
+                'success' => false,
+                'message' => 'حدث خطأ في إرجاع الأصناف',
+                'error' => env('APP_DEBUG') ? $e->getMessage() : null
+            ], 500);
+        }
+    }
+
+    /**
+     * Full purchase return
+     */
+    public function fullReturn(Request $request, Purchase $purchase)
+    {
+        try {
+            if (!Schema::hasTable('purchase_returns') || !Schema::hasColumn('purchase_items', 'returned_quantity')) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'ميزة الإرجاع غير مفعلة بعد. يرجى تشغيل ترحيلات قاعدة البيانات (migrations) الخاصة بالإرجاع.'
+                ], 422);
+            }
+
+            $validated = $request->validate([
+                'reason' => 'nullable|string'
+            ]);
+
+            $purchase->loadMissing('items');
+
+            // Check if already returned
+            if ($purchase->status === 'returned') {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'هذه الفاتورة تم إرجاعها بالفعل'
+                ], 422);
+            }
+
+            DB::beginTransaction();
+
+            $treasuryRefund = $this->mainTreasuryDebitRemaining($purchase);
+            $returnedTotal = (float) $purchase->total_amount;
+            $returnedItems = [];
+            $paidBeforeReturn = (float) $purchase->paid_amount;
+            $cashPaidBeforeReturn = (float) ($purchase->cash_amount ?? 0);
+            $supplierBalanceDeltaForReturn = Schema::hasColumn('purchases', 'supplier_balance_delta')
+                ? $purchase->supplier_balance_delta
+                : null;
+
+            // Process all items
+            foreach ($purchase->items as $item) {
+                // Get remaining quantity to return
+                $remainingQty = $item->quantity - ($item->returned_quantity ?? 0);
+                
+                if ($remainingQty > 0) {
+                    // Update product stock
+                    $product = Product::find($item->product_id);
+                    if ($product) {
+                        $product->stock = max(0, (float) $product->stock - (float) $remainingQty);
+                        $product->save();
+                    }
+
+                    $returnedItems[] = [
+                        'product_name' => $item->product_name,
+                        'quantity' => $remainingQty,
+                        'unit_price' => $item->unit_price,
+                        'total' => $remainingQty * $item->unit_price
+                    ];
+                }
+
+                // Mark all quantity as returned
+                $item->returned_quantity = $item->quantity;
+                $item->save();
+            }
+
+            if (count($returnedItems) === 0) {
+                DB::rollBack();
+                return response()->json([
+                    'success' => false,
+                    'message' => 'لا توجد كميات متاحة لإرجاع هذه الفاتورة'
+                ], 422);
+            }
+
+            // Create return record
+            PurchaseReturn::create([
+                'purchase_id' => $purchase->id,
+                'supplier_id' => $purchase->supplier_id,
+                'return_date' => now(),
+                'total_amount' => $returnedTotal,
+                'items' => $returnedItems,
+                'reason' => $validated['reason'] ?? 'إرجاع فاتورة كاملة',
+                'is_full_return' => true,
+                'created_by' => auth()->id() ?? 1
+            ]);
+
+            // Update purchase status and amounts
+            $purchase->status = $this->supportsReturnedStatus() ? 'returned' : 'completed';
+            $purchase->total_amount = 0;
+            $purchase->grand_total = 0;
+            $purchase->paid_amount = 0;
+            $purchase->remaining_amount = 0;
+            $purchase->due_amount = 0;
+            $purchase->cash_amount = 0;
+            $purchase->app_amount = 0;
+            if (Schema::hasColumn('purchases', 'treasury_cash_debit')) {
+                $purchase->treasury_cash_debit = 0;
+            }
+            $purchase->save();
+
+            if ($treasuryRefund > 0.00001) {
+                $treasury = Treasury::first();
+                if ($treasury) {
+                    $ratioBase = max(0.00001, $paidBeforeReturn);
+                    $refundCash = round($treasuryRefund * ($cashPaidBeforeReturn / $ratioBase), 2);
+                    $refundApp = round($treasuryRefund - $refundCash, 2);
+                    $treasury->applyLiquidityDelta($refundCash, $refundApp);
+                    $treasury->save();
+
+                    foreach (
+                        [
+                            ['amt' => $refundCash, 'method' => 'cash', 'suffix' => ' — كاش'],
+                            ['amt' => $refundApp, 'method' => 'app', 'suffix' => ' — تطبيق'],
+                        ] as $leg
+                    ) {
+                        if ($leg['amt'] > 0.00001) {
+                            TreasuryTransaction::create([
+                                'treasury_id' => $treasury->id,
+                                'type' => 'income',
+                                'amount' => $leg['amt'],
+                                'description' => "استرجاع إلى الخزنة (إرجاع فاتورة كاملة): {$purchase->invoice_number}" . $leg['suffix'],
+                                'category' => 'other_income',
+                                'purchase_id' => $purchase->id,
+                                'reference_type' => 'purchase_return',
+                                'reference_id' => $purchase->id,
+                                'payment_method' => $leg['method'],
+                                'transaction_date' => now()->toDateString(),
+                                'created_by' => auth()->id() ?? 1,
+                            ]);
+                        }
+                    }
+                }
+            }
+
+            if ($purchase->supplier_id
+                && $supplierBalanceDeltaForReturn !== null
+                && abs((float) $supplierBalanceDeltaForReturn) > 0.00001) {
+                $sup = Supplier::lockForUpdate()->find($purchase->supplier_id);
+                if ($sup) {
+                    $sup->balance = round((float) $sup->balance - (float) $supplierBalanceDeltaForReturn, 2);
+                    $sup->save();
+                }
+            }
+
+            DB::commit();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'تم إرجاع الفاتورة بالكامل بنجاح',
+                'data' => [
+                    'returned_total' => $returnedTotal,
+                    'refund_amount' => $paidBeforeReturn,
+                    'cash_refund' => $cashPaidBeforeReturn,
+                    'treasury_cash_refund' => $treasuryRefund,
+                    'purchase_id' => $purchase->id
+                ]
+            ]);
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json([
+                'success' => false,
+                'message' => 'حدث خطأ في إرجاع الفاتورة',
+                'error' => env('APP_DEBUG') ? $e->getMessage() : null
+            ], 500);
+        }
+    }
+
+    private function supportsReturnedStatus(): bool
+    {
+        try {
+            $row = DB::selectOne("SHOW COLUMNS FROM purchases LIKE 'status'");
+            $type = (string) ($row->Type ?? $row->type ?? '');
+            return str_contains($type, "'returned'");
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
+    /**
+     * قبل حذف معاملات فاتورة الشراء: توزيع المبلغ المسترجع على كاش/تطبيق.
+     *
+     * @return array{0: float, 1: float}
+     */
+    private function purchaseTreasuryRestoreCashAppBeforeTransactionDelete(Purchase $purchase, float $treasuryRestore): array
+    {
+        $netCashRestore = max(
+            0.0,
+            (float) TreasuryTransaction::where('purchase_id', $purchase->id)->where('type', 'expense')->where('payment_method', 'cash')->sum('amount')
+            - (float) TreasuryTransaction::where('purchase_id', $purchase->id)->where('type', 'income')->where('payment_method', 'cash')->sum('amount')
+        );
+        $netAppRestore = max(
+            0.0,
+            (float) TreasuryTransaction::where('purchase_id', $purchase->id)->where('type', 'expense')->where('payment_method', 'app')->sum('amount')
+            - (float) TreasuryTransaction::where('purchase_id', $purchase->id)->where('type', 'income')->where('payment_method', 'app')->sum('amount')
+        );
+        $sumNetRestore = round($netCashRestore + $netAppRestore, 2);
+        if ($sumNetRestore < 0.00001 && $treasuryRestore > 0.00001) {
+            $paid = max(0.00001, (float) $purchase->paid_amount);
+            $c = (float) ($purchase->cash_amount ?? 0);
+            $a = (float) ($purchase->app_amount ?? 0);
+            if ($c + $a > 0.00001 && abs($c + $a - $paid) < 0.1) {
+                $netCashRestore = round($treasuryRestore * ($c / $paid), 2);
+                $netAppRestore = round($treasuryRestore - $netCashRestore, 2);
+            } else {
+                $pm = strtolower((string) ($purchase->payment_method ?? 'cash'));
+                if ($pm === 'app') {
+                    $netAppRestore = round($treasuryRestore, 2);
+                    $netCashRestore = 0.0;
+                } else {
+                    $netCashRestore = round($treasuryRestore, 2);
+                    $netAppRestore = 0.0;
+                }
+            }
+        }
+
+        return [$netCashRestore, $netAppRestore];
+    }
+
+    /**
+     * ما زال يُستحق إرجاعه إلى الخزنة الرئيسية لهذه الفاتورة (بعد خصم إيرادات الإرجاع السابقة).
+     */
+    private function mainTreasuryDebitRemaining(Purchase $purchase): float
+    {
+        if (Schema::hasColumn('purchases', 'treasury_cash_debit') && $purchase->treasury_cash_debit !== null) {
+            return max(0.0, round((float) $purchase->treasury_cash_debit, 2));
+        }
+
+        $debited = (float) TreasuryTransaction::where('purchase_id', $purchase->id)
+            ->where('type', 'expense')
+            ->sum('amount');
+        $credited = (float) TreasuryTransaction::where('purchase_id', $purchase->id)
+            ->where('type', 'income')
+            ->sum('amount');
+
+        return max(0.0, round($debited - $credited, 2));
+    }
+
+    private function convertQuantityToPieces(?Product $product, float $quantity, ?string $unit): float
+    {
+        $qty = max(0.0, (float) $quantity);
+        if (!$product) {
+            return $qty;
+        }
+        $normalizedUnit = strtolower((string) ($unit ?: $product->purchase_unit ?: $product->sale_unit ?: $product->unit ?: 'piece'));
+        $piecesPerStrip = (float) ($product->pieces_per_strip ?: $product->strip_unit_count ?: 1);
+        $piecesPerStrip = $piecesPerStrip > 0 ? $piecesPerStrip : 1.0;
+        $stripsPerBox = (float) ($product->strips_per_box ?: 1);
+        $stripsPerBox = $stripsPerBox > 0 ? $stripsPerBox : 1.0;
+
+        if ($normalizedUnit === 'box') {
+            return $qty * $stripsPerBox * $piecesPerStrip;
+        }
+        if ($normalizedUnit === 'strip' || $normalizedUnit === 'pack') {
+            return $qty * $piecesPerStrip;
+        }
+        return $qty;
     }
 }

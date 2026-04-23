@@ -154,9 +154,11 @@ class TreasuryTransaction extends Model
     {
         $methods = [
             'cash' => 'نقدي',
+            'app' => 'تطبيق',
             'bank_transfer' => 'تحويل بنكي',
             'check' => 'شيك',
             'card' => 'بطاقة',
+            'mixed' => 'مختلط',
         ];
 
         return $methods[$this->payment_method] ?? $this->payment_method;

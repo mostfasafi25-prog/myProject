@@ -14,9 +14,7 @@ class DatabaseSeeder extends Seeder
      */
     public function run()
     {
-        $this->call([
-            AdminCashierSeeder::class,
-            PharmacyProductsSeeder::class,
-        ]);
+        // Intentionally empty: avoid injecting dummy/demo data automatically.
+        // Run specific seeders manually only when explicitly needed.
     }
 }

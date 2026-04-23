@@ -10,6 +10,16 @@ use Illuminate\Support\Facades\Hash;
 
 class UserController extends Controller
 {
+    private function canManageAllUsers(Request $request): bool
+    {
+        return in_array($request->user()?->role, ['super_admin'], true);
+    }
+
+    private function canAccessUserRole(Request $request, ?string $role): bool
+    {
+        if ($this->canManageAllUsers($request)) return true;
+        return $role === 'cashier';
+    }
     /**
      * عرض جميع المستخدمين
      */
@@ -28,7 +38,7 @@ class UserController extends Controller
             $query->where('username', 'LIKE', "%{$search}%");
         }
         
-        $users = $query->orderBy('created_at', 'desc')->get(['id', 'username', 'role', 'approval_status', 'is_active', 'created_at']);
+        $users = $query->orderBy('created_at', 'desc')->get(['id', 'username', 'role', 'avatar_url', 'approval_status', 'is_active', 'created_at']);
         
         return response()->json([
             'success' => true,
@@ -42,9 +52,13 @@ class UserController extends Controller
      */
     public function store(Request $request)
     {
+        if (!in_array($request->user()?->role, ['admin', 'super_admin'], true)) {
+            return response()->json(['success' => false, 'message' => 'غير مصرح'], 403);
+        }
         $validator = Validator::make($request->all(), [
             'username' => 'required|string|max:50|unique:users,username',
             'password' => 'required|string|min:6',
+            'avatar_url' => 'nullable|string|max:200000',
             'role' => 'required|in:admin,super_admin,cashier,super_cashier',
             'approval_status' => 'nullable|in:approved,pending',
             'is_active' => 'nullable|boolean',
@@ -59,9 +73,16 @@ class UserController extends Controller
         }
         
         try {
+            if (!$this->canAccessUserRole($request, (string) $request->role)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'يمكنك إنشاء حسابات الكاشير فقط',
+                ], 403);
+            }
             $user = User::create([
                 'username' => $request->username,
                 'password' => Hash::make($request->password),
+                'avatar_url' => $request->input('avatar_url'),
                 'role' => $request->role,
                 'approval_status' => $request->approval_status ?: 'approved',
                 'is_active' => $request->boolean('is_active', true),
@@ -74,6 +95,7 @@ class UserController extends Controller
                     'id' => $user->id,
                     'username' => $user->username,
                     'role' => $user->role,
+                    'avatar_url' => $user->avatar_url,
                 ]
             ], 201);
             
@@ -91,6 +113,9 @@ class UserController extends Controller
      */
     public function update(Request $request, $id)
     {
+        if (!in_array($request->user()?->role, ['admin', 'super_admin'], true)) {
+            return response()->json(['success' => false, 'message' => 'غير مصرح'], 403);
+        }
         $user = User::find($id);
         
         if (!$user) {
@@ -104,6 +129,7 @@ class UserController extends Controller
             'username' => 'sometimes|string|max:50|unique:users,username,' . $id,
             'role' => 'sometimes|in:admin,super_admin,cashier,super_cashier',
             'password' => 'sometimes|string|min:4',
+            'avatar_url' => 'nullable|string|max:200000',
             'approval_status' => 'sometimes|in:approved,pending',
             'is_active' => 'sometimes|boolean',
         ]);
@@ -117,6 +143,18 @@ class UserController extends Controller
         }
         
         try {
+            if (!$this->canAccessUserRole($request, (string) $user->role)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'يمكنك إدارة حسابات الكاشير فقط',
+                ], 403);
+            }
+            if ($request->has('role') && !$this->canAccessUserRole($request, (string) $request->input('role'))) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'لا يمكنك تعيين هذا الدور',
+                ], 403);
+            }
             if ($request->has('is_active') && !$request->boolean('is_active') && strtolower((string) $user->username) === 'admin') {
                 return response()->json([
                     'success' => false,
@@ -124,7 +162,7 @@ class UserController extends Controller
                 ], 400);
             }
 
-            $updateData = $request->only(['username', 'role', 'approval_status', 'is_active']);
+            $updateData = $request->only(['username', 'role', 'avatar_url', 'approval_status', 'is_active']);
             
             // إذا كان هناك كلمة مرور جديدة
             if ($request->has('password') && $request->filled('password')) {
@@ -144,6 +182,7 @@ class UserController extends Controller
                     'id' => $user->id,
                     'username' => $user->username,
                     'role' => $user->role,
+                    'avatar_url' => $user->avatar_url,
                     'approval_status' => $user->approval_status,
                     'is_active' => (bool) ($user->is_active ?? true),
                 ]
@@ -163,6 +202,10 @@ class UserController extends Controller
      */
     public function destroy($id)
     {
+        $actor = request()->user();
+        if (!in_array($actor?->role, ['admin', 'super_admin'], true)) {
+            return response()->json(['success' => false, 'message' => 'غير مصرح'], 403);
+        }
         $user = User::find($id);
         
         if (!$user) {
@@ -172,6 +215,12 @@ class UserController extends Controller
             ], 404);
         }
         
+        if (!$this->canAccessUserRole(request(), (string) $user->role)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'يمكنك حذف حسابات الكاشير فقط',
+            ], 403);
+        }
         // لا يمكن حذف المدير الرئيسي
         $privilegedCount = User::whereIn('role', ['admin', 'super_admin'])->count();
         if (in_array($user->role, ['admin', 'super_admin'], true) && $privilegedCount <= 1) {

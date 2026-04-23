@@ -503,7 +503,7 @@ public function createFromProducts(Request $request)
             $errors[] = "المكون '{$product->name}': الكمية المطلوبة ({$qty}) أكبر من المخزون ({$stock})";
             continue;
         }
-        $unitCost = (float) ($product->cost_price ?? $product->purchase_price ?? 0);
+        $unitCost = (float) $product->costPricePerInventoryPiece();
         $totalCost += $unitCost * $qty;
         $ingredientsData[] = [
             'product' => $product,
@@ -911,7 +911,7 @@ public function getMealsDetailedReport(Request $request)
                     $product = $pi->product;
                     if (!$product) continue;
                     $qty = (float) $pi->quantity_used;
-                    $unitCost = (float) ($product->cost_price ?? $product->purchase_price ?? 0);
+                    $unitCost = (float) $product->costPricePerInventoryPiece();
                     $ingTotal = $qty * $unitCost;
                     $totalIngredientsCost += $ingTotal;
                     $ingredientsList[] = [
