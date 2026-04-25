@@ -8,6 +8,14 @@ return new class extends Migration
 {
     public function up(): void
     {
+        if (!Schema::hasTable('purchases') || !Schema::hasTable('suppliers')) {
+            return;
+        }
+
+        if (Schema::hasColumn('purchases', 'supplier_id')) {
+            return;
+        }
+
         Schema::table('purchases', function (Blueprint $table) {
             $table->foreignId('supplier_id')->nullable()->after('invoice_number')->constrained('suppliers')->onDelete('set null');
         });
@@ -15,8 +23,16 @@ return new class extends Migration
 
     public function down(): void
     {
+        if (!Schema::hasTable('purchases') || !Schema::hasColumn('purchases', 'supplier_id')) {
+            return;
+        }
+
         Schema::table('purchases', function (Blueprint $table) {
-            $table->dropForeign(['supplier_id']);
+            try {
+                $table->dropForeign(['supplier_id']);
+            } catch (\Throwable $e) {
+                // قد لا يكون القيد موجوداً في بعض البيئات
+            }
             $table->dropColumn('supplier_id');
         });
     }

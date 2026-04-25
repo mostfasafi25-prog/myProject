@@ -74,10 +74,10 @@ class OrderController extends Controller
             foreach ($request->items as $item) {
                 $product = null;
                 if (!empty($item['product_id'])) {
-                    $product = Product::find($item['product_id']);
+                    $product = Product::whereKey($item['product_id'])->lockForUpdate()->first();
                 }
                 if (!$product && !empty($item['name'])) {
-                    $product = Product::where('name', $item['name'])->first();
+                    $product = Product::where('name', $item['name'])->lockForUpdate()->first();
                 }
                 if (!$product) {
                     $fallbackName = !empty($item['name']) ? $item['name'] : ('POS Item ' . ($item['product_id'] ?? 'unknown'));
@@ -110,6 +110,22 @@ class OrderController extends Controller
                 ));
                 $requestedQty = (float) ($item['quantity'] ?? 0);
                 $stockDeductQty = $product->saleQuantityToInventoryPieces($requestedQty, $saleType);
+
+                $availableStock = (float) ($product->stock ?? 0);
+                if ($stockDeductQty > $availableStock + 0.00001) {
+                    DB::rollBack();
+                    return response()->json([
+                        'success' => false,
+                        'message' => "لا يمكن إتمام البيع: الكمية غير كافية للصنف {$product->name}. المتاح {$availableStock}",
+                        'error_code' => 'INSUFFICIENT_STOCK',
+                        'data' => [
+                            'product_id' => $product->id,
+                            'product_name' => $product->name,
+                            'requested_quantity' => round($stockDeductQty, 4),
+                            'available_quantity' => round($availableStock, 4),
+                        ],
+                    ], 422);
+                }
 
                 // تكلفة وحدة البيع تتوافق مع نوع السطر (شريط/حبة وليس دائماً سعر العلبة)
                 $unitCost = $product->unitCostForSaleType($saleType);
