@@ -37,7 +37,7 @@ const LINKS = [
   {
     title: "الأقسام",
     desc: "من الخادم — أقسام المبيعات",
-    path: "/admin/categories",
+    path: "/admin/inventory?section=categories",
     icon: <Category sx={{ fontSize: 36 }} />,
     color: "secondary",
   },

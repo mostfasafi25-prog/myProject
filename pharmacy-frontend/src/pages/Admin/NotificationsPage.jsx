@@ -174,43 +174,84 @@ export default function NotificationsPage({ mode, onToggleMode }) {
           )}
         </Stack>
 
-        <Dialog open={Boolean(activeNotification)} onClose={() => setActiveNotification(null)} fullWidth maxWidth="sm">
-          <DialogTitle sx={{ textAlign: "right" }}>
-            <Stack direction="row" alignItems="center" sx={{ gap: 1, flexWrap: "wrap", justifyContent: "flex-end" }}>
-              <span>{activeNotification?.title}</span>
-              {activeNotification?.fromManagement ? (
-                <Chip size="small" color="primary" variant="outlined" label={activeNotification.managementLabel || "إدارة النظام"} />
-              ) : null}
-            </Stack>
-          </DialogTitle>
-          <DialogContent sx={{ textAlign: "right" }}>
-            <Typography variant="body2" color="text.secondary">{activeNotification?.message}</Typography>
-            <Typography sx={{ mt: 1.2 }}>
-              {activeNotification?.details || "لا توجد تفاصيل إضافية"}
+        <Dialog 
+  open={Boolean(activeNotification)} 
+  onClose={() => setActiveNotification(null)} 
+  fullWidth 
+  maxWidth="sm"
+  PaperProps={{ sx: { borderRadius: 4 } }}
+>
+  <DialogTitle sx={{ borderBottom: '1px solid #eee', mb: 1, pb: 1 }}>
+    <Stack direction="row" alignItems="center" justifyContent="space-between">
+      <Typography fontWeight={800} variant="h6">تفاصيل الإشعار</Typography>
+      {activeNotification?.fromManagement && (
+        <Chip 
+          size="small" 
+          color="primary" 
+          label={activeNotification.managementLabel || "إدارة النظام"} 
+          sx={{ fontWeight: 700 }}
+        />
+      )}
+    </Stack>
+  </DialogTitle>
+
+  <DialogContent>
+    <Stack spacing={2} sx={{ mt: 1 }}>
+      {/* جدول البيانات البسيط */}
+      <Box sx={{ border: '1px solid #eee', borderRadius: 3, overflow: 'hidden' }}>
+        {[
+          { label: "العنوان", value: activeNotification?.title },
+          { label: "الرسالة", value: activeNotification?.message },
+          { label: "التفاصيل", value: activeNotification?.details || "---" },
+          { 
+            label: "التاريخ", 
+            value: activeNotification?.createdAt ? new Date(activeNotification.createdAt).toLocaleString("ar-SA") : "-" 
+          },
+        ].map((row, index) => (
+          <Box 
+            key={index} 
+            sx={{ 
+              display: 'flex', 
+              p: 2, 
+              borderBottom: index !== 3 ? '1px solid #f5f5f5' : 'none',
+              bgcolor: index % 2 === 0 ? '#fff' : '#fafafa'
+            }}
+          >
+            <Typography variant="body2" sx={{ width: '30%', color: 'text.secondary', fontWeight: 700 }}>
+              {row.label}
             </Typography>
-            <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: "block" }}>
-              التاريخ: {activeNotification?.createdAt ? new Date(activeNotification.createdAt).toLocaleString("en-GB") : "-"}
+            <Typography variant="body2" sx={{ width: '70%', fontWeight: 600 }}>
+              {row.value}
             </Typography>
-          </DialogContent>
-          <DialogActions sx={{ px: 3, pb: 2 }}>
-            <Button color="error" onClick={() => {
-              if (activeNotification) {
-                const next = notifications.map((x) =>
-                  x.id === activeNotification.id
-                    ? { ...x, deletedBy: Array.from(new Set([...(Array.isArray(x.deletedBy) ? x.deletedBy : []), currentUsername])) }
-                    : x,
-                );
-                persist(next);
-              }
-              setActiveNotification(null);
-            }}>
-              حذف الإشعار
-            </Button>
-            <Button variant="contained" onClick={() => setActiveNotification(null)}>
-              إغلاق
-            </Button>
-          </DialogActions>
-        </Dialog>
+          </Box>
+        ))}
+      </Box>
+    </Stack>
+  </DialogContent>
+
+  <DialogActions sx={{ p: 3, bgcolor: '#fbfbfb' }}>
+    <Button 
+      color="error" 
+      onClick={() => {
+        if (activeNotification) {
+          const next = notifications.map((x) =>
+            x.id === activeNotification.id
+              ? { ...x, deletedBy: Array.from(new Set([...(Array.isArray(x.deletedBy) ? x.deletedBy : []), currentUsername])) }
+              : x,
+          );
+          persist(next);
+        }
+        setActiveNotification(null);
+      }}
+      sx={{ px: 3 }}
+    >
+      حذف الإشعار
+    </Button>
+    <Button variant="contained" onClick={() => setActiveNotification(null)} sx={{ px: 4, borderRadius: 2 }}>
+      إغلاق
+    </Button>
+  </DialogActions>
+</Dialog>
       </Box>
     </AdminLayout>
   );

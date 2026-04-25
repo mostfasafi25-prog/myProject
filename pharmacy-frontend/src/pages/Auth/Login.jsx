@@ -32,7 +32,6 @@ import {
 import { keyframes } from "@mui/system";
 import { AnimatePresence, motion } from "framer-motion";
 import { useNavigate } from "react-router-dom";
-import Cookies from "universal-cookie";
 import { Axios } from "../../Api/Axios";
 import { PHARMACY_DISPLAY_NAME } from "../../config/appBranding";
 import { SITE_OG_DESCRIPTION } from "../../config/siteSeo";
@@ -47,6 +46,7 @@ import {
   evictLocalBusinessCachesSecondPass,
 } from "../../utils/localStorageEviction";
 import { formatLoginCatchError, loginFailureUserMessage } from "../../utils/formatApiError";
+import { persistAuthTokenInCookie } from "../../utils/authTokenCookie";
 
 const welcomeContainer = {
   hidden: { opacity: 0 },
@@ -81,7 +81,6 @@ export default function Login() {
   const [showPassword, setShowPassword] = useState(false);
   const [welcomeOpen, setWelcomeOpen] = useState(true);
   const navigate = useNavigate();
-  const cookies = new Cookies();
 
   useEffect(() => {
     const t = setTimeout(() => setWelcomeOpen(false), 3400);
@@ -182,7 +181,7 @@ export default function Login() {
         );
         return;
       }
-      cookies.set("token", token, { path: "/" });
+      persistAuthTokenInCookie(token);
       appendUserLoginNotification({ username: user.username, role: user.role });
 
       if (user.role === "admin" || user.role === "super_admin") {

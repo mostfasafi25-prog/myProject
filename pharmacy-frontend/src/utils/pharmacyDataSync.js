@@ -10,9 +10,16 @@ export const SYNC_COLLECTION_KEYS = [
   "adminProducts",
   "salesInvoices",
   "purchaseInvoices",
+  "salesReturns",
   "adminCategories",
   "storeBalance",
+  "adminStaffAccounts",
+  "adminUsersLocal",
+  "pharmacySecurityAuditLog_v1",
   "pharmacyDebtCustomers_v1",
+  "pharmacyDebtCustomerLedger_v1",
+  "cashierShiftActivityLog",
+  "pharmacyStocktakeSession_v1",
   "cashierCartDrafts_v1",
 ];
 

@@ -1,23 +1,18 @@
 /** زبائن بيع آجل — رصيد = المبلغ المستحق على الزبون */
+import { readCriticalJson, writeCriticalJson } from "./criticalSyncStorage";
+
 const KEY = "pharmacyDebtCustomers_v1";
 const LEDGER_KEY = "pharmacyDebtCustomerLedger_v1";
 const MAX_LEDGER_ROWS = 2000;
 
 function readLedgerAll() {
-  try {
-    const raw = JSON.parse(localStorage.getItem(LEDGER_KEY));
-    return Array.isArray(raw) ? raw : [];
-  } catch {
-    return [];
-  }
+  const raw = readCriticalJson(LEDGER_KEY, []);
+  return Array.isArray(raw) ? raw : [];
 }
 
 function writeLedgerAll(rows) {
-  try {
-    localStorage.setItem(LEDGER_KEY, JSON.stringify(rows.slice(0, MAX_LEDGER_ROWS)));
-  } catch {
-    localStorage.setItem(LEDGER_KEY, JSON.stringify(rows.slice(0, 500)));
-  }
+  const trimmed = Array.isArray(rows) ? rows.slice(0, MAX_LEDGER_ROWS) : [];
+  writeCriticalJson(LEDGER_KEY, trimmed);
 }
 
 /**
@@ -58,16 +53,12 @@ export function readDebtLedgerForCustomer(customerId) {
 }
 
 export function readDebtCustomers() {
-  try {
-    const raw = JSON.parse(localStorage.getItem(KEY));
-    return Array.isArray(raw) ? raw : [];
-  } catch {
-    return [];
-  }
+  const raw = readCriticalJson(KEY, []);
+  return Array.isArray(raw) ? raw : [];
 }
 
 function writeAll(list) {
-  localStorage.setItem(KEY, JSON.stringify(list));
+  writeCriticalJson(KEY, list);
 }
 
 export function upsertDebtCustomer(row) {

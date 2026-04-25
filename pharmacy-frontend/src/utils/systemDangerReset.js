@@ -1,4 +1,3 @@
-import { buildInitialDemoProducts, buildInitialDemoCategories } from "../data/pharmacyDemoCatalog";
 import { appendAudit, clearAuditLog } from "./auditLog";
 import { notifyStoreBalanceChanged } from "./storeBalanceSync";
 import { clearShiftActivityLog } from "./shiftActivityLog";
@@ -121,9 +120,9 @@ export function applySystemDangerResets(flags, meta = {}) {
   }
 
   if (flags.catalog) {
-    localStorage.setItem(PRODUCTS_KEY, JSON.stringify(buildInitialDemoProducts()));
-    localStorage.setItem(CATEGORIES_KEY, JSON.stringify(buildInitialDemoCategories()));
-    done.push("إعادة الأقسام والأصناف للوضع التجريبي");
+    localStorage.setItem(PRODUCTS_KEY, JSON.stringify([]));
+    localStorage.setItem(CATEGORIES_KEY, JSON.stringify([]));
+    done.push("تصفير الأقسام والأصناف المحلية");
   }
 
   if (flags.shiftLog) {

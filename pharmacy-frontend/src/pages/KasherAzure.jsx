@@ -243,6 +243,7 @@ export default function KasherAzure() {
   const handleCheckout = async () => {
     if (!cartItems.length) return;
     try {
+      const pm = paymentMethod === "app" ? "app" : "cash";
       await axios.post(`${API_BASE_URL}/orders/sell-ready-meal`, {
         items: cartItems.map((item) => ({
           meal_id: item.mealId,
@@ -258,7 +259,9 @@ export default function KasherAzure() {
             })) || [],
         })),
         paid_amount: subtotal,
-        payment_method: paymentMethod,
+        payment_method: pm,
+        cash_amount: pm === "app" ? 0 : subtotal,
+        app_amount: pm === "app" ? subtotal : 0,
       });
       showAppToast("تم تأكيد الطلب بنجاح", "success");
       setCartItems([]);

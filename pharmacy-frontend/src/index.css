@@ -303,6 +303,27 @@ body {
   font-family: inherit !important;
 }
 
+/* توحيد المسافة بين الأيقونة والنص عبر مكونات MUI */
+.MuiButton-root .MuiButton-startIcon {
+  margin-inline-start: 0 !important;
+  margin-inline-end: 3px !important;
+}
+
+.MuiButton-root .MuiButton-endIcon {
+  margin-inline-start: 3px !important;
+  margin-inline-end: 0 !important;
+}
+
+.MuiChip-root .MuiChip-icon {
+  margin-inline-start: 0 !important;
+  margin-inline-end: 3px !important;
+}
+
+.MuiAlert-root .MuiAlert-icon {
+  margin-inline-start: 0 !important;
+  margin-inline-end: 3px !important;
+}
+
 .MuiInputBase-root,
 .MuiInputBase-input,
 .MuiInputLabel-root,
@@ -406,6 +427,10 @@ body {
 }
 
 /* SweetAlert2 — ثيم الصيدلية (خط عربي، زوايا ناعمة، ألوان خضراء) */
+.swal2-container {
+  z-index: 20000 !important;
+}
+
 .app-swal-popup {
   border-radius: 18px !important;
   padding: 1.35rem 1.1rem 1.45rem !important;

@@ -295,7 +295,7 @@ export default function SalesManagement() {
     try {
       setLoading(true);
       const res = await axios.get(`${API_BASE_URL}/products`, {
-        params: { per_page: 500, scope: "purchase" },
+        params: { per_page: 100, scope: "purchase" },
       });
       if (res.data?.success) setProducts(res.data.data || res.data?.data || []);
       else setProducts([]);

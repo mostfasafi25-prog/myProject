@@ -37,12 +37,21 @@ export function persistSalesCategories(rows) {
   window.dispatchEvent(new CustomEvent(PHARMACY_ADMIN_CATEGORIES_SYNCED));
 }
 
-/** جلب أقسام المبيعات من الـ API وتحديث التخزين المحلي */
+/** جلب أقسام الصيدلية من الـ API وتحديث التخزين المحلي */
 export async function fetchAndPersistSalesCategories() {
   try {
-    const { data } = await Axios.get("categories/main", { params: { scope: "sales" } });
-    if (!data?.success || !Array.isArray(data.data) || !data.data.length) return null;
-    const rows = data.data.map((c) => ({
+    let payload = null;
+    const purchaseRes = await Axios.get("categories/main", { params: { scope: "purchase" } });
+    if (purchaseRes?.data?.success && Array.isArray(purchaseRes.data.data) && purchaseRes.data.data.length) {
+      payload = purchaseRes.data.data;
+    } else {
+      const salesRes = await Axios.get("categories/main", { params: { scope: "sales" } });
+      if (salesRes?.data?.success && Array.isArray(salesRes.data.data) && salesRes.data.data.length) {
+        payload = salesRes.data.data;
+      }
+    }
+    if (!Array.isArray(payload) || !payload.length) return null;
+    const rows = payload.map((c) => ({
       id: c.id,
       name: c.name,
       is_active: c.is_active,

@@ -3,9 +3,10 @@ import { safeLocalStorageSetItem, safeLocalStorageSetJsonWithDataUrlFallback } f
 const PROFILE_EXTRAS_KEY = "staffProfileExtras";
 /** صور الملف الشخصي للعرض فقط خلال الجلسة — لا تُكتب في localStorage (تجنباً لامتلاء المساحة) */
 const SESSION_AVATAR_PREFIX = "pharmacy_sess_avatar:";
+const SESSION_USER_KEY = "pharmacy_session_user_v1";
 
 /** حقول الجلسة فقط — بدون صور base64 (تسبب QuotaExceededError في localStorage). */
-const SESSION_USER_KEYS = ["id", "username", "role", "approval_status", "is_active", "name", "email"];
+const SESSION_USER_KEYS = ["id", "username", "role", "approval_status", "is_active", "name", "email", "avatar_url"];
 
 export function sanitizeUserForLocalStorage(user) {
   if (!user || typeof user !== "object") return {};
@@ -33,13 +34,31 @@ export function persistSessionUser(user) {
     approval_status: lean.approval_status,
     is_active: lean.is_active,
   });
-  const full = JSON.stringify(lean);
-  const r1 = safeLocalStorageSetItem("user", full);
-  if (r1.ok) return { ok: true };
+  try {
+    sessionStorage.setItem(SESSION_USER_KEY, JSON.stringify(lean));
+  } catch {
+    // ignore and continue to localStorage fallback
+  }
+  const r1 = safeLocalStorageSetItem("user", minimalJson);
+  if (r1.ok) return { ok: true, usedMinimal: true };
   if (!r1.quota) return { ok: false, error: r1.error };
   const r2 = safeLocalStorageSetItem("user", minimalJson);
   if (r2.ok) return { ok: true, usedMinimal: true };
   return { ok: false, error: r2.error };
+}
+
+export function readSessionUser() {
+  try {
+    const raw = JSON.parse(sessionStorage.getItem(SESSION_USER_KEY));
+    if (raw && typeof raw === "object") return raw;
+  } catch {
+    // ignore
+  }
+  try {
+    return JSON.parse(localStorage.getItem("user")) || null;
+  } catch {
+    return null;
+  }
 }
 
 export function readStaffProfileExtras() {
@@ -88,10 +107,15 @@ export function mergeUserWithProfileExtras(user) {
     sessionAvatar = null;
   }
   const ex = readStaffProfileExtras()[user.username];
+  const backendAvatar = typeof user.avatar_url === "string" ? user.avatar_url : "";
   return {
     ...user,
     ...(ex?.name ? { name: ex.name } : {}),
-    ...(sessionAvatar ? { avatarDataUrl: sessionAvatar } : {}),
+    ...(sessionAvatar
+      ? { avatarDataUrl: sessionAvatar }
+      : backendAvatar
+        ? { avatarDataUrl: backendAvatar, avatar: backendAvatar }
+        : {}),
   };
 }
 

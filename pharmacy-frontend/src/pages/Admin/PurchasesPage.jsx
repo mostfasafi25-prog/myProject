@@ -1,4 +1,4 @@
-import { Add, DeleteOutline, LocalShipping, ReceiptLong, Storefront } from "@mui/icons-material";
+import { Add, Close, DeleteOutline, LocalShipping, ReceiptLong, Storefront } from "@mui/icons-material";
 import {
   Alert,
   alpha,
@@ -31,24 +31,22 @@ import {
   Typography,
   useTheme,
 } from "@mui/material";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
+import { Axios } from "../../Api/Axios";
 import FilterBarRow from "../../components/FilterBarRow";
 import { adminPageContainerSx, adminPageSubtitleSx } from "../../utils/adminPageLayout";
 import { negativeAmountTextSx } from "../../utils/negativeAmountStyle";
 import AdminLayout from "./AdminLayout";
 import { confirmApp, showAppToast } from "../../utils/appToast";
 import { productDisplayName } from "../../utils/productDisplayName";
-import { getStoredUser, isSuperCashier, purchaserDisplayName } from "../../utils/userRoles";
+import { normalizeSaleOptions, productHasSaleOptions } from "../../utils/productSaleOptions";
+import { getStoredUser, isAdmin, isSuperCashier, purchaserDisplayName } from "../../utils/userRoles";
 import { appendAudit } from "../../utils/auditLog";
-import { debitStoreBalanceForPurchase, notifyStoreBalanceChanged } from "../../utils/storeBalanceSync";
 import { fetchAndPersistSalesCategories, PHARMACY_ADMIN_CATEGORIES_SYNCED } from "../../utils/backendCategoriesSync";
 
 const ROWS_PER_PAGE = 5;
-const PURCHASE_INVOICES_KEY = "purchaseInvoices";
-const PRODUCTS_KEY = "adminProducts";
-const STORE_BALANCE_KEY = "storeBalance";
 const NOTIFICATIONS_KEY = "systemNotifications";
-const ADMIN_CATEGORIES_KEY = "adminCategories";
 
 function normalizeOneDecimal(value) {
   const cleaned = String(value ?? "").replace(/[^\d.]/g, "");
@@ -65,16 +63,160 @@ const saleTypeLabelMap = {
   sachet: "كيس",
 };
 
+const purchaseDialogPaperSx = { borderRadius: 3, overflow: "hidden" };
+const purchaseDialogTitleSx = {
+  position: "relative",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  minHeight: 48,
+  px: { xs: 1, sm: 2 },
+  pt: { xs: 2, md: 2.5 },
+  pb: 1.25,
+  borderBottom: "1px solid",
+  borderColor: "divider",
+};
+const purchaseDialogCloseBtnSx = {
+  position: "absolute",
+  insetInlineStart: 8,
+  top: "50%",
+  transform: "translateY(-50%)",
+};
+
 function formatOneDecimal(n) {
   const x = Number(n);
   if (Number.isNaN(x)) return "0.0";
   return x.toFixed(1);
 }
 
+async function fetchAllPurchasesApi(http) {
+  const all = [];
+  let page = 1;
+  let lastPage = 1;
+  for (let g = 0; g < 40; g += 1) {
+    const { data } = await http.get("purchases", { params: { per_page: 100, page } });
+    if (!data?.success || !Array.isArray(data.data)) break;
+    all.push(...data.data);
+    lastPage = Number(data.pagination?.last_page || 1);
+    if (page >= lastPage) break;
+    page += 1;
+  }
+  return all;
+}
+
+async function fetchAllProductsForPurchaseCatalog(http) {
+  const all = [];
+  let page = 1;
+  let lastPage = 1;
+  for (let g = 0; g < 40; g += 1) {
+    const { data } = await http.get("products", {
+      params: { per_page: 100, page, include_inactive: 1, scope: "purchase" },
+    });
+    if (!data?.success || !Array.isArray(data.data)) break;
+    all.push(...data.data);
+    lastPage = Number(data.pagination?.last_page || 1);
+    if (page >= lastPage) break;
+    page += 1;
+  }
+  return all;
+}
+
+async function fetchAllSuppliersApi(http) {
+  const all = [];
+  let page = 1;
+  let lastPage = 1;
+  for (let g = 0; g < 20; g += 1) {
+    const { data } = await http.get("suppliers", { params: { per_page: 100, page } });
+    if (!data?.success || !Array.isArray(data.data)) break;
+    all.push(...data.data);
+    lastPage = Number(data.pagination?.last_page || 1);
+    if (page >= lastPage) break;
+    page += 1;
+  }
+  return all;
+}
+
+function mapApiPurchaseToDisplayRow(p) {
+  const inv = p.invoice_number || `P-${p.id}`;
+  const supplierName = p.supplier?.name || "—";
+  const statusAr =
+    p.status === "returned"
+      ? "مرجع"
+      : p.status === "pending" || p.status === "partially_paid"
+        ? "مراجعة"
+        : p.status === "cancelled"
+          ? "ملغى"
+          : "مكتمل";
+  const items = (p.items || []).map((it) => ({
+    productId: it.product_id,
+    name: it.product_name,
+    qtyPaid: Number(it.quantity),
+    qtyBonus: 0,
+    qty: Number(it.quantity),
+    unitPrice: Number(it.unit_price),
+    total: Number(it.total_price),
+    category: "—",
+    saleType: "strip",
+  }));
+  const purchasedAt = p.purchase_date
+    ? new Date(p.purchase_date).toISOString()
+    : p.created_at
+      ? new Date(p.created_at).toISOString()
+      : new Date().toISOString();
+  return {
+    id: inv,
+    apiId: p.id,
+    purchasedBy: "—",
+    purchasedByUsername: "",
+    purchasedByRole: "admin",
+    supplier: supplierName,
+    supplierId: p.supplier_id,
+    status: statusAr,
+    statusRaw: p.status,
+    paymentMethod: p.payment_method || "cash",
+    purchasedAt,
+    total: Number(p.paid_amount ?? p.grand_total ?? p.total_amount ?? 0),
+    treasuryDebit: {
+      total: Number(p.paid_amount ?? 0),
+      cash: Number(p.cash_amount ?? p.paid_amount ?? 0),
+      app: Number(p.app_amount ?? 0),
+    },
+    items,
+  };
+}
+
+function mapApiProductToCatalogRow(row) {
+  const categoryName = String(row?.categories?.[0]?.name || row?.category?.name || "أصناف متنوعة");
+  const stock = Number(row?.stock || 0);
+  const salePrice = Number(row?.price || 0);
+  const cost = Number(row?.purchase_price ?? row?.cost_price ?? 0);
+  return {
+    id: Number(row?.id),
+    name: String(row?.name || "صنف"),
+    variantLabel: "",
+    category: categoryName,
+    saleType: "strip",
+    qty: stock,
+    min: Number(row?.reorder_point ?? row?.min_stock ?? 0),
+    costPrice: cost,
+    price: salePrice,
+    active: row?.is_active !== false,
+    image: String(row?.image_url || ""),
+    saleOptions: Array.isArray(row?.sale_options)
+      ? row.sale_options
+      : Array.isArray(row?.saleOptions)
+        ? row.saleOptions
+        : undefined,
+  };
+}
+
 export default function PurchasesPage({ mode, onToggleMode }) {
   const theme = useTheme();
+  const location = useLocation();
+  const navigate = useNavigate();
   const superCashier = isSuperCashier(getStoredUser());
   const currentUser = getStoredUser();
+  const strictTreasuryGuard = isAdmin(currentUser);
   const [catalogCatsTick, setCatalogCatsTick] = useState(0);
   useEffect(() => {
     const bump = () => setCatalogCatsTick((t) => t + 1);
@@ -91,23 +233,54 @@ export default function PurchasesPage({ mode, onToggleMode }) {
   const [page, setPage] = useState(1);
   const [purchaseSearch, setPurchaseSearch] = useState("");
   const [dateFilter, setDateFilter] = useState("all");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [detailPurchase, setDetailPurchase] = useState(null);
-  const [listVersion, setListVersion] = useState(0);
+  const [dataTick, setDataTick] = useState(0);
+  const [purchaseRows, setPurchaseRows] = useState([]);
+  const [catalogProducts, setCatalogProducts] = useState([]);
+  const [supplierList, setSupplierList] = useState([]);
+  const [dataLoading, setDataLoading] = useState(true);
+  const [purchaseSubmitting, setPurchaseSubmitting] = useState(false);
+  const purchaseSubmitGuardRef = useRef(false);
   const [newPurchaseOpen, setNewPurchaseOpen] = useState(false);
   const [catalogSearch, setCatalogSearch] = useState("");
   const [catalogCategory, setCatalogCategory] = useState("all");
   const [purchaseLines, setPurchaseLines] = useState([]);
+  const [selectedSupplierId, setSelectedSupplierId] = useState("");
+  const [purchasePaymentMethod, setPurchasePaymentMethod] = useState("cash");
   const [newPurchaseError, setNewPurchaseError] = useState("");
-  const purchaseRows = useMemo(() => {
-    try {
-      const raw = JSON.parse(localStorage.getItem(PURCHASE_INVOICES_KEY));
-      if (Array.isArray(raw) && raw.length) return raw;
-    } catch {
-      // ignore malformed storage
-    }
-    return [];
-  }, [listVersion]);
+  const [treasuryBalance, setTreasuryBalance] = useState(0);
+  const [printPurchase, setPrintPurchase] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setDataLoading(true);
+      try {
+        const [rawPurchases, rawProducts, rawSuppliers] = await Promise.all([
+          fetchAllPurchasesApi(Axios),
+          fetchAllProductsForPurchaseCatalog(Axios),
+          fetchAllSuppliersApi(Axios),
+        ]);
+        if (cancelled) return;
+        setPurchaseRows(rawPurchases.map(mapApiPurchaseToDisplayRow));
+        setCatalogProducts(rawProducts.map(mapApiProductToCatalogRow).filter((p) => Number.isFinite(p.id)));
+        setSupplierList(Array.isArray(rawSuppliers) ? rawSuppliers : []);
+      } catch (e) {
+        console.warn("[PurchasesPage] load", e);
+        if (!cancelled) {
+          showAppToast("تعذر تحميل المشتريات أو الأصناف من الخادم", "error");
+        }
+      } finally {
+        if (!cancelled) setDataLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [dataTick]);
 
   const purchaseStats = useMemo(() => {
     const rows = purchaseRows;
@@ -116,17 +289,27 @@ export default function PurchasesPage({ mode, onToggleMode }) {
     const returned = rows.filter((r) => String(r.status || "") === "مرجع").length;
     return { count: rows.length, suppliers: suppliers.size, review, returned };
   }, [purchaseRows]);
+  const supplierOptions = useMemo(() => {
+    const list = Array.isArray(supplierList) ? supplierList : [];
+    return list
+      .filter((s) => s && s.is_active !== false)
+      .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ar"));
+  }, [supplierList]);
 
   const processPurchaseReturn = useCallback(
     async (row) => {
-      if (!row?.id) return;
-      if (String(row.status || "") === "مرجع") {
+      const apiId = row?.apiId;
+      if (!apiId) {
+        showAppToast("لا يمكن إرجاع هذه القسيمة — سجّل المشتريات من الخادم فقط", "warning");
+        return;
+      }
+      if (String(row.status || "") === "مرجع" || row.statusRaw === "returned") {
         showAppToast("هذه القسيمة مُرجَعة مسبقًا", "info");
         return;
       }
       const msg = superCashier
-        ? `تأكيد إرجاع قسيمة الشراء ${row.id}؟ سيتم عكس الكميات من المخزون (يُحدَّث الصندوق من النظام دون عرض المبلغ هنا).`
-        : `تأكيد إرجاع قسيمة الشراء ${row.id}؟ سيتم خصم الكميات من المخزون وإعادة المبلغ للصندوق.`;
+        ? `تأكيد إرجاع قسيمة الشراء ${row.id}؟ سيتم عكس الكميات والخزنة عبر السيرفر.`
+        : `تأكيد إرجاع قسيمة الشراء ${row.id}؟ سيتم عكس الكميات من المخزون وإعادة المبلغ للخزنة حسب النظام.`;
       const ok = await confirmApp({
         title: "إرجاع قسيمة الشراء",
         text: msg,
@@ -135,142 +318,83 @@ export default function PurchasesPage({ mode, onToggleMode }) {
       });
       if (!ok) return;
       try {
-        const list = JSON.parse(localStorage.getItem(PURCHASE_INVOICES_KEY));
-        if (!Array.isArray(list)) throw new Error("no list");
-        const idx = list.findIndex((p) => p.id === row.id);
-        if (idx < 0) throw new Error("not found");
-        const inv = list[idx];
-        if (String(inv.status || "") === "مرجع") return;
-
-        const productsRaw = localStorage.getItem(PRODUCTS_KEY);
-        let products = [];
-        try {
-          const parsed = JSON.parse(productsRaw || "[]");
-          products = Array.isArray(parsed) ? parsed : [];
-        } catch {
-          products = [];
+        const { data } = await Axios.post(`purchases/${apiId}/full-return`, {});
+        if (!data?.success) {
+          showAppToast(data?.message || "تعذر إرجاع القسيمة", "error");
+          return;
         }
-        const nextProducts = products.map((p) => {
-          const line = (Array.isArray(inv.items) ? inv.items : []).find((it) => {
-            const pid = Number(it.productId);
-            if (Number.isFinite(pid) && pid > 0 && Number(p.id) === pid) return true;
-            if (String(it.name || "").trim() === productDisplayName(p)) return true;
-            if (
-              !String((it.variantLabel ?? "").trim()) &&
-              String(it.name || "").trim() === String(p.name || "").trim()
-            )
-              return true;
-            return false;
-          });
-          if (!line) return p;
-          const q = Number(line.qty ?? line.qtyPaid ?? 0) + Number(line.qtyBonus ?? 0);
-          if (!q) return p;
-          const newQty = Math.max(0, Number((Number(p.qty || 0) - q).toFixed(1)));
-          return { ...p, qty: newQty };
-        });
-        localStorage.setItem(PRODUCTS_KEY, JSON.stringify(nextProducts));
-
-        let balance = { total: 0, cash: 0, app: 0 };
-        try {
-          const parsed = JSON.parse(localStorage.getItem(STORE_BALANCE_KEY));
-          if (parsed && typeof parsed === "object") {
-            balance = {
-              total: Number(parsed.total || 0),
-              cash: Number(parsed.cash || 0),
-              app: Number(parsed.app || 0),
-            };
-          }
-        } catch {
-          // ignore
-        }
-        const refundTotal = Number(inv.total || 0);
-        const td = inv.treasuryDebit;
-        let refundCash = refundTotal;
-        let refundApp = 0;
-        if (td && typeof td === "object") {
-          refundCash = Number(td.cash || 0);
-          refundApp = Number(td.app || 0);
-          const sum = refundCash + refundApp;
-          if (sum <= 0 && refundTotal > 0) {
-            refundCash = refundTotal;
-            refundApp = 0;
-          } else if (Math.abs(sum - refundTotal) > 0.05 && sum > 0) {
-            const k = refundTotal / sum;
-            refundCash = Number((refundCash * k).toFixed(2));
-            refundApp = Number((refundTotal - refundCash).toFixed(2));
-          }
-        }
-        const nextBal = {
-          ...balance,
-          total: Number((balance.total + refundTotal).toFixed(2)),
-          cash: Number((balance.cash + refundCash).toFixed(2)),
-          app: Number((balance.app + refundApp).toFixed(2)),
-          lastOperation: "purchase_return",
-          updatedAt: new Date().toISOString(),
-        };
-        localStorage.setItem(STORE_BALANCE_KEY, JSON.stringify(nextBal));
-        notifyStoreBalanceChanged();
-
-        list[idx] = {
-          ...inv,
-          status: "مرجع",
-          returnedAt: new Date().toISOString(),
-          returnedBy: purchaserDisplayName(currentUser),
-          refundTreasury: {
-            total: refundTotal,
-            cash: refundCash,
-            app: refundApp,
-          },
-        };
-        localStorage.setItem(PURCHASE_INVOICES_KEY, JSON.stringify(list));
         appendAudit({
           action: "purchase_return",
           details: JSON.stringify({
-            purchaseId: inv.id,
-            total: refundTotal,
-            cash: refundCash,
-            app: refundApp,
-            items: (inv.items || []).length,
+            purchaseId: apiId,
+            invoice: row.id,
           }),
           username: currentUser?.username || "",
           role: currentUser?.role || "",
         });
-        setListVersion((v) => v + 1);
+        setDataTick((t) => t + 1);
         setDetailPurchase(null);
-        showAppToast(
-          superCashier ? "تم إرجاع القسيمة وتحديث المخزون" : "تم إرجاع القسيمة وتحديث المخزون والصندوق",
-          "success",
-        );
-      } catch {
-        showAppToast("تعذر إرجاع القسيمة", "error");
+        showAppToast("تم إرجاع القسيمة عبر الخادم", "success");
+      } catch (e) {
+        showAppToast(e?.response?.data?.message || "تعذر إرجاع القسيمة", "error");
       }
     },
     [currentUser, superCashier],
   );
-  const filteredRows = useMemo(() => {
-    const q = purchaseSearch.trim().toLowerCase();
-    const now = Date.now();
-    return purchaseRows
-      .filter((row) => {
-        const matchesSearch =
-          !q ||
-          String(row.id).toLowerCase().includes(q) ||
-          String(row.purchasedBy || "").toLowerCase().includes(q) ||
-          String(row.supplier || "").toLowerCase().includes(q);
-        const matchesStatus = statusFilter === "all" || String(row.status || "مكتمل") === statusFilter;
-        if (dateFilter === "all") return matchesSearch && matchesStatus;
-        const atMs = new Date(row.purchasedAt || 0).getTime();
-        if (!atMs) return false;
-        const diffMs = now - atMs;
-        const dayMs = 24 * 60 * 60 * 1000;
-        const matchesDate =
-          (dateFilter === "today" && diffMs <= dayMs) ||
-          (dateFilter === "7d" && diffMs <= 7 * dayMs) ||
-          (dateFilter === "30d" && diffMs <= 30 * dayMs);
-        return matchesSearch && matchesStatus && matchesDate;
-      })
-      .sort((a, b) => new Date(b.purchasedAt || 0).getTime() - new Date(a.purchasedAt || 0).getTime());
-  }, [purchaseRows, purchaseSearch, dateFilter, statusFilter]);
+
+
+const filteredRows = useMemo(() => {
+  const q = purchaseSearch.trim().toLowerCase();
+  const now = Date.now();
+  return purchaseRows
+    .filter((row) => {
+      // بحث شامل في كل الحقول
+      let matchesSearch = !q;
+      if (!matchesSearch && q) {
+        // البحث في رقم الفاتورة
+        matchesSearch = matchesSearch || String(row.id || "").toLowerCase().includes(q);
+        // البحث في اسم المورد
+        matchesSearch = matchesSearch || String(row.supplier || "").toLowerCase().includes(q);
+        // البحث في اسم المنفذ (البائع)
+        matchesSearch = matchesSearch || String(row.purchasedBy || "").toLowerCase().includes(q);
+        // البحث في الأصناف (المنتجات)
+        if (Array.isArray(row.items)) {
+          matchesSearch = matchesSearch || row.items.some(item => 
+            String(item.name || "").toLowerCase().includes(q)
+          );
+        }
+        // البحث في الحالة
+        matchesSearch = matchesSearch || String(row.status || "").toLowerCase().includes(q);
+        // البحث في طريقة الدفع
+        matchesSearch = matchesSearch || String(row.paymentMethod || "").toLowerCase().includes(q);
+        // البحث في التاريخ
+        if (row.purchasedAt) {
+          const dateStr = new Date(row.purchasedAt).toLocaleDateString("ar-EG");
+          matchesSearch = matchesSearch || dateStr.includes(q);
+        }
+      }
+      
+      const matchesStatus = statusFilter === "all" || String(row.status || "مكتمل") === statusFilter;
+      const rowMs = new Date(row.purchasedAt || 0).getTime();
+      const fromMs = fromDate ? new Date(`${fromDate}T00:00:00`).getTime() : 0;
+      const toMs = toDate ? new Date(`${toDate}T23:59:59`).getTime() : 0;
+      const matchesRange =
+        (!fromMs || rowMs >= fromMs) &&
+        (!toMs || rowMs <= toMs);
+      if (!matchesRange) return false;
+      if (dateFilter === "all") return matchesSearch && matchesStatus;
+      const atMs = new Date(row.purchasedAt || 0).getTime();
+      if (!atMs) return false;
+      const diffMs = now - atMs;
+      const dayMs = 24 * 60 * 60 * 1000;
+      const matchesDate =
+        (dateFilter === "today" && diffMs <= dayMs) ||
+        (dateFilter === "7d" && diffMs <= 7 * dayMs) ||
+        (dateFilter === "30d" && diffMs <= 30 * dayMs);
+      return matchesSearch && matchesStatus && matchesDate;
+    })
+    .sort((a, b) => new Date(b.purchasedAt || 0).getTime() - new Date(a.purchasedAt || 0).getTime());
+}, [purchaseRows, purchaseSearch, dateFilter, statusFilter, fromDate, toDate]);
 
   const pageCount = Math.max(1, Math.ceil(filteredRows.length / ROWS_PER_PAGE));
   const safePage = Math.min(page, pageCount);
@@ -279,28 +403,8 @@ export default function PurchasesPage({ mode, onToggleMode }) {
     return filteredRows.slice(start, start + ROWS_PER_PAGE);
   }, [filteredRows, safePage]);
 
-  const catalogProducts = useMemo(() => {
-    try {
-      const raw = JSON.parse(localStorage.getItem(PRODUCTS_KEY));
-      return Array.isArray(raw) ? raw.filter((p) => p.active !== false) : [];
-    } catch {
-      return [];
-    }
-  }, [listVersion, newPurchaseOpen]);
-
   const catalogCategories = useMemo(() => {
     const s = new Set();
-    try {
-      const raw = JSON.parse(localStorage.getItem(ADMIN_CATEGORIES_KEY));
-      if (Array.isArray(raw)) {
-        raw.filter((c) => c.active !== false).forEach((c) => {
-          const n = String(c.name || "").trim();
-          if (n) s.add(n);
-        });
-      }
-    } catch {
-      // ignore
-    }
     catalogProducts.forEach((p) => {
       const c = String(p.category || "").trim();
       if (c) s.add(c);
@@ -325,15 +429,24 @@ export default function PurchasesPage({ mode, onToggleMode }) {
     });
   }, [catalogProducts, catalogSearch, catalogCategory]);
 
-  const newPurchaseTreasury = useMemo(() => {
-    try {
-      const raw = JSON.parse(localStorage.getItem(STORE_BALANCE_KEY));
-      if (raw && typeof raw === "object") return Number(raw.total || 0);
-    } catch {
-      // ignore
-    }
-    return 0;
-  }, [listVersion, newPurchaseOpen]);
+  const newPurchaseTreasury = useMemo(() => Number(treasuryBalance || 0), [treasuryBalance]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await Axios.get("treasury-balance");
+        if (!cancelled && data?.success) {
+          setTreasuryBalance(Number(data?.data?.balance || 0));
+        }
+      } catch {
+        if (!cancelled) setTreasuryBalance(0);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [dataTick, newPurchaseOpen]);
 
   const newPurchaseTotalCost = useMemo(() => {
     let sum = 0;
@@ -349,7 +462,12 @@ export default function PurchasesPage({ mode, onToggleMode }) {
     setCatalogSearch("");
     setCatalogCategory("all");
     setPurchaseLines([]);
+    setSelectedSupplierId(String(supplierOptions[0]?.id || ""));
+    setPurchasePaymentMethod("cash");
     setNewPurchaseError("");
+    setPurchaseSubmitting(false);
+    purchaseSubmitGuardRef.current = false;
+
     setNewPurchaseOpen(true);
   };
 
@@ -365,13 +483,36 @@ export default function PurchasesPage({ mode, onToggleMode }) {
         {
           lineKey: `L-${product.id}-${Date.now()}`,
           productId: product.id,
+          saleOptionId: "",
           paidQty: "1",
           bonusQty: "",
-          unitPrice: String(product.price ?? ""),
+          unitPrice: String(product.costPrice ?? product.price ?? ""),
         },
       ];
     });
   };
+  useEffect(() => {
+    const wantedId = (() => {
+      try {
+        return new URLSearchParams(location.search).get("restock") || "";
+      } catch {
+        return "";
+      }
+    })();
+    if (!wantedId) return;
+    const p = catalogProducts.find((x) => String(x.id) === String(wantedId));
+    if (!p) return;
+    openNewPurchaseDialog();
+    addProductToPurchaseLines(p);
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("restock");
+      const nextQuery = url.searchParams.toString();
+      navigate(`${url.pathname}${nextQuery ? `?${nextQuery}` : ""}${url.hash}`, { replace: true });
+    } catch {
+      // ignore
+    }
+  }, [location.search, catalogProducts]);
 
   const updatePurchaseLine = (lineKey, patch) => {
     setPurchaseLines((prev) => prev.map((l) => (l.lineKey === lineKey ? { ...l, ...patch } : l)));
@@ -381,30 +522,34 @@ export default function PurchasesPage({ mode, onToggleMode }) {
     setPurchaseLines((prev) => prev.filter((l) => l.lineKey !== lineKey));
   };
 
-  const confirmNewPurchase = () => {
+  const confirmNewPurchase = async () => {
+    
+    if (purchaseSubmitGuardRef.current) return;
     setNewPurchaseError("");
+
+    const selectedSupplier = supplierOptions.find((s) => String(s.id) === String(selectedSupplierId));
+    const supplierName = String(selectedSupplier?.name || "").trim();
+    if (!supplierName || !selectedSupplier) {
+      setNewPurchaseError("اختر مورداً من القائمة قبل إتمام عملية الشراء");
+      return;
+    }
     if (!purchaseLines.length) {
       setNewPurchaseError("أضف صنفًا واحدًا على الأقل من القائمة");
       return;
     }
-    let products = [];
-    try {
-      const parsed = JSON.parse(localStorage.getItem(PRODUCTS_KEY));
-      products = Array.isArray(parsed) ? parsed : [];
-    } catch {
-      products = [];
-    }
+
+    const products = catalogProducts;
     const invoiceItems = [];
     let totalCost = 0;
     for (const line of purchaseLines) {
       const p = products.find((x) => Number(x.id) === Number(line.productId));
       if (!p) {
-        setNewPurchaseError(`صنف غير موجود في المخزون (معرّف ${line.productId})`);
+        setNewPurchaseError(`صنف غير موجود في القائمة (معرّف ${line.productId}) — حدّث الصفحة`);
         return;
       }
-      const paid = Number(normalizeOneDecimal(line.paidQty)) || 0;
-      const bonus = Number(normalizeOneDecimal(line.bonusQty)) || 0;
-      const unit = Number(normalizeOneDecimal(line.unitPrice)) || 0;
+      const paid = Number(normalizeOneDecimal(line.paidQty)) || Number(line.paidQty) || 0;
+      const bonus = Number(normalizeOneDecimal(line.bonusQty)) || Number(line.bonusQty) || 0;
+      const unit = Number(normalizeOneDecimal(line.unitPrice)) || Number(line.unitPrice) || 0;
       if (paid <= 0 && bonus <= 0) {
         setNewPurchaseError(`أدخل كمية مشتراة لـ ${productDisplayName(p)}`);
         return;
@@ -413,18 +558,24 @@ export default function PurchasesPage({ mode, onToggleMode }) {
         setNewPurchaseError(`البونص مع مشتراة فقط — ${productDisplayName(p)}`);
         return;
       }
-      if (unit <= 0) {
-        setNewPurchaseError(`أدخل سعر شراء وحدة صحيح لـ ${productDisplayName(p)}`);
-        return;
-      }
       const lineCost = paid * unit;
       totalCost += lineCost;
       const stockAdd = paid + bonus;
-      const vLabel = String(p.variantLabel || "").trim();
+      const hasOptions = productHasSaleOptions(p);
+      const options = hasOptions ? normalizeSaleOptions(p) : [];
+      const selectedOption = hasOptions
+        ? options.find((o) => String(o.id) === String(line.saleOptionId || ""))
+        : null;
+      if (hasOptions && !selectedOption) {
+        setNewPurchaseError(`اختر خيار الصنف قبل الحفظ: ${productDisplayName(p)}`);
+        return;
+      }
+      const displayName =
+        productDisplayName(p) + (selectedOption ? ` (${selectedOption.label})` : "");
       invoiceItems.push({
         productId: p.id,
-        name: productDisplayName(p),
-        ...(vLabel ? { variantLabel: vLabel } : {}),
+        name: displayName,
+        ...(selectedOption ? { saleOptionId: String(selectedOption.id), saleOptionLabel: selectedOption.label } : {}),
         category: p.category,
         saleType: p.saleType,
         qtyPaid: paid,
@@ -434,105 +585,127 @@ export default function PurchasesPage({ mode, onToggleMode }) {
         total: Number(lineCost.toFixed(2)),
       });
     }
-    if (totalCost <= 0) {
-      setNewPurchaseError("إجمالي الشراء غير صالح");
+
+    const totalRounded = Number(totalCost.toFixed(2));
+    const supplierPrepaid = Math.max(0, Number(selectedSupplier.balance || 0));
+    const treasuryDue = Math.max(0, Number((totalRounded - Math.min(totalRounded, supplierPrepaid)).toFixed(2)));
+    if (!superCashier && treasuryDue > 0 && newPurchaseTreasury < treasuryDue) {
+      setNewPurchaseError(
+        strictTreasuryGuard
+          ? "لا يكفي المال في الخزنة (بعد احتساب أي رصيد مسبق للمورد) — زوّد الخزنة ثم أعد المحاولة"
+          : "لا يكفي المال في الخزنة لإتمام هذا الجزء النقدي من الشراء",
+      );
       return;
     }
-    if (!superCashier && newPurchaseTreasury < totalCost) {
-      setNewPurchaseError("لا يكفي المال في الخزنة لإتمام الشراء");
-      return;
-    }
+
+    const apiItems = invoiceItems.map((it) => ({
+      product_id: it.productId,
+      product_name: it.name,
+      quantity: it.qty,
+      unit_price: it.unitPrice,
+      total_price: Number((it.qty * it.unitPrice).toFixed(2)),
+    }));
+
+    const invoiceNumber = `PO-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     const buyerLabel = purchaserDisplayName(currentUser);
-    const nextProducts = products.map((p) => {
-      const line = purchaseLines.find((l) => Number(l.productId) === Number(p.id));
-      if (!line) return p;
-      const paid = Number(normalizeOneDecimal(line.paidQty)) || 0;
-      const bonus = Number(normalizeOneDecimal(line.bonusQty)) || 0;
-      const add = paid + bonus;
-      if (!add) return p;
-      return { ...p, qty: Number((Number(p.qty || 0) + add).toFixed(1)) };
-    });
-    localStorage.setItem(PRODUCTS_KEY, JSON.stringify(nextProducts));
 
-    let balance = { total: 0, cash: 0, app: 0 };
+    purchaseSubmitGuardRef.current = true;
+    setPurchaseSubmitting(true);
     try {
-      const parsed = JSON.parse(localStorage.getItem(STORE_BALANCE_KEY));
-      if (parsed && typeof parsed === "object") {
-        balance = {
-          total: Number(parsed.total || 0),
-          cash: Number(parsed.cash || 0),
-          app: Number(parsed.app || 0),
-        };
+      const pm = purchasePaymentMethod === "app" ? "app" : "cash";
+      const { data } = await Axios.post("purchases", {
+        invoice_number: invoiceNumber,
+        supplier_id: selectedSupplier.id,
+        items: apiItems,
+        total_amount: totalRounded,
+        paid_amount: totalRounded,
+        remaining_amount: 0,
+        status: "completed",
+        purchase_date: new Date().toISOString().split("T")[0],
+        payment_method: pm,
+        cash_amount: pm === "app" ? 0 : totalRounded,
+        app_amount: pm === "app" ? totalRounded : 0,
+        treasury_note: `شراء من ${supplierName} — ${invoiceItems.length} بند`,
+      });
+
+      if (!data?.success) {
+        setNewPurchaseError(data?.message || "فشل تسجيل الشراء في الخادم");
+        return;
       }
-    } catch {
-      // ignore
-    }
-    const { nextBalance, paidFromCash, paidFromApp } = debitStoreBalanceForPurchase(balance, totalCost, {
-      allowNegativeTreasury: superCashier,
-    });
-    localStorage.setItem(STORE_BALANCE_KEY, JSON.stringify(nextBalance));
-    notifyStoreBalanceChanged();
 
-    const purchaseInvoice = {
-      id: `PO-${Date.now()}`,
-      purchasedBy: buyerLabel,
-      purchasedByUsername: currentUser?.username || "",
-      purchasedByRole: currentUser?.role || "admin",
-      supplier: "مورد عام",
-      status: "مكتمل",
-      paymentMethod: paidFromApp > 0 ? "mixed" : "cash",
-      purchasedAt: new Date().toISOString(),
-      total: Number(totalCost.toFixed(2)),
-      treasuryDebit: {
-        total: Number(totalCost.toFixed(2)),
-        cash: paidFromCash,
-        app: paidFromApp,
-      },
-      items: invoiceItems,
-    };
-    try {
-      const existing = JSON.parse(localStorage.getItem(PURCHASE_INVOICES_KEY));
-      const nextPurchases = Array.isArray(existing) ? [purchaseInvoice, ...existing] : [purchaseInvoice];
-      localStorage.setItem(PURCHASE_INVOICES_KEY, JSON.stringify(nextPurchases));
-    } catch {
-      localStorage.setItem(PURCHASE_INVOICES_KEY, JSON.stringify([purchaseInvoice]));
+      appendAudit({
+        action: "purchase_created",
+        details: JSON.stringify({
+          purchase_id: data.data?.id,
+          invoice_number: invoiceNumber,
+          supplier: supplierName,
+          total: totalRounded,
+          items: invoiceItems.length,
+        }),
+        username: currentUser?.username || "",
+        role: currentUser?.role || "",
+      });
+
+      try {
+        const notification = {
+          id: `NTF-${Date.now()}`,
+          type: "purchase",
+          prefCategory: "purchase",
+          read: false,
+          title: "تم تسجيل شراء جديد",
+          message: superCashier
+            ? `توريد من المخزون بواسطة ${buyerLabel} — ${invoiceItems.length} صنف`
+            : `فاتورة ${invoiceNumber} بقيمة ${totalRounded.toFixed(1)} شيكل`,
+          details: invoiceItems.map((it) => it.name).join("، "),
+          createdAt: new Date().toISOString(),
+          fromManagement: true,
+          managementLabel:
+            currentUser?.role === "admin" || currentUser?.role === "super_admin"
+              ? "إدارة النظام"
+              : currentUser?.role === "super_cashier"
+                ? "سوبر كاشير"
+                : "النظام",
+        };
+        const existing = JSON.parse(localStorage.getItem(NOTIFICATIONS_KEY) || "[]");
+        const next = Array.isArray(existing) ? [notification, ...existing] : [notification];
+        localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify(next.slice(0, 80)));
+      } catch {
+        // ignore
+      }
+
+      setDataTick((t) => t + 1);
+      setNewPurchaseOpen(false);
+      setPurchaseLines([]);
+      showAppToast(superCashier ? "تم تسجيل التوريد" : "تم تسجيل الشراء في الخادم", "success");
+    } catch (e) {
+      setNewPurchaseError(
+        e?.response?.data?.message || e?.message || "تعذر إرسال الشراء — تحقق من الاتصال والخادم",
+      );
+    } finally {
+      purchaseSubmitGuardRef.current = false;
+      setPurchaseSubmitting(false);
     }
-    const notification = {
-      id: `NTF-${Date.now()}`,
-      type: "purchase",
-      prefCategory: "purchase",
-      read: false,
-      title: "تم تسجيل شراء جديد",
-      message: superCashier
-        ? `توريد من المخزون بواسطة ${buyerLabel} — ${invoiceItems.length} صنف`
-        : `فاتورة ${purchaseInvoice.id} بقيمة ${purchaseInvoice.total.toFixed(1)} شيكل`,
-      details: invoiceItems.map((it) => it.name).join("، "),
-      createdAt: new Date().toISOString(),
-      fromManagement: true,
-      managementLabel:
-        currentUser?.role === "admin" || currentUser?.role === "super_admin"
-          ? "إدارة النظام"
-          : currentUser?.role === "super_cashier"
-            ? "إدارة التوريد (سوبر كاشير)"
-            : "النظام",
-    };
-    try {
-      const existingNotifications = JSON.parse(localStorage.getItem(NOTIFICATIONS_KEY));
-      const nextNotifications = Array.isArray(existingNotifications)
-        ? [notification, ...existingNotifications]
-        : [notification];
-      localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify(nextNotifications));
-    } catch {
-      localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify([notification]));
-    }
-    setListVersion((v) => v + 1);
-    setNewPurchaseOpen(false);
-    showAppToast("تم تسجيل عملية الشراء وتحديث المخزون", "success");
   };
+
+  useEffect(() => {
+    if (!printPurchase) return;
+    const t = window.setTimeout(() => window.print(), 200);
+    const done = () => setPrintPurchase(null);
+    window.addEventListener("afterprint", done);
+    return () => {
+      window.clearTimeout(t);
+      window.removeEventListener("afterprint", done);
+    };
+  }, [printPurchase]);
 
   return (
     <AdminLayout mode={mode} onToggleMode={onToggleMode}>
       <Box sx={adminPageContainerSx}>
+        {dataLoading ? (
+          <Alert severity="info" sx={{ mb: 2, borderRadius: 2 }}>
+            جاري تحميل المشتريات والأصناف من الخادم...
+          </Alert>
+        ) : null}
         <Stack
           direction={{ xs: "column", sm: "row" }}
           justifyContent="space-between"
@@ -571,7 +744,7 @@ export default function PurchasesPage({ mode, onToggleMode }) {
           <FilterBarRow>
             <TextField
               size="small"
-              placeholder="ابحث برقم فاتورة الشراء أو اسم المنفذ..."
+              placeholder="بحث شامل: رقم الفاتورة، المورد، الصنف، الحالة..."
               value={purchaseSearch}
               onChange={(e) => {
                 setPurchaseSearch(e.target.value);
@@ -606,12 +779,38 @@ export default function PurchasesPage({ mode, onToggleMode }) {
               <MenuItem value="مكتمل">مكتمل</MenuItem>
               <MenuItem value="مراجعة">مراجعة</MenuItem>
             </Select>
+            <TextField
+              size="small"
+              type="date"
+              label="من تاريخ"
+              value={fromDate}
+              onChange={(e) => {
+                setFromDate(e.target.value);
+                setPage(1);
+              }}
+              InputLabelProps={{ shrink: true }}
+              sx={{ minWidth: 150, flex: "0 0 auto" }}
+            />
+            <TextField
+              size="small"
+              type="date"
+              label="إلى تاريخ"
+              value={toDate}
+              onChange={(e) => {
+                setToDate(e.target.value);
+                setPage(1);
+              }}
+              InputLabelProps={{ shrink: true }}
+              sx={{ minWidth: 150, flex: "0 0 auto" }}
+            />
             <Button
               variant="outlined"
               onClick={() => {
                 setPurchaseSearch("");
                 setDateFilter("all");
                 setStatusFilter("all");
+                setFromDate("");
+                setToDate("");
                 setPage(1);
               }}
               sx={{ textTransform: "none", fontWeight: 700, flex: "0 0 auto", whiteSpace: "nowrap" }}
@@ -668,7 +867,7 @@ export default function PurchasesPage({ mode, onToggleMode }) {
               </TableHead>
               <TableBody>
                 {rows.map((row) => (
-                  <TableRow key={row.id} hover>
+                  <TableRow key={row.apiId != null ? `p-${row.apiId}` : row.id} hover>
                     <TableCell align="center" sx={{ fontWeight: 700, color: "primary.main" }}>{row.id}</TableCell>
                     <TableCell align="center">
                       {row.purchasedBy || "-"}
@@ -728,9 +927,33 @@ export default function PurchasesPage({ mode, onToggleMode }) {
           </Stack>
         </Card>
 
-        <Dialog open={newPurchaseOpen} onClose={() => setNewPurchaseOpen(false)} fullWidth maxWidth="md">
-          <DialogTitle sx={{ textAlign: "right" }}>شراء من أصناف المخزون</DialogTitle>
-          <DialogContent sx={{ textAlign: "right" }}>
+        <Dialog
+          open={newPurchaseOpen}
+          onClose={() => setNewPurchaseOpen(false)}
+          fullWidth
+          maxWidth="md"
+          slotProps={{ paper: { sx: purchaseDialogPaperSx } }}
+        >
+
+<DialogTitle sx={purchaseDialogTitleSx}>
+  <IconButton aria-label="إغلاق" size="small" onClick={() => setNewPurchaseOpen(false)} sx={purchaseDialogCloseBtnSx}>
+    <Close />
+  </IconButton>
+  <Typography 
+    component="div"
+    sx={{ 
+      textAlign: "center", 
+      width: "100%", 
+      px: { xs: 4, sm: 8 },
+      fontWeight: 800,
+      fontSize: "1.25rem"
+    }}
+  >
+    إضافة عملية شراء جديدة
+  </Typography>
+</DialogTitle>
+
+          <DialogContent dividers sx={{ textAlign: "right", px: { xs: 2, sm: 2.5 }, py: 1.5 }}>
             {newPurchaseError ? (
               <Alert severity="error" sx={{ mb: 1.5 }}>
                 {newPurchaseError}
@@ -740,11 +963,67 @@ export default function PurchasesPage({ mode, onToggleMode }) {
               صفِّ الأصناف بالبحث أو القسم، ثم اضغط على الصنف لإضافته. كل تركيز (مثل 100 مجم و500 مجم) يُسجَّل كصنف منفصل في المخزون
               ليميّز الفرع عن الآخر.
             </Typography>
+            <Card variant="outlined" sx={{ p: 1.1, mb: 1.25, borderRadius: 2 }}>
+              {supplierOptions.length === 0 ? (
+                <Alert severity="warning" sx={{ borderRadius: 2 }}>
+                  لا يوجد موردون نشطون. أضف موردًا أولاً من صفحة الموردين.
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    sx={{ ml: 1, textTransform: "none" }}
+                    onClick={() => {
+                      setNewPurchaseOpen(false);
+                      navigate("/admin/suppliers");
+                    }}
+                  >
+                    فتح الموردين
+                  </Button>
+                </Alert>
+              ) : (
+                <Select
+                  size="small"
+                  fullWidth
+                  value={selectedSupplierId}
+                  onChange={(e) => setSelectedSupplierId(e.target.value)}
+                  displayEmpty
+                >
+                  <MenuItem value="" disabled>
+                    اختر المورد
+                  </MenuItem>
+                  {supplierOptions.map((s) => (
+                    <MenuItem key={s.id} value={String(s.id)}>
+                      {s.name}
+                      {Number(s.balance) > 0
+                        ? ` — رصيد مسبق ${Number(s.balance).toFixed(2)} شيكل`
+                        : Number(s.balance) < 0
+                          ? ` — دين ${Math.abs(Number(s.balance)).toFixed(2)} شيكل`
+                          : ""}
+                    </MenuItem>
+                  ))}
+                </Select>
+              )}
+            </Card>
+            {supplierOptions.length > 0 ? (
+              <Stack direction={{ xs: "column", sm: "row" }} sx={{ gap: 1, mb: 1.5 }} alignItems={{ sm: "center" }}>
+                <Typography variant="body2" color="text.secondary" sx={{ flexShrink: 0 }}>
+                  طريقة الدفع (تسجيل الخزنة)
+                </Typography>
+                <Select
+                  size="small"
+                  value={purchasePaymentMethod}
+                  onChange={(e) => setPurchasePaymentMethod(e.target.value)}
+                  sx={{ minWidth: { xs: "100%", sm: 260 } }}
+                >
+                  <MenuItem value="cash">كاش</MenuItem>
+                  <MenuItem value="app">تطبيق</MenuItem>
+                </Select>
+              </Stack>
+            ) : null}
             <Stack direction={{ xs: "column", sm: "row" }} sx={{ gap: 1, mb: 1.5 }}>
               <TextField
                 size="small"
                 fullWidth
-                placeholder="بحث بالاسم، الفرع، القسم، أو رقم الصنف..."
+                placeholder="بحث شامل: اسم الصنف، الفرع، القسم، رقم الصنف..."
                 value={catalogSearch}
                 onChange={(e) => setCatalogSearch(e.target.value)}
               />
@@ -802,6 +1081,9 @@ export default function PurchasesPage({ mode, onToggleMode }) {
                         الصنف
                       </TableCell>
                       <TableCell align="center" sx={{ fontWeight: 800 }}>
+                        الفرع/الخيار
+                      </TableCell>
+                      <TableCell align="center" sx={{ fontWeight: 800 }}>
                         مشتراة
                       </TableCell>
                       <TableCell align="center" sx={{ fontWeight: 800 }}>
@@ -822,6 +1104,30 @@ export default function PurchasesPage({ mode, onToggleMode }) {
                         <TableRow key={line.lineKey}>
                           <TableCell align="center" sx={{ fontWeight: 700, maxWidth: 200 }}>
                             {prod ? productDisplayName(prod) : `#${line.productId}`}
+                          </TableCell>
+                          <TableCell align="center">
+                            {prod && productHasSaleOptions(prod) ? (
+                              <Select
+                                size="small"
+                                value={line.saleOptionId || ""}
+                                onChange={(e) => updatePurchaseLine(line.lineKey, { saleOptionId: e.target.value })}
+                                sx={{ minWidth: 170 }}
+                                displayEmpty
+                              >
+                                <MenuItem value="" disabled>
+                                  اختر الخيار
+                                </MenuItem>
+                                {normalizeSaleOptions(prod).map((opt) => (
+                                  <MenuItem key={String(opt.id)} value={String(opt.id)}>
+                                    {opt.label || `خيار ${opt.id}`}
+                                  </MenuItem>
+                                ))}
+                              </Select>
+                            ) : (
+                              <Typography variant="caption" color="text.secondary">
+                                الصنف الأساسي
+                              </Typography>
+                            )}
                           </TableCell>
                           <TableCell align="center">
                             <TextField
@@ -884,20 +1190,26 @@ export default function PurchasesPage({ mode, onToggleMode }) {
                 <Box component="span" fontWeight={700} sx={negativeAmountTextSx(newPurchaseTreasury)}>
                   {newPurchaseTreasury.toFixed(2)}
                 </Box>{" "}
-                شيكل — إجمالي هذا الشراء:{" "}
+                شيكل — إجمالي الشراء:{" "}
                 <Box component="span" fontWeight={700}>
                   {newPurchaseTotalCost.toFixed(2)}
                 </Box>{" "}
-                شيكل
+                شيكل. رصيد موجب في «balance» = دفعة مسبقة تُخصم من المبلغ قبل الخزنة؛ رصيد سالب = دين سابق يُسدَّد من المبلغ المدفوع (كامل المبلغ يُخصم من الخزنة نقداً).
               </Typography>
             )}
           </DialogContent>
-          <DialogActions sx={{ px: 3, pb: 2, flexWrap: "wrap", gap: 1 }}>
-            <Button onClick={() => setNewPurchaseOpen(false)} sx={{ textTransform: "none" }}>
+          <DialogActions sx={{ px: 3, py: 2, flexWrap: "wrap", gap: 1, bgcolor: alpha(theme.palette.action.hover, 0.06) }}>
+            <Button type="button" onClick={() => setNewPurchaseOpen(false)} sx={{ textTransform: "none" }}>
               إلغاء
             </Button>
-            <Button variant="contained" onClick={confirmNewPurchase} sx={{ textTransform: "none", fontWeight: 800 }}>
-              تأكيد الشراء
+            <Button
+              type="button"
+              variant="contained"
+              onClick={() => void confirmNewPurchase()}
+              disabled={purchaseSubmitting}
+              sx={{ textTransform: "none", fontWeight: 800 }}
+            >
+              {purchaseSubmitting ? "جاري الحفظ..." : "تأكيد الشراء"}
             </Button>
           </DialogActions>
         </Dialog>
@@ -999,6 +1311,14 @@ export default function PurchasesPage({ mode, onToggleMode }) {
             <Button variant="contained" onClick={() => setDetailPurchase(null)} sx={{ textTransform: "none" }}>
               إغلاق
             </Button>
+            <Button
+              variant="outlined"
+              color="primary"
+              onClick={() => setPrintPurchase(detailPurchase)}
+              sx={{ textTransform: "none", fontWeight: 800 }}
+            >
+              طباعة الفاتورة
+            </Button>
             {String(detailPurchase?.status || "") !== "مرجع" ? (
               <Button
                 variant="outlined"
@@ -1011,6 +1331,36 @@ export default function PurchasesPage({ mode, onToggleMode }) {
             ) : null}
           </DialogActions>
         </Dialog>
+        {printPurchase ? (
+          <Box
+            sx={{
+              display: "none",
+              "@media print": {
+                display: "block",
+                p: 1.25,
+                color: "#000",
+                direction: "rtl",
+                fontFamily: "Arial, sans-serif",
+              },
+            }}
+          >
+            <Typography fontWeight={900}>فاتورة شراء</Typography>
+            <Typography variant="body2">رقم الفاتورة: {printPurchase.id}</Typography>
+            <Typography variant="body2">المورد: {printPurchase.supplier || "مورد عام"}</Typography>
+            <Typography variant="body2">
+              التاريخ: {printPurchase.purchasedAt ? new Date(printPurchase.purchasedAt).toLocaleString("en-GB") : "-"}
+            </Typography>
+            <Typography variant="body2">المنفذ: {printPurchase.purchasedBy || "-"}</Typography>
+            <Divider sx={{ my: 1 }} />
+            {(printPurchase.items || []).map((it, i) => (
+              <Typography key={`${it.name}-${i}`} variant="body2">
+                {i + 1}. {it.name || "-"} — كمية {formatOneDecimal(Number(it.qty || 0))} — سعر {formatOneDecimal(Number(it.unitPrice || 0))}
+              </Typography>
+            ))}
+            <Divider sx={{ my: 1 }} />
+            <Typography fontWeight={800}>الإجمالي: {formatOneDecimal(printPurchase.total)} شيكل</Typography>
+          </Box>
+        ) : null}
       </Box>
     </AdminLayout>
   );

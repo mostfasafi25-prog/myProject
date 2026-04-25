@@ -183,11 +183,11 @@ export function runAdminGlobalSearch(rawQuery, navPages = []) {
       sections.push({
         id: "categories",
         title: "الأقسام",
-        pathHint: "/admin/categories",
+        pathHint: "/admin/inventory?section=categories",
         items: catHits.slice(0, ADMIN_SEARCH_MAX_PER_SECTION).map((c) => ({
           title: c.name || `قسم #${c.id}`,
           subtitle: c.active === false ? "غير مفعّل" : "قسم نشط",
-          path: "/admin/categories",
+          path: "/admin/inventory?section=categories",
           meta: "قسم",
         })),
       });

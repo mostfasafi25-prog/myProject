@@ -176,7 +176,6 @@ export default function Test() {
       });
     });
 
-    console.log(`طلبات الوجبة: ${meal}`, mealItems);
     showAppToast(`تم إرسال طلب ${meal} بـ ${mealItems.length} منتج`, "success");
 
     // مسح بيانات هذه الوجبة

@@ -1,5 +1,4 @@
 import {
-  Category,
   DarkMode,
   Dashboard,
   FactCheck,
@@ -18,6 +17,7 @@ import {
   Replay,
   Settings,
   ShoppingCart,
+  People,
 } from "@mui/icons-material";
 import {
   Badge,
@@ -37,55 +37,29 @@ import {
 } from "@mui/material";
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import Cookies from "universal-cookie";
+import { Axios } from "../../Api/Axios";
 import { PHARMACY_DISPLAY_NAME } from "../../config/appBranding";
 import { isNotificationUnreadForCurrentUser } from "../../utils/notificationVisibility";
+import { performFullLogout } from "../../utils/fullSessionLogout";
 import { getStoredUser, isSuperCashier, PHARMACY_USER_STORAGE_EVENT } from "../../utils/userRoles";
 
 const ADMIN_SIDE_MENU = [
+  // ========== الأقسام الرئيسية ==========
   { label: "لوحة التحكم", icon: <FactCheck fontSize="small" />, path: "/admin", type: "item" },
-  {
-    label: "المخزون",
-    key: "inventory",
-    icon: <Inventory fontSize="small" />,
-    type: "group",
-    children: [
-      { label: "الاصناف", path: "/admin/inventory" },
-      { label: "الاقسام", path: "/admin/categories", icon: <Category fontSize="inherit" /> },
-      { label: "جرد المخزون", path: "/admin/stocktake" },
-      { label: "زبائن الآجل", path: "/admin/debt-customers" },
-    ],
-  },
-  {
-    label: "المبيعات",
-    key: "sales",
-    icon: <ShoppingCart fontSize="small" />,
-    type: "group",
-    children: [
-      { label: "تقارير المبيعات", path: "/admin/reports/sales" },
-      { label: "مرتجعات المبيعات", path: "/admin/returns/sales" },
-    ],
-  },
-  {
-    label: "المشتريات",
-    key: "purchases",
-    icon: <ShoppingCart fontSize="small" />,
-    type: "group",
-    children: [
-      { label: "تقارير المشتريات", path: "/admin/reports/purchases" },
-      { label: "مرتجعات المشتريات", path: "/admin/returns/purchases" },
-    ],
-  },
-  {
-    label: "الصلاحيات",
-    key: "users",
-    icon: <Groups fontSize="small" />,
-    type: "group",
-    children: [
-      { label: "الموظفين", path: "/admin/staff" },
-      { label: "سجل النشاط", path: "/admin/activity-log" },
-    ],
-  },
+  
+  // ========== المبيعات ==========
+  { label: " المبيعات", icon: <ShoppingCart  fontSize="small" />, path: "/admin/reports/sales", type: "item" },
+
+  // ========== المشتريات ==========
+  { label: "المشتريات", icon: <LocalShipping fontSize="small" />, path: "/admin/purchases", type: "item" },
+  
+  // ========== المخزون ==========
+  { label: " المخزون ", icon: <Inventory fontSize="small" />, path: "/admin/inventory", type: "item" },
+  { label: " الموظفين ", icon: <Groups fontSize="small" />, path: "/admin/staff", type: "item" },
+  
+ 
+  
+  // ========== الإعدادات (كمجموعة) ==========
   {
     label: "الاعدادات",
     key: "settings",
@@ -97,34 +71,18 @@ const ADMIN_SIDE_MENU = [
       { label: "إعداد المال", path: "/admin/settings/money" },
       { label: "إعداد الإشعارات", path: "/admin/settings/notifications" },
       { label: "إعدادات الكاشير", path: "/admin/settings/cashier" },
+      { label: "تعليمات التشغيل", path: "/admin/settings/instructions" },
     ],
   },
 ];
-
 /** سوبر كاشير: لوحة توريد + مخزون + مشتريات */
 const SUPER_CASHIER_SIDE_MENU = [
   { label: "لوحة التحكم", icon: <Dashboard fontSize="small" />, path: "/cashier/dashboard", type: "item" },
-  {
-    label: "المخزون",
-    key: "inventory",
-    icon: <Inventory fontSize="small" />,
-    type: "group",
-    children: [
-      { label: "الاصناف", path: "/admin/inventory" },
-      { label: "الاقسام", path: "/admin/categories", icon: <Category fontSize="inherit" /> },
-      { label: "زبائن الآجل", path: "/admin/debt-customers" },
-    ],
-  },
-  {
-    label: "المشتريات",
-    key: "purchases",
-    icon: <LocalShipping fontSize="small" />,
-    type: "group",
-    children: [
-      { label: "إدارة المشتريات", path: "/admin/purchases" },
-      { label: "مرتجعات المشتريات", path: "/admin/returns/purchases" },
-    ],
-  },
+];
+
+/** كاشير عادي: يسمح له مشاهدة لوحة التحكم فقط */
+const CASHIER_DASHBOARD_MENU = [
+  { label: "لوحة التحكم", icon: <Dashboard fontSize="small" />, path: "/admin", type: "item" },
 ];
 
 function AdminSidebarNav({
@@ -196,54 +154,61 @@ function AdminSidebarNav({
         }}
       >
         {menuItems.map((item) => {
-          if (item.type === "item") {
-            const active = isActivePath(item.path);
-            return (
-              <Button
-                key={item.label}
-                startIcon={item.icon}
-                onClick={() => go(item.path)}
-                sx={{
-                  justifyContent: "flex-start",
-                  textTransform: "none",
-                  borderRadius: 2,
-                  py: 1,
-                  px: 1,
-                  color: active ? "primary.main" : "text.secondary",
-                  bgcolor: active ? alpha(theme.palette.primary.main, 0.12) : "transparent",
-                  fontWeight: active ? 800 : 600,
-                  "& .MuiButton-startIcon": { marginInlineStart: 0, marginInlineEnd: 6 },
-                }}
-              >
-                {item.label}
-              </Button>
-            );
-          }
+  if (item.type === "item") {
+    const active = isActivePath(item.path);
+    return (
+      <Button
+        key={item.label}
+        startIcon={item.icon}
+        onClick={() => go(item.path)}
+        sx={{
+          width: "100%", // ليمتد بالعرض الكامل مثل المجموعات
+          justifyContent: "flex-start", // للحفاظ على ترتيب الأيقونة والنص
+          textTransform: "none",
+          borderRadius: 2, // نفس تنسيق المجموعة
+          py: 1.2,        // زود قليلاً
+          px: 1.5,        // زود قليلاً
+          gap: 1.2,       // ✅ أضف gap بين الأيقونة والنص
+          color: active ? "primary.main" : "text.secondary",
+          bgcolor: active ? alpha(theme.palette.primary.main, 0.12) : "transparent", // نفس خلفية المجموعة النشطة
+          fontWeight: active ? 800 : 600, // نفس سماكة الخط في المجموعة
+          "& .MuiButton-startIcon": { marginInlineStart: 0, marginInlineEnd: 6,      marginInlineEnd: 0,   // ✅ خليها 0 واستخدم gap بدلاً منها
+          }, // نفس تباعد الأيقونة عن النص في المجموعة
+        }}
+      >
+        {item.label}
+      </Button>
+    );
+  }
 
           const isOpen = openSections[item.key];
           const groupActive = hasActiveChild(item.children);
           return (
             <Box key={item.label}>
-              <Button
-                startIcon={item.icon}
-                endIcon={isOpen ? <KeyboardArrowDown fontSize="small" /> : <KeyboardArrowLeft fontSize="small" />}
-                onClick={() => setOpenSections((prev) => ({ ...prev, [item.key]: !prev[item.key] }))}
-                sx={{
-                  width: "100%",
-                  justifyContent: "space-between",
-                  textTransform: "none",
-                  borderRadius: 2,
-                  py: 1,
-                  px: 1,
-                  color: groupActive ? "primary.main" : "text.secondary",
-                  bgcolor: groupActive ? alpha(theme.palette.primary.main, 0.12) : "transparent",
-                  fontWeight: groupActive ? 800 : 600,
-                  "& .MuiButton-startIcon": { marginInlineStart: 0, marginInlineEnd: 6 },
-                  "& .MuiButton-endIcon": { marginInlineStart: 4, marginInlineEnd: 0 },
-                }}
-              >
-                {item.label}
-              </Button>
+            <Button
+  startIcon={item.icon}
+  endIcon={isOpen ? <KeyboardArrowDown fontSize="small" /> : <KeyboardArrowLeft fontSize="small" />}
+  onClick={() => setOpenSections((prev) => ({ ...prev, [item.key]: !prev[item.key] }))}
+  sx={{
+    width: "100%",
+    justifyContent: "space-between",
+    textTransform: "none",
+    borderRadius: 2,
+    py: 1.2,        // ✅ زود قليلاً
+    px: 1.5,        // ✅ زود قليلاً
+    gap: 1.2,       // ✅ أضف gap
+    color: groupActive ? "primary.main" : "text.secondary",
+    bgcolor: groupActive ? alpha(theme.palette.primary.main, 0.12) : "transparent",
+    fontWeight: groupActive ? 800 : 600,
+    "& .MuiButton-startIcon": { 
+      marginInlineStart: 0, 
+      marginInlineEnd: 0,   // ✅ خليها 0
+    },
+    "& .MuiButton-endIcon": { marginInlineStart: 4, marginInlineEnd: 0 },
+  }}
+>
+  {item.label}
+</Button>
               <Collapse in={isOpen} timeout={0} unmountOnExit>
                 <Stack sx={{ gap: 0.5, mt: 0.5, pl: 1 }}>
                   {item.children.map((child) => {
@@ -342,20 +307,45 @@ export default function AdminLayout({ mode = "light", onToggleMode, children, em
   const theme = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
-  const cookies = new Cookies();
   const isMdDown = useMediaQuery(theme.breakpoints.down("md"));
-  const effectiveMenu = isSuperCashier(getStoredUser()) ? SUPER_CASHIER_SIDE_MENU : ADMIN_SIDE_MENU;
-  const superCashierUi = isSuperCashier(getStoredUser());
+  const roleUser = getStoredUser();
+  const currentRole = String(roleUser?.role || "");
+  const superCashierUi = currentRole === "super_cashier";
+  const cashierUi = currentRole === "cashier";
+  const effectiveMenu =
+    superCashierUi ? SUPER_CASHIER_SIDE_MENU : cashierUi ? CASHIER_DASHBOARD_MENU : ADMIN_SIDE_MENU;
   const [, setUserRefresh] = useState(0);
+  const [headerAvatarFromApi, setHeaderAvatarFromApi] = useState("");
   useEffect(() => {
     const onUserStorage = () => setUserRefresh((n) => n + 1);
     window.addEventListener(PHARMACY_USER_STORAGE_EVENT, onUserStorage);
     return () => window.removeEventListener(PHARMACY_USER_STORAGE_EVENT, onUserStorage);
   }, []);
-  const headerUser = getStoredUser();
-  const headerAvatarSrc = headerUser?.avatarDataUrl || headerUser?.avatar || undefined;
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await Axios.get("me");
+        const avatar = String(res?.data?.user?.avatar_url || "").trim();
+        if (!cancelled) setHeaderAvatarFromApi(avatar);
+      } catch {
+        if (!cancelled) setHeaderAvatarFromApi("");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [location.pathname]);
+  const headerUser = roleUser;
+  const headerAvatarSrc =
+    headerAvatarFromApi ||
+    headerUser?.avatar_url ||
+    headerUser?.avatarDataUrl ||
+    headerUser?.avatar ||
+    undefined;
   const headerDisplayName =
     headerUser?.name || (headerUser?.username ? String(headerUser.username) : "") || "—";
+  const headerUsername = String(headerUser?.username || "").trim();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [openSections, setOpenSections] = useState(() => {
     const menu = isSuperCashier(getStoredUser()) ? SUPER_CASHIER_SIDE_MENU : ADMIN_SIDE_MENU;
@@ -372,13 +362,20 @@ export default function AdminLayout({ mode = "light", onToggleMode, children, em
   const hasActiveChild = (children = []) => children.some((child) => isActivePath(child.path));
 
   useEffect(() => {
-    const menu = isSuperCashier(getStoredUser()) ? SUPER_CASHIER_SIDE_MENU : ADMIN_SIDE_MENU;
+    const menu = superCashierUi ? SUPER_CASHIER_SIDE_MENU : cashierUi ? CASHIER_DASHBOARD_MENU : ADMIN_SIDE_MENU;
     const next = {};
     menu.forEach((item) => {
       if (item.type === "group") next[item.key] = hasActiveChild(item.children);
     });
     setOpenSections(next);
-  }, [location.pathname]);
+  }, [location.pathname, superCashierUi, cashierUi]);
+
+  useEffect(() => {
+    if (!cashierUi) return;
+    if (location.pathname !== "/admin") {
+      navigate("/admin", { replace: true });
+    }
+  }, [cashierUi, location.pathname, navigate]);
 
   useEffect(() => {
     const refreshUnread = () => {
@@ -401,9 +398,7 @@ export default function AdminLayout({ mode = "light", onToggleMode, children, em
   }, [location.pathname]);
 
   const handleLogout = () => {
-    cookies.remove("token", { path: "/" });
-    localStorage.removeItem("user");
-    navigate("/login", { replace: true });
+    performFullLogout(Axios);
   };
 
   const adminMainContentSx = {
@@ -514,20 +509,19 @@ export default function AdminLayout({ mode = "light", onToggleMode, children, em
             >
               <MenuOpenIcon />
             </IconButton>
-            <Typography
-              fontWeight={900}
-              color="text.primary"
-              noWrap
-              sx={{
-                flex: 1,
-                minWidth: 0,
-                textAlign: "center",
-                fontSize: { xs: "0.92rem", sm: "1rem" },
-                px: 0.5,
-              }}
-            >
-              {superCashierUi ? "المخزون والتوريد" : "لوحة الإدارة"}
-            </Typography>
+            <Box sx={{ flex: 1, minWidth: 0, textAlign: "center", px: 0.5 }}>
+              <Typography
+                fontWeight={900}
+                color="text.primary"
+                noWrap
+                sx={{ fontSize: { xs: "0.92rem", sm: "1rem" }, lineHeight: 1.2 }}
+              >
+                {PHARMACY_DISPLAY_NAME}
+              </Typography>
+              <Typography variant="caption" color="text.secondary" noWrap sx={{ display: "block", lineHeight: 1.2 }}>
+                لوحة التحكم
+              </Typography>
+            </Box>
             <Stack direction="row" alignItems="center" sx={{ gap: 0.25, flexShrink: 0 }}>
               <IconButton onClick={onToggleMode} color="primary" size="small" aria-label="تبديل الوضع">
                 {mode === "dark" ? <LightMode fontSize="small" /> : <DarkMode fontSize="small" />}
@@ -555,10 +549,12 @@ export default function AdminLayout({ mode = "light", onToggleMode, children, em
               </IconButton>
               <Avatar
                 src={headerAvatarSrc}
+                onClick={() => navigate("/admin/settings/account")}
                 sx={{
                   width: 36,
                   height: 36,
                   border: `2px solid ${alpha(theme.palette.primary.main, 0.35)}`,
+                  cursor: "pointer",
                 }}
               >
                 {!headerAvatarSrc ? (headerDisplayName?.[0] || "?").toUpperCase() : null}
@@ -573,14 +569,19 @@ export default function AdminLayout({ mode = "light", onToggleMode, children, em
             sx={{ px: { xs: 2, sm: 3 }, py: 2, gap: 1.5, minWidth: 0, overflow: "hidden" }}
           >
             <Stack direction="row" alignItems="center" sx={{ gap: 1.5, flex: 1, minWidth: 0, overflow: "hidden" }}>
-              <Typography
-                fontWeight={800}
-                color="primary.main"
-                noWrap
-                sx={{ pt: 0.75, minWidth: 0 }}
-              >
-                {superCashierUi ? `${PHARMACY_DISPLAY_NAME} — المخزون والتوريد` : `${PHARMACY_DISPLAY_NAME} — لوحة الإدارة`}
-              </Typography>
+              <Box sx={{ minWidth: 0 }}>
+                <Typography
+                  fontWeight={900}
+                  color="primary.main"
+                  noWrap
+                  sx={{ lineHeight: 1.2 }}
+                >
+                  {PHARMACY_DISPLAY_NAME}
+                </Typography>
+                <Typography variant="caption" color="text.secondary" noWrap sx={{ display: "block", lineHeight: 1.2 }}>
+                  لوحة التحكم
+                </Typography>
+              </Box>
             </Stack>
 
             <Stack direction="row" alignItems="center" sx={{ gap: 1.25, flexShrink: 0 }}>
@@ -601,17 +602,17 @@ export default function AdminLayout({ mode = "light", onToggleMode, children, em
               <Stack direction="row" alignItems="center" sx={{ gap: 1 }}>
                 <Box textAlign="right" sx={{ display: { xs: "none", sm: "block" } }}>
                   <Typography variant="caption" fontWeight={700}>
-                    {superCashierUi ? "سوبر كاشير" : headerDisplayName}
+                    {headerDisplayName}
                   </Typography>
                   <Typography variant="caption" display="block" color="text.secondary">
-                    {superCashierUi
-                      ? "توريد بدون عرض الصندوق"
-                      : headerUser?.role === "admin" || headerUser?.role === "super_admin"
-                        ? "مدير النظام"
-                        : "موظف"}
+                    {headerUsername ? `@${headerUsername}` : "—"}
                   </Typography>
                 </Box>
-                <Avatar src={headerAvatarSrc} sx={{ width: 40, height: 40 }}>
+                <Avatar
+                  src={headerAvatarSrc}
+                  onClick={() => navigate("/admin/settings/account")}
+                  sx={{ width: 40, height: 40, cursor: "pointer" }}
+                >
                   {!headerAvatarSrc ? (headerDisplayName?.[0] || "?").toUpperCase() : null}
                 </Avatar>
               </Stack>

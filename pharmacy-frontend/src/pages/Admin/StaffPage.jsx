@@ -46,70 +46,16 @@ import AdminLayout from "./AdminLayout";
 import { Axios } from "../../Api/Axios";
 import { showAppToast } from "../../utils/appToast";
 import { compressImageFileForUpload } from "../../utils/imageCompress";
-import { safeLocalStorageSetJsonWithDataUrlFallback } from "../../utils/safeLocalStorage";
 import {
   getSessionAvatarDataUrl,
   persistUserAvatarForLogin,
   readStaffProfileExtras,
   writeStaffProfileExtras,
 } from "../../utils/staffProfileExtras";
+import { getStoredUser, isSuperAdmin } from "../../utils/userRoles";
 
 const ROWS_PER_PAGE = 5;
-const STAFF_STORAGE_KEY = "adminStaffAccounts";
 const SUPER_ADMIN_USERNAME = "admin";
-
-const initialStaff = [
-  {
-    id: 1,
-    name: "أحمد الشامي",
-    username: "admin",
-    email: "",
-    password: "admin123",
-    role: "admin",
-    status: "active",
-    createdAt: "2026-04-04T08:00:00Z",
-  },
-  {
-    id: 2,
-    name: "محمود زكي",
-    username: "cashier",
-    email: "",
-    password: "cashier123",
-    role: "cashier",
-    status: "active",
-    createdAt: "2026-04-05T08:00:00Z",
-  },
-  {
-    id: 5,
-    name: "سوبر كاشير",
-    username: "cashier_special",
-    email: "",
-    password: "special123",
-    role: "super_cashier",
-    status: "active",
-    createdAt: "2026-04-08T08:00:00Z",
-  },
-  {
-    id: 3,
-    name: "سارة عمر",
-    username: "cashier2",
-    email: "",
-    password: "cashier2123",
-    role: "cashier",
-    status: "pending",
-    createdAt: "2026-04-06T08:00:00Z",
-  },
-  {
-    id: 4,
-    name: "ليث خالد",
-    username: "admin2",
-    email: "",
-    password: "admin2123",
-    role: "admin",
-    status: "inactive",
-    createdAt: "2026-04-07T08:00:00Z",
-  },
-];
 
 function withSessionAvatars(rows) {
   if (!Array.isArray(rows)) return rows;
@@ -117,28 +63,6 @@ function withSessionAvatars(rows) {
     ...row,
     avatarDataUrl: getSessionAvatarDataUrl(row.username) || row.avatarDataUrl || "",
   }));
-}
-
-function loadStaffFromStorage() {
-  const defaultsByUsername = Object.fromEntries(initialStaff.map((s) => [s.username, s]));
-  try {
-    const raw = localStorage.getItem(STAFF_STORAGE_KEY);
-    if (!raw) return withSessionAvatars(initialStaff);
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed) || !parsed.length) return withSessionAvatars(initialStaff);
-    return withSessionAvatars(
-      parsed.map((row) => {
-        const def = defaultsByUsername[row.username];
-        return {
-          ...row,
-          email: row.email ?? def?.email ?? "",
-          password: row.password ?? def?.password ?? "",
-        };
-      }),
-    );
-  } catch {
-    return withSessionAvatars(initialStaff);
-  }
 }
 
 function mapApiUserToStaff(user) {
@@ -164,6 +88,7 @@ function mapApiUserToStaff(user) {
             : "cashier",
     status,
     createdAt: user.created_at || new Date().toISOString(),
+    avatarDataUrl: String(user.avatar_url || ""),
   };
 }
 
@@ -178,9 +103,11 @@ const emptyEditForm = () => ({
 
 export default function StaffPage({ mode, onToggleMode }) {
   const theme = useTheme();
+  const currentUser = getStoredUser();
+  const superAdmin = isSuperAdmin(currentUser);
   const newUserAvatarInputRef = useRef(null);
   const editUserAvatarInputRef = useRef(null);
-  const [staff, setStaff] = useState(loadStaffFromStorage);
+  const [staff, setStaff] = useState([]);
   const [newUser, setNewUser] = useState({
     name: "",
     username: "",
@@ -204,48 +131,57 @@ export default function StaffPage({ mode, onToggleMode }) {
   const [roleFilter, setRoleFilter] = useState("all");
   const [loadingUsers, setLoadingUsers] = useState(false);
 
+  // Load users from API only
+  const loadUsersFromApi = async () => {
+    setLoadingUsers(true);
+    try {
+      const { data } = await Axios.get("users");
+      const apiUsers = Array.isArray(data?.data) ? data.data : [];
+      if (apiUsers.length) {
+        const extras = readStaffProfileExtras();
+        setStaff(
+          withSessionAvatars(
+            apiUsers.map((u) => {
+              const base = mapApiUserToStaff(u);
+              const e = extras[base.username] || {};
+              return {
+                ...base,
+                name: e.name || base.name,
+                avatarDataUrl: base.avatarDataUrl || "",
+              };
+            }),
+          ),
+        );
+      } else {
+        setStaff([]);
+      }
+    } catch (err) {
+      console.error("Failed to load users:", err);
+      showAppToast("فشل تحميل بيانات المستخدمين", "error");
+      setStaff([]);
+    } finally {
+      setLoadingUsers(false);
+    }
+  };
+
+  useEffect(() => {
+    loadUsersFromApi();
+  }, []);
+
+  // Save avatar extras to session storage only (not local storage for staff list)
   useEffect(() => {
     for (const u of staff) {
       if (u?.username) persistUserAvatarForLogin(u.username, u.avatarDataUrl || null);
     }
-    const slim = staff.map(({ avatarDataUrl: _a, ...rest }) => rest);
-    safeLocalStorageSetJsonWithDataUrlFallback(STAFF_STORAGE_KEY, slim);
   }, [staff]);
-
-  useEffect(() => {
-    const loadUsersFromApi = async () => {
-      setLoadingUsers(true);
-      try {
-        const { data } = await Axios.get("users");
-        const apiUsers = Array.isArray(data?.data) ? data.data : [];
-        if (apiUsers.length) {
-          const extras = readStaffProfileExtras();
-          setStaff(
-            withSessionAvatars(
-              apiUsers.map((u) => {
-                const base = mapApiUserToStaff(u);
-                const e = extras[base.username] || {};
-                return {
-                  ...base,
-                  name: e.name || base.name,
-                  avatarDataUrl: base.avatarDataUrl || "",
-                };
-              }),
-            ),
-          );
-        }
-      } catch {
-        // fallback to local data
-      } finally {
-        setLoadingUsers(false);
-      }
-    };
-    loadUsersFromApi();
-  }, []);
 
   const setActiveState = async (id, isActive) => {
     const row = staff.find((u) => u.id === id);
     if (!row) return;
+    if (!superAdmin && row.role !== "cashier") {
+      showAppToast("يمكنك إدارة حسابات الكاشير فقط", "error");
+      return;
+    }
     if (String(row.username || "").toLowerCase() === SUPER_ADMIN_USERNAME) {
       showAppToast("لا يمكن تعطيل حساب المدير الأساسي", "error");
       return;
@@ -276,6 +212,10 @@ export default function StaffPage({ mode, onToggleMode }) {
   };
 
   const addUser = async () => {
+    if (!superAdmin && newUser.role !== "cashier") {
+      setError("الأدمن يمكنه إنشاء كاشير فقط");
+      return;
+    }
     setError("");
     if (!newUser.name || !newUser.username || !newUser.password) {
       setError("يرجى تعبئة الاسم واسم المستخدم وكلمة المرور");
@@ -296,6 +236,7 @@ export default function StaffPage({ mode, onToggleMode }) {
         username: uname,
         password: newUser.password,
         role: newUser.role,
+        avatar_url: newUser.avatarDataUrl || null,
         approval_status: "approved",
       });
       const created = data?.data;
@@ -341,6 +282,11 @@ export default function StaffPage({ mode, onToggleMode }) {
   };
 
   const confirmDeleteUser = async () => {
+    if (!superAdmin && deleteTarget.role !== "cashier") {
+      showAppToast("يمكنك حذف الكاشير فقط", "error");
+      setDeleteTarget(null);
+      return;
+    }
     if (!deleteTarget) return;
     if (String(deleteTarget.username || "").toLowerCase() === SUPER_ADMIN_USERNAME) {
       showAppToast("لا يمكن حذف حساب مدير النظام الأساسي", "error");
@@ -379,6 +325,14 @@ export default function StaffPage({ mode, onToggleMode }) {
   };
 
   const saveEditEmployee = async () => {
+    if (!superAdmin && editTarget.role !== "cashier") {
+      setEditError("يمكنك تعديل الكاشير فقط");
+      return;
+    }
+    if (!superAdmin && editForm.role !== "cashier") {
+      setEditError("لا يمكنك تغيير الدور — مسموح فقط دور كاشير");
+      return;
+    }
     if (!editTarget) return;
     setEditError("");
     const name = editForm.name.trim();
@@ -405,6 +359,7 @@ export default function StaffPage({ mode, onToggleMode }) {
         username,
         password: nextPassword,
         role: editForm.role,
+        avatar_url: editForm.avatarDataUrl || null,
         approval_status: editForm.status === "pending" ? "pending" : "approved",
         is_active: editForm.status !== "inactive",
       });
@@ -450,6 +405,7 @@ export default function StaffPage({ mode, onToggleMode }) {
     const q = search.trim().toLowerCase();
     const filtered = staff.filter((u) => {
       if (String(u.username || "").toLowerCase() === SUPER_ADMIN_USERNAME) return false;
+      if (!superAdmin && u.role !== "cashier") return false;
       const matchesSearch =
         !q ||
         String(u.name || "").toLowerCase().includes(q) ||
@@ -464,13 +420,15 @@ export default function StaffPage({ mode, onToggleMode }) {
       if (bTime !== aTime) return bTime - aTime;
       return Number(b.id || 0) - Number(a.id || 0);
     });
-  }, [staff, search, statusFilter, roleFilter]);
+  }, [staff, search, statusFilter, roleFilter, superAdmin]);
+  
   const pageCount = Math.max(1, Math.ceil(filteredSortedStaff.length / ROWS_PER_PAGE));
   const safePage = Math.min(page, pageCount);
   const paginatedStaff = useMemo(() => {
     const start = (safePage - 1) * ROWS_PER_PAGE;
     return filteredSortedStaff.slice(start, start + ROWS_PER_PAGE);
   }, [filteredSortedStaff, safePage]);
+  
   const counts = useMemo(() => {
     const active = filteredSortedStaff.filter((u) => u.status === "active").length;
     const inactive = filteredSortedStaff.filter((u) => u.status === "inactive").length;
@@ -487,8 +445,7 @@ export default function StaffPage({ mode, onToggleMode }) {
               إدارة الموظفين والتفعيل
             </Typography>
             <Typography variant="body2" color="text.secondary" sx={adminPageSubtitleSx}>
-              راقب الموظفين: مفعل، غير مفعل، أو بانتظار موافقة دخول
-            </Typography>
+راقب حركات الموظفين وصلاحياتهم            </Typography>
             {loadingUsers ? (
               <Typography variant="caption" color="text.secondary">
                 جاري تحميل المستخدمين من النظام...
@@ -500,115 +457,7 @@ export default function StaffPage({ mode, onToggleMode }) {
           </Button>
         </Stack>
 
-        <Grid container spacing={2}>
-          <Grid size={{ xs: 12 }}>
-            <Card
-              sx={{
-                p: 1.6,
-                borderRadius: 3,
-                border: `1px solid ${alpha(theme.palette.primary.main, 0.2)}`,
-                background: `linear-gradient(135deg, ${alpha(theme.palette.primary.main, 0.1)}, ${alpha(
-                  theme.palette.secondary.main,
-                  0.08,
-                )})`,
-              }}
-            >
-              <FilterBarRow>
-                <TextField
-                  size="small"
-                  placeholder="ابحث بالاسم أو اسم المستخدم..."
-                  value={search}
-                  onChange={(e) => {
-                    setSearch(e.target.value);
-                    setPage(1);
-                  }}
-                  sx={{ flex: "1 1 200px", minWidth: 160 }}
-                />
-                <Select
-                  size="small"
-                  value={statusFilter}
-                  onChange={(e) => {
-                    setStatusFilter(e.target.value);
-                    setPage(1);
-                  }}
-                  sx={{ minWidth: 148, flex: "0 0 auto" }}
-                >
-                  <MenuItem value="all">كل الحالات</MenuItem>
-                  <MenuItem value="active">مفعل</MenuItem>
-                  <MenuItem value="inactive">غير مفعل</MenuItem>
-                  <MenuItem value="pending">بانتظار الموافقة</MenuItem>
-                </Select>
-                <Select
-                  size="small"
-                  value={roleFilter}
-                  onChange={(e) => {
-                    setRoleFilter(e.target.value);
-                    setPage(1);
-                  }}
-                  sx={{ minWidth: 140, flex: "0 0 auto" }}
-                >
-                  <MenuItem value="all">كل الأدوار</MenuItem>
-                  <MenuItem value="admin">Admin</MenuItem>
-                  <MenuItem value="super_admin">Super Admin</MenuItem>
-                  <MenuItem value="cashier">Cashier</MenuItem>
-                  <MenuItem value="super_cashier">سوبر كاشير</MenuItem>
-                </Select>
-                <Button
-                  variant="outlined"
-                  onClick={() => {
-                    setSearch("");
-                    setStatusFilter("all");
-                    setRoleFilter("all");
-                    setPage(1);
-                  }}
-                  sx={{ textTransform: "none", fontWeight: 700, flex: "0 0 auto", whiteSpace: "nowrap" }}
-                >
-                  إعادة الضبط
-                </Button>
-              </FilterBarRow>
-            </Card>
-          </Grid>
-          <Grid size={{ xs: 6, md: 3 }}>
-            <Card sx={{ p: { xs: 1.25, sm: 2 }, borderRadius: 3 }}>
-              <Typography variant="body2" color="text.secondary" sx={{ fontSize: { xs: "0.75rem", sm: undefined } }}>
-                إجمالي الحسابات
-              </Typography>
-              <Typography variant="h5" fontWeight={900} sx={{ fontSize: { xs: "1.2rem", sm: undefined } }}>
-                {counts.total}
-              </Typography>
-            </Card>
-          </Grid>
-          <Grid size={{ xs: 6, md: 3 }}>
-            <Card sx={{ p: { xs: 1.25, sm: 2 }, borderRadius: 3 }}>
-              <Typography variant="body2" color="text.secondary" sx={{ fontSize: { xs: "0.75rem", sm: undefined } }}>
-                مفعل
-              </Typography>
-              <Typography variant="h5" fontWeight={900} color="success.main" sx={{ fontSize: { xs: "1.2rem", sm: undefined } }}>
-                {counts.active}
-              </Typography>
-            </Card>
-          </Grid>
-          <Grid size={{ xs: 6, md: 3 }}>
-            <Card sx={{ p: { xs: 1.25, sm: 2 }, borderRadius: 3 }}>
-              <Typography variant="body2" color="text.secondary" sx={{ fontSize: { xs: "0.75rem", sm: undefined } }}>
-                غير مفعل
-              </Typography>
-              <Typography variant="h5" fontWeight={900} color="warning.main" sx={{ fontSize: { xs: "1.2rem", sm: undefined } }}>
-                {counts.inactive}
-              </Typography>
-            </Card>
-          </Grid>
-          <Grid size={{ xs: 6, md: 3 }}>
-            <Card sx={{ p: { xs: 1.25, sm: 2 }, borderRadius: 3 }}>
-              <Typography variant="body2" color="text.secondary" sx={{ fontSize: { xs: "0.75rem", sm: undefined } }}>
-                بانتظار الموافقة
-              </Typography>
-              <Typography variant="h5" fontWeight={900} color="info.main" sx={{ fontSize: { xs: "1.2rem", sm: undefined } }}>
-                {counts.pending}
-              </Typography>
-            </Card>
-          </Grid>
-        </Grid>
+   
 
         <Card sx={{ mt: 2, borderRadius: 3, overflow: "hidden" }}>
           <Box sx={{ px: { xs: 1.5, sm: 2 }, py: 1.5, bgcolor: alpha(theme.palette.primary.main, 0.06) }}>
@@ -660,9 +509,7 @@ export default function StaffPage({ mode, onToggleMode }) {
                       <Typography fontWeight={700} sx={{ wordBreak: "break-word" }}>
                         {row.name}
                       </Typography>
-                      <Typography variant="caption" color="text.secondary" display="block">
-                        @{row.username}
-                      </Typography>
+                     
                     </TableCell>
                     <TableCell align="center" sx={{ verticalAlign: "middle" }}>
                       <Chip
@@ -865,11 +712,12 @@ export default function StaffPage({ mode, onToggleMode }) {
                 displayEmpty
                 value={editForm.role}
                 onChange={(e) => setEditForm((p) => ({ ...p, role: e.target.value }))}
+                disabled={!superAdmin}
               >
-                <MenuItem value="admin">Admin</MenuItem>
-                <MenuItem value="super_admin">Super Admin</MenuItem>
                 <MenuItem value="cashier">Cashier</MenuItem>
-                <MenuItem value="super_cashier">سوبر كاشير</MenuItem>
+                {superAdmin ? <MenuItem value="super_cashier">سوبر كاشير</MenuItem> : null}
+                {superAdmin ? <MenuItem value="admin">Admin</MenuItem> : null}
+                {superAdmin ? <MenuItem value="super_admin">Super Admin</MenuItem> : null}
               </Select>
               <Select
                 fullWidth
@@ -1035,10 +883,10 @@ export default function StaffPage({ mode, onToggleMode }) {
                 value={newUser.role}
                 onChange={(e) => setNewUser((p) => ({ ...p, role: e.target.value }))}
               >
-                <MenuItem value="admin">Admin</MenuItem>
-                <MenuItem value="super_admin">Super Admin</MenuItem>
                 <MenuItem value="cashier">Cashier</MenuItem>
-                <MenuItem value="super_cashier">سوبر كاشير</MenuItem>
+                {superAdmin ? <MenuItem value="super_cashier">سوبر كاشير</MenuItem> : null}
+                {superAdmin ? <MenuItem value="admin">Admin</MenuItem> : null}
+                {superAdmin ? <MenuItem value="super_admin">Super Admin</MenuItem> : null}
               </Select>
               <Typography variant="caption" color="text.secondary">
                 صورة اختيارية تظهر في الهيدر بعد تفعيل الحساب وتسجيل الدخول

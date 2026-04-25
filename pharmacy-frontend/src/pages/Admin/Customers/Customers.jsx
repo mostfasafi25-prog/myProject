@@ -93,7 +93,6 @@ const Customers = () => {
         }
       });
 
-      console.log("إرسال الفلاتر:", params); // للتصحيح
 
       const response = await axios.get(
         `${API_BASE_URL}/treasury/employee-payments-report`,
@@ -570,7 +569,6 @@ const Customers = () => {
   // ===== إرسال البيانات للباكند =====
   const handleSubmit = async () => {
     if (!validateForm()) {
-      console.log("فشل التحقق من النموذج");
       return;
     }
 
@@ -589,11 +587,9 @@ const Customers = () => {
           newEmployee.payment_type === "daily" ? newEmployee.daily_rate : 0, // ⬅️ أضف هذا
       };
 
-      console.log("بيانات الإرسال للخادم:", dataToSend);
 
       const response = await axios.post(CUSTOMERS_URL, dataToSend);
 
-      console.log("استجابة الخادم:", response.data);
 
       if (response.data.success) {
         handleCloseDialog();
@@ -601,7 +597,6 @@ const Customers = () => {
         showSnackbar("تم إضافة الموظف بنجاح!", "success");
       } else {
         const errorMsg = response.data.message || "حدث خطأ أثناء الإضافة";
-        console.log("خطأ من الخادم:", errorMsg);
         setErrors({
           submit: errorMsg,
         });
@@ -621,7 +616,6 @@ const Customers = () => {
         err.message ||
         "فشل في إضافة الموظف";
 
-      console.log("رسالة الخطأ النهائية:", errorMsg);
 
       setErrors({
         submit: errorMsg,

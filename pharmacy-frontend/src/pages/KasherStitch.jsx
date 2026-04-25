@@ -677,6 +677,8 @@ export default function Cashier() {
     }
 
     try {
+      const paid = calculateCartTotal(cartItems);
+      const pm = paymentMethod === "app" ? "app" : "cash";
       await axios.post(`${API_BASE_URL}/orders/sell-ready-meal`, {
         items: cartItems.map((item) => ({
           meal_id: item.mealId,
@@ -691,8 +693,10 @@ export default function Cashier() {
               group_name: opt.group_name || undefined,
             })) || [],
         })),
-        paid_amount: calculateCartTotal(cartItems),
-        payment_method: paymentMethod,
+        paid_amount: paid,
+        payment_method: pm,
+        cash_amount: pm === "app" ? 0 : paid,
+        app_amount: pm === "app" ? paid : 0,
       });
 
       showAppToast("تم إتمام عملية البيع بنجاح", "success");

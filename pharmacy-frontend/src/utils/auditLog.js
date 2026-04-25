@@ -1,25 +1,19 @@
 /** سجل أحداث أمني — يُعرض للمدير فقط */
+import { readCriticalJson, removeCriticalKey, writeCriticalJson } from "./criticalSyncStorage";
+
 const KEY = "pharmacySecurityAuditLog_v1";
 const MAX_ROWS = 600;
 
 export function readAuditLog() {
-  try {
-    const raw = JSON.parse(localStorage.getItem(KEY));
-    return Array.isArray(raw) ? raw : [];
-  } catch {
-    return [];
-  }
+  const raw = readCriticalJson(KEY, []);
+  return Array.isArray(raw) ? raw : [];
 }
 
 /**
  * @param {{ action: string, details?: string, username?: string, role?: string }} entry
  */
 export function clearAuditLog() {
-  try {
-    localStorage.removeItem(KEY);
-  } catch {
-    // ignore
-  }
+  removeCriticalKey(KEY);
 }
 
 export function appendAudit(entry) {
@@ -34,8 +28,8 @@ export function appendAudit(entry) {
   try {
     const prev = readAuditLog();
     const next = [row, ...prev].slice(0, MAX_ROWS);
-    localStorage.setItem(KEY, JSON.stringify(next));
+    writeCriticalJson(KEY, next);
   } catch {
-    localStorage.setItem(KEY, JSON.stringify([row]));
+    writeCriticalJson(KEY, [row]);
   }
 }

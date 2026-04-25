@@ -63,13 +63,12 @@ import {
   Typography,
   useTheme,
 } from "@mui/material";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Axios } from "../../Api/Axios";
 import {
   mergeUserWithProfileExtras,
   persistSessionUser,
-  persistUserAvatarForLogin,
 } from "../../utils/staffProfileExtras";
 import { compressImageFileForUpload } from "../../utils/imageCompress";
 import { PHARMACY_USER_STORAGE_EVENT } from "../../utils/userRoles";
@@ -97,12 +96,17 @@ import {
 } from "../../utils/localStorageEviction";
 import { THEME_PRESETS } from "../../utils/themePresets";
 import { chipColorForBalance, negativeAmountTextSx } from "../../utils/negativeAmountStyle";
-import { notifyStoreBalanceChanged } from "../../utils/storeBalanceSync";
 import {
   getCashierSystemSettings,
   setCashierSystemSettings,
 } from "../../utils/cashierSystemSettings";
-const STORE_BALANCE_KEY = "storeBalance";
+import {
+  APPROVAL_REQUESTS_EVENT,
+  approveApprovalRequest,
+  expireOldApprovalRequests,
+  readApprovalRequests,
+  rejectApprovalRequest,
+} from "../../utils/approvalRequests";
 const MAX_AVATAR_FILE_BYTES = 2 * 1024 * 1024;
 const NOTIFICATIONS_KEY = "systemNotifications";
 
@@ -153,6 +157,7 @@ export default function SettingsPage({
   const isAppearanceSettings = location.pathname.includes("/settings/appearance");
   const isMoneySettings = location.pathname.includes("/settings/money");
   const isNotificationSettings = location.pathname.includes("/settings/notifications");
+  const isInstructionsSettings = location.pathname.includes("/settings/instructions");
   const isCashierSystemSettings =
     location.pathname.includes("/settings/cashier") && !location.pathname.startsWith("/cashier/settings");
   const cashierSettings = location.pathname.startsWith("/cashier/settings");
@@ -163,6 +168,7 @@ export default function SettingsPage({
   const [moneyMsg, setMoneyMsg] = useState({ type: "", text: "" });
   const emptyResetSelection = () => ({
     treasury: false,
+    productsReset: false,
     sales: false,
     trimSales: false,
     purchases: false,
@@ -194,7 +200,19 @@ export default function SettingsPage({
   const [cashierNotifyTarget, setCashierNotifyTarget] = useState("");
   const [cashierNotifyPrefs, setCashierNotifyPrefs] = useState(() => ({ ...CASHIER_PREF_DEFAULTS }));
   const [cashierSysDraft, setCashierSysDraft] = useState(() => getCashierSystemSettings());
+  const [cashierSettingsQuery, setCashierSettingsQuery] = useState("");
+  const [approvalRequests, setApprovalRequests] = useState(() => readApprovalRequests());
+  const [rejectNotes, setRejectNotes] = useState({});
+  const [approvalHistoryStatus, setApprovalHistoryStatus] = useState("all");
+  const [approvalHistoryType, setApprovalHistoryType] = useState("all");
+  const [approvalHistoryUser, setApprovalHistoryUser] = useState("all");
+  const [approvalHistoryQuery, setApprovalHistoryQuery] = useState("");
   const avatarInputRef = useRef(null);
+  const formatCurrency = (n) => {
+    const x = Number(n);
+    if (Number.isNaN(x)) return "0.00";
+    return x.toFixed(2);
+  };
   const [avatarPreview, setAvatarPreview] = useState(() => {
     try {
       const raw = localStorage.getItem("user");
@@ -242,23 +260,44 @@ export default function SettingsPage({
     if (!isCashierSystemSettings) return;
     setCashierSysDraft(getCashierSystemSettings());
   }, [isCashierSystemSettings, location.pathname]);
+  useEffect(() => {
+    if (!isCashierSystemSettings) return;
+    const sync = () => setApprovalRequests(readApprovalRequests());
+    expireOldApprovalRequests();
+    sync();
+    window.addEventListener(APPROVAL_REQUESTS_EVENT, sync);
+    const t = window.setInterval(() => {
+      expireOldApprovalRequests();
+      sync();
+    }, 15000);
+    return () => {
+      window.removeEventListener(APPROVAL_REQUESTS_EVENT, sync);
+      window.clearInterval(t);
+    };
+  }, [isCashierSystemSettings]);
 
   useEffect(() => {
     if (!isMoneySettings) return;
-    try {
-      const raw = JSON.parse(localStorage.getItem(STORE_BALANCE_KEY));
-      if (raw && typeof raw === "object") {
-        setStoreBalance({
-          total: Number(raw.total || 0),
-          cash: Number(raw.cash || 0),
-          app: Number(raw.app || 0),
-        });
-        return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await Axios.get("treasury-balance");
+        if (!cancelled && data?.success) {
+          setStoreBalance({
+            total: Number(data?.data?.balance || 0),
+            cash: 0,
+            app: 0,
+          });
+        }
+      } catch {
+        if (!cancelled) {
+          setStoreBalance({ total: 0, cash: 0, app: 0 });
+        }
       }
-    } catch {
-      // ignore malformed value
-    }
-    setStoreBalance({ total: 0, cash: 0, app: 0 });
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [isMoneySettings]);
 
   const hasChanges = useMemo(() => JSON.stringify(draft) !== JSON.stringify(uiSettings), [draft, uiSettings]);
@@ -272,7 +311,87 @@ export default function SettingsPage({
   const saveCashierSysSettings = () => {
     setCashierSystemSettings(cashierSysDraft);
     setSavedMsg("تم حفظ إعدادات الكاشير بنجاح");
+    showAppToast("تم الحفظ", "success");
     setTimeout(() => setSavedMsg(""), 1800);
+  };
+  const pendingApprovals = useMemo(
+    () => approvalRequests.filter((r) => String(r.status || "") === "pending"),
+    [approvalRequests],
+  );
+  const approvalTypeLabel = (type) => {
+    const m = {
+      discount: "موافقة خصم",
+      credit_debt: "موافقة بيع آجل",
+      refund: "موافقة مرتجع",
+      reprint: "موافقة إعادة طباعة",
+    };
+    return m[String(type || "")] || String(type || "طلب");
+  };
+  const approvalStatusLabel = (status) => {
+    const m = {
+      pending: "معلق",
+      approved: "مقبول",
+      rejected: "مرفوض",
+      expired: "منتهي",
+    };
+    return m[String(status || "")] || String(status || "—");
+  };
+  const approvalHistoryUsers = useMemo(() => {
+    const all = new Set();
+    approvalRequests.forEach((r) => {
+      if (r?.requestedBy) all.add(String(r.requestedBy));
+      if (r?.approvedBy) all.add(String(r.approvedBy));
+    });
+    return Array.from(all).sort((a, b) => a.localeCompare(b));
+  }, [approvalRequests]);
+  const approvalHistoryRows = useMemo(() => {
+    const q = String(approvalHistoryQuery || "").trim().toLowerCase();
+    return approvalRequests
+      .filter((r) => String(r.status || "") !== "pending")
+      .filter((r) => (approvalHistoryStatus === "all" ? true : String(r.status || "") === approvalHistoryStatus))
+      .filter((r) => (approvalHistoryType === "all" ? true : String(r.requestType || "") === approvalHistoryType))
+      .filter((r) =>
+        approvalHistoryUser === "all"
+          ? true
+          : String(r.requestedBy || "") === approvalHistoryUser || String(r.approvedBy || "") === approvalHistoryUser,
+      )
+      .filter((r) => {
+        if (!q) return true;
+        return (
+          String(r.id || "").toLowerCase().includes(q) ||
+          String(r.requestedBy || "").toLowerCase().includes(q) ||
+          String(r.approvedBy || "").toLowerCase().includes(q) ||
+          String(r.reason || "").toLowerCase().includes(q) ||
+          String(r.rejectedReason || "").toLowerCase().includes(q) ||
+          String(r.executionResult || "").toLowerCase().includes(q) ||
+          String(r.invoiceId || "").toLowerCase().includes(q)
+        );
+      })
+      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+  }, [approvalRequests, approvalHistoryQuery, approvalHistoryStatus, approvalHistoryType, approvalHistoryUser]);
+  const handleApproveRequest = (reqId) => {
+    const res = approveApprovalRequest(reqId, currentUser?.username || "");
+    if (!res.ok) {
+      showAppToast(res.message || "تعذرت الموافقة", "error");
+      return;
+    }
+    setApprovalRequests(readApprovalRequests());
+    showAppToast(res.message || "تمت الموافقة", "success");
+  };
+  const handleRejectRequest = (reqId) => {
+    const reason = String(rejectNotes[reqId] || "").trim();
+    if (!reason) {
+      showAppToast("اكتب سبب الرفض أولاً", "warning");
+      return;
+    }
+    const res = rejectApprovalRequest(reqId, currentUser?.username || "", reason);
+    if (!res.ok) {
+      showAppToast(res.message || "تعذر الرفض", "error");
+      return;
+    }
+    setRejectNotes((p) => ({ ...p, [reqId]: "" }));
+    setApprovalRequests(readApprovalRequests());
+    showAppToast("تم رفض الطلب", "info");
   };
 
   const handleReset = () => {
@@ -311,77 +430,109 @@ export default function SettingsPage({
       setPwdLoading(false);
     }
   };
-  const handleMoneyDeposit = () => {
-    setMoneyMsg({ type: "", text: "" });
-    const amount = Number(moneyAmount);
-    if (!amount || amount <= 0) {
-      setMoneyMsg({ type: "error", text: "أدخل مبلغ صحيح أكبر من صفر" });
-      return;
-    }
-    const next = {
-      total: storeBalance.total + amount,
-      cash: moneyMethod === "cash" ? storeBalance.cash + amount : storeBalance.cash,
-      app: moneyMethod === "app" ? storeBalance.app + amount : storeBalance.app,
-      lastOperation: "deposit",
-      lastDepositMethod: moneyMethod,
-      updatedAt: new Date().toISOString(),
-    };
-    localStorage.setItem(STORE_BALANCE_KEY, JSON.stringify(next));
-    notifyStoreBalanceChanged();
-    setStoreBalance(next);
-    setMoneyAmount("");
-    setMoneyMsg({ type: "success", text: "تم تزويد الخزنة بنجاح" });
-    appendAudit({
-      action: "treasury_deposit",
-      details: JSON.stringify({ amount, method: moneyMethod }),
-      username: currentUser?.username || "",
-      role: currentUser?.role || "",
-    });
-  };
 
-  const handleMoneyWithdraw = async () => {
-    setMoneyMsg({ type: "", text: "" });
-    const amount = Number(moneyWithdrawAmount);
-    if (!amount || amount <= 0) {
-      setMoneyMsg({ type: "error", text: "أدخل مبلغ صحيح أكبر من صفر" });
-      return;
+
+// تعديل الدوال في SettingsPage.jsx
+
+const handleMoneyDeposit = async () => {
+  setMoneyMsg({ type: "", text: "" });
+  
+  if (!moneyAmount || Number(moneyAmount) <= 0) {
+    setMoneyMsg({ type: "error", text: "الرجاء إدخال مبلغ صحيح للتزويد" });
+    return;
+  }
+  
+  try {
+    setResetBusy(true);
+    
+    // استخدام manualDeposit من الـ API
+    const { data } = await Axios.post("treasury/manual-deposit", {
+      amount: Number(moneyAmount),
+      description: `تزويد الخزنة - ${new Date().toLocaleDateString('ar-SA')}`,
+      payment_method: moneyMethod, // 'cash' أو 'app'
+      transaction_date: new Date().toISOString()
+    });
+    
+    if (data.success) {
+      setMoneyMsg({ type: "success", text: `تم تزويد ${formatCurrency(Number(moneyAmount))} شيكل بنجاح` });
+      setMoneyAmount("");
+      await fetchTreasuryBalance(); // إعادة جلب الرصيد
+      showAppToast(`تم تزويد ${formatCurrency(Number(moneyAmount))} شيكل`, "success");
+    } else {
+      setMoneyMsg({ type: "error", text: data.message || "فشل في تزويد الخزنة" });
     }
-    const available = moneyWithdrawMethod === "cash" ? storeBalance.cash : storeBalance.app;
-    if (available <= 0) {
-      setMoneyMsg({
-        type: "error",
-        text: moneyWithdrawMethod === "cash" ? "لا يوجد رصيد في الكاش" : "لا يوجد رصيد في التطبيق",
+  } catch (error) {
+    console.error("Error depositing to treasury:", error);
+    setMoneyMsg({ 
+      type: "error", 
+      text: error.response?.data?.message || "حدث خطأ أثناء تزويد الخزنة" 
+    });
+  } finally {
+    setResetBusy(false);
+  }
+};
+
+const handleMoneyWithdraw = async () => {
+  setMoneyMsg({ type: "", text: "" });
+  
+  if (!moneyWithdrawAmount || Number(moneyWithdrawAmount) <= 0) {
+    setMoneyMsg({ type: "error", text: "الرجاء إدخال مبلغ صحيح للخصم" });
+    return;
+  }
+  
+  try {
+    setResetBusy(true);
+    
+    // استخدام manualWithdraw من الـ API
+    const { data } = await Axios.post("treasury/manual-withdraw", {
+      amount: Number(moneyWithdrawAmount),
+      description: `سحب من الخزنة - ${new Date().toLocaleDateString('ar-SA')}`,
+      payment_method: moneyWithdrawMethod, // 'cash' أو 'app'
+      transaction_date: new Date().toISOString()
+    });
+    
+    if (data.success) {
+      setMoneyMsg({ type: "success", text: `تم خصم ${formatCurrency(Number(moneyWithdrawAmount))} شيكل بنجاح` });
+      setMoneyWithdrawAmount("");
+      await fetchTreasuryBalance(); // إعادة جلب الرصيد
+      showAppToast(`تم خصم ${formatCurrency(Number(moneyWithdrawAmount))} شيكل`, "success");
+    } else {
+      setMoneyMsg({ type: "error", text: data.message || "فشل في خصم المبلغ" });
+    }
+  } catch (error) {
+    console.error("Error withdrawing from treasury:", error);
+    setMoneyMsg({ 
+      type: "error", 
+      text: error.response?.data?.message || "حدث خطأ أثناء خصم المبلغ" 
+    });
+  } finally {
+    setResetBusy(false);
+  }
+};
+
+const fetchTreasuryBalance = useCallback(async () => {
+  try {
+    const { data } = await Axios.get("treasury-balance");
+    if (data.success) {
+      setStoreBalance({
+        total: Number(data.data?.balance || 0),
+        cash: Number(data.data?.balance_cash || 0),  // ✅ التصحيح
+        app: Number(data.data?.balance_app || 0),   // ✅ التصحيح
+        treasury_id: Number(data.data?.treasury_id || 1),
       });
-      return;
+      
+      if (!data.data?.exists) {
+        showAppToast("تحذير: الخزنة غير مُهيأة - أضف رصيداً أولاً", "warning");
+      }
     }
-    const take = Math.min(amount, available);
-    const ok = await confirmApp({
-      title: "خصم من الخزنة",
-      message: `سيتم خصم ${take.toFixed(2)} شيكل من ${moneyWithdrawMethod === "cash" ? "رصيد الكاش" : "رصيد التطبيق"} (المطلوب: ${amount.toFixed(2)} شيكل، المتاح: ${available.toFixed(2)} شيكل).`,
-      confirmText: "تنفيذ الخصم",
-    });
-    if (!ok) return;
-    const next = {
-      total: Math.max(0, storeBalance.total - take),
-      cash:
-        moneyWithdrawMethod === "cash" ? Math.max(0, storeBalance.cash - take) : storeBalance.cash,
-      app: moneyWithdrawMethod === "app" ? Math.max(0, storeBalance.app - take) : storeBalance.app,
-      lastOperation: "withdraw",
-      lastWithdrawMethod: moneyWithdrawMethod,
-      updatedAt: new Date().toISOString(),
-    };
-    localStorage.setItem(STORE_BALANCE_KEY, JSON.stringify(next));
-    notifyStoreBalanceChanged();
-    setStoreBalance(next);
-    setMoneyWithdrawAmount("");
-    setMoneyMsg({ type: "success", text: "تم خصم المبلغ بنجاح" });
-    appendAudit({
-      action: "treasury_withdraw",
-      details: JSON.stringify({ amount: take, method: moneyWithdrawMethod }),
-      username: currentUser?.username || "",
-      role: currentUser?.role || "",
-    });
-  };
+  } catch (error) {
+    console.error("Error fetching treasury:", error);
+    showAppToast("فشل في جلب رصيد الخزنة", "error");
+  }
+}, []);
+
+
+
 
   const anyResetSelected = useMemo(
     () => Object.values(resetSelection).some(Boolean),
@@ -403,10 +554,20 @@ export default function SettingsPage({
     if (!ok) return;
     setResetBusy(true);
     try {
-      const done = applySystemDangerResets(resetSelection, {
+      const done = [];
+      if (resetSelection.treasury) {
+        await Axios.post("system/reset-all");
+        done.push("تصفير كامل النظام من الباك اند (الخزنة + الأصناف + الأقسام + السجلات)");
+      }
+      if (resetSelection.productsReset) {
+        await Axios.post("products/reset-all");
+        done.push("تصفير جميع الأصناف من قاعدة البيانات");
+      }
+      const localDone = applySystemDangerResets(resetSelection, {
         username: currentUser?.username || "",
         role: currentUser?.role || "",
       });
+      done.push(...localDone);
       if (resetSelection.treasury) {
         setStoreBalance({ total: 0, cash: 0, app: 0 });
       }
@@ -490,24 +651,28 @@ export default function SettingsPage({
     setNotifyMsg({ type: "success", text: "تم إرسال الإشعار بنجاح" });
   };
 
-  const persistUserAvatar = (avatarDataUrl) => {
+  const persistUserAvatar = async (avatarDataUrl) => {
     try {
       const raw = localStorage.getItem("user");
       const u = raw ? JSON.parse(raw) : {};
-      const uname = typeof u.username === "string" ? u.username : "";
-      if (uname) persistUserAvatarForLogin(uname, avatarDataUrl || null);
-      const next = { ...u };
+      const uid = Number(u.id);
+      if (!(Number.isFinite(uid) && uid > 0)) {
+        setAccountMsg({ type: "error", text: "تعذر تحديد المستخدم الحالي لحفظ الصورة" });
+        return;
+      }
+      await Axios.put(`users/${uid}`, { avatar_url: avatarDataUrl || null });
+      const next = { ...u, avatar_url: avatarDataUrl || null };
       delete next.avatarDataUrl;
       delete next.avatar;
       const saved = persistSessionUser(next);
       if (!saved.ok) {
-        setAccountMsg({ type: "error", text: "تعذر حفظ الجلسة — الذاكرة المحلية ممتلئة. امسح بيانات الموقع أو قلّل حجم الصور." });
+        setAccountMsg({ type: "error", text: "تعذر تحديث الجلسة بعد حفظ الصورة" });
         return;
       }
       setAvatarPreview(avatarDataUrl || null);
       window.dispatchEvent(new Event(PHARMACY_USER_STORAGE_EVENT));
     } catch {
-      setAccountMsg({ type: "error", text: "تعذر حفظ الصورة" });
+      setAccountMsg({ type: "error", text: "تعذر حفظ الصورة في الخادم" });
     }
   };
 
@@ -526,8 +691,10 @@ export default function SettingsPage({
     }
     try {
       const dataUrl = await compressImageFileForUpload(file);
-      persistUserAvatar(dataUrl);
-      setAccountMsg({ type: "success", text: "تم حفظ صورة الملف الشخصي" });
+      await persistUserAvatar(dataUrl);
+      setAccountMsg((prev) =>
+        prev.type === "warning" ? prev : { type: "success", text: "تم حفظ صورة الملف الشخصي" },
+      );
     } catch {
       setAccountMsg({ type: "error", text: "تعذر ضغط الصورة. جرّب صورة أصغر (JPG/PNG)." });
     }
@@ -535,8 +702,11 @@ export default function SettingsPage({
 
   const handleRemoveAvatar = () => {
     setAccountMsg({ type: "", text: "" });
-    persistUserAvatar(null);
-    setAccountMsg({ type: "success", text: "تمت إزالة صورة الملف الشخصي" });
+    void persistUserAvatar(null).then(() => {
+      setAccountMsg((prev) =>
+        prev.type === "warning" ? prev : { type: "success", text: "تمت إزالة صورة الملف الشخصي" },
+      );
+    });
   };
 
   const cashierTopBar = cashierSettings ? (
@@ -595,6 +765,8 @@ export default function SettingsPage({
                   ? "مظهر الموقع"
                   : isMoneySettings
                     ? "إعداد المال"
+                    : isInstructionsSettings
+                      ? "تعليمات التشغيل"
                     : isCashierSystemSettings
                       ? "إعدادات الكاشير"
                       : isNotificationSettings
@@ -608,6 +780,8 @@ export default function SettingsPage({
                   ? "تحكم كامل بالألوان والخطوط والهيكل العام للموقع"
                   : isMoneySettings
                     ? "إدارة المال العام للخزنة وتوزيعه بين كاش وتطبيق"
+                    : isInstructionsSettings
+                      ? "دليل سريع منظم للصلاحيات والمبيعات والمشتريات"
                     : isCashierSystemSettings
                       ? "ما يظهر للكاشيرين: خصم، آجل، تعليق، طباعة، وغيرها — يُحفظ على أجهزة المتصفح"
                       : isNotificationSettings
@@ -1123,14 +1297,24 @@ export default function SettingsPage({
                         </ToggleButton>
                       </ToggleButtonGroup>
                     </Box>
-                    <Button
-                      variant="contained"
-                      color="secondary"
-                      onClick={() => void handleMoneyWithdraw()}
-                      sx={{ textTransform: "none", fontWeight: 900, alignSelf: "flex-start" }}
-                    >
-                      تنفيذ الخصم
-                    </Button>
+                    <Button 
+  variant="contained" 
+  onClick={handleMoneyDeposit} 
+  disabled={resetBusy || !moneyAmount || Number(moneyAmount) <= 0}
+  sx={{ textTransform: "none", fontWeight: 900, alignSelf: "flex-start" }}
+>
+  {resetBusy ? "جاري التنفيذ..." : "تنفيذ التزويد"}
+</Button>
+
+<Button
+  variant="contained"
+  color="secondary"
+  onClick={handleMoneyWithdraw}
+  disabled={resetBusy || !moneyWithdrawAmount || Number(moneyWithdrawAmount) <= 0}
+  sx={{ textTransform: "none", fontWeight: 900, alignSelf: "flex-start" }}
+>
+  {resetBusy ? "جاري التنفيذ..." : "تنفيذ الخصم"}
+</Button>
                   </Stack>
                 </Card>
               </Grid>
@@ -1249,6 +1433,12 @@ export default function SettingsPage({
                   <FormGroup sx={{ mb: 2 }}>
                     <Grid container spacing={1.25}>
                       {[
+                        {
+                          key: "productsReset",
+                          label: "تصفير الأصناف (من الباك اند)",
+                          hint: "حذف جميع الأصناف نهائياً من قاعدة البيانات",
+                          icon: <Inventory2 fontSize="small" />,
+                        },
                         {
                           key: "sales",
                           label: "تصفير المبيعات بالكامل",
@@ -1533,7 +1723,17 @@ export default function SettingsPage({
                 </Box>
               </Stack>
               <Divider sx={{ mb: 1 }} />
-              {[
+              <TextField
+                size="small"
+                fullWidth
+                label="بحث في إعدادات الكاشير"
+                placeholder="اكتب اسم الإعداد أو الوصف..."
+                value={cashierSettingsQuery}
+                onChange={(e) => setCashierSettingsQuery(e.target.value)}
+                sx={{ mb: 1.25 }}
+              />
+              <Grid container spacing={1.2}>
+                {[
                 {
                   key: "discountEnabled",
                   title: "الخصم على السلة",
@@ -1548,6 +1748,16 @@ export default function SettingsPage({
                   key: "appPaymentEnabled",
                   title: "الدفع عبر التطبيق",
                   hint: "خيار «تطبيق» في مجموعة طريقة الدفع",
+                },
+                {
+                  key: "cardPaymentEnabled",
+                  title: "الدفع بالبطاقة",
+                  hint: "إظهار خيار «بطاقة» في شاشة الكاشير",
+                },
+                {
+                  key: "insurancePaymentEnabled",
+                  title: "الدفع بالتأمين",
+                  hint: "إظهار خيار «تأمين» مع احتساب التغطية",
                 },
                 {
                   key: "holdCartEnabled",
@@ -1570,6 +1780,11 @@ export default function SettingsPage({
                   hint: "الأزرار فوق قائمة المنتجات",
                 },
                 {
+                  key: "showProductImages",
+                  title: "عرض صور الأصناف",
+                  hint: "إظهار/إخفاء صور الأصناف في شاشة الكاشير",
+                },
+                {
                   key: "offlineModeToggleEnabled",
                   title: "وضع عدم الاتصال",
                   hint: "تفعيل حفظ الفواتير محلياً عند انقطاع الشبكة",
@@ -1584,29 +1799,383 @@ export default function SettingsPage({
                   title: "افتراضي: طباعة الوصل بعد البيع",
                   hint: "للمستخدمين الذين لم يغيّروا المفتاح في الكاشير — يبقى لكل كاشير تفضيله على جهازه",
                 },
-              ].map((row) => (
-                <Stack
-                  key={row.key}
-                  direction="row"
-                  alignItems="center"
-                  justifyContent="space-between"
-                  sx={{ gap: 2, py: 1.25, borderBottom: `1px solid ${theme.palette.divider}` }}
-                >
-                  <Box sx={{ flex: 1, minWidth: 0 }}>
-                    <Typography fontWeight={800}>{row.title}</Typography>
-                    <Typography variant="caption" color="text.secondary" display="block">
-                      {row.hint}
-                    </Typography>
-                  </Box>
-                  <Switch
-                    checked={Boolean(cashierSysDraft[row.key])}
-                    onChange={() =>
-                      setCashierSysDraft((p) => ({ ...p, [row.key]: !p[row.key] }))
-                    }
-                    inputProps={{ "aria-label": row.title }}
+                {
+                  key: "taxEnabled",
+                  title: "تفعيل الضريبة في المبيعات",
+                  hint: "عند التفعيل تُحسب الضريبة تلقائياً على الفاتورة",
+                },
+                {
+                  key: "approvalWorkflowEnabled",
+                  title: "تفعيل مسار الموافقات",
+                  hint: "إنشاء طلبات موافقة بدلاً من تطبيق القيود مباشرة",
+                },
+                {
+                  key: "discountApprovalEnabled",
+                  title: "موافقة الخصم",
+                  hint: "يتطلب طلب موافقة عند تجاوز حد الخصم",
+                },
+                {
+                  key: "creditApprovalEnabled",
+                  title: "موافقة البيع الآجل",
+                  hint: "يتطلب طلب موافقة عند تجاوز حد الآجل",
+                },
+                {
+                  key: "returnApprovalEnabled",
+                  title: "موافقة المرتجع",
+                  hint: "خارج النافذة الزمنية يُرسل طلب موافقة",
+                },
+                {
+                  key: "reprintApprovalEnabled",
+                  title: "موافقة إعادة الطباعة",
+                  hint: "عند تجاوز الحد يُرسل طلب موافقة",
+                },
+                {
+                  key: "requirePrescriptionImage",
+                  title: "إلزام صورة روشتة للأدوية المقيدة",
+                  hint: "لا يتم إكمال البيع بدون إرفاق الروشتة عند اللزوم",
+                },
+                {
+                  key: "salesSuspendEnabled",
+                  title: "تعليق الفاتورة",
+                  hint: "السماح بتعليق الفاتورة واسترجاعها لاحقاً",
+                },
+                {
+                  key: "reprintRestricted",
+                  title: "تقييد إعادة الطباعة",
+                  hint: "التحكم بعدد مرات إعادة طباعة الفاتورة",
+                },
+                {
+                  key: "requireCreditApproval",
+                  title: "طلب موافقة على البيع الآجل",
+                  hint: "إظهار تنبيه موافقة للمبيعات الآجلة حسب السياسة",
+                },
+                {
+                  key: "allowPartialReturn",
+                  title: "السماح بالمرتجع الجزئي",
+                  hint: "تفعيل أو تعطيل إرجاع جزء من الفاتورة",
+                },
+                ]
+                  .filter((row) => {
+                    const q = String(cashierSettingsQuery || "").trim().toLowerCase();
+                    if (!q) return true;
+                    return (
+                      String(row.title || "").toLowerCase().includes(q) ||
+                      String(row.hint || "").toLowerCase().includes(q)
+                    );
+                  })
+                  .map((row) => (
+                  <Grid key={row.key} size={{ xs: 12, sm: 6, md: 4 }}>
+                    <Card
+                      variant="outlined"
+                      sx={{
+                        borderRadius: 2,
+                        borderColor: alpha(theme.palette.secondary.main, 0.22),
+                        p: 1.15,
+                        minHeight: 96,
+                        display: "flex",
+                        alignItems: "flex-start",
+                        justifyContent: "space-between",
+                        gap: 1.25,
+                      }}
+                    >
+                      <Box sx={{ flex: 1, minWidth: 0 }}>
+                        <Typography fontWeight={800}>{row.title}</Typography>
+                        <Typography variant="caption" color="text.secondary" display="block">
+                          {row.hint}
+                        </Typography>
+                      </Box>
+                      <Switch
+                        checked={Boolean(cashierSysDraft[row.key])}
+                        onChange={() =>
+                          setCashierSysDraft((p) => ({ ...p, [row.key]: !p[row.key] }))
+                        }
+                        inputProps={{ "aria-label": row.title }}
+                      />
+                    </Card>
+                  </Grid>
+                  ))}
+              </Grid>
+              <Card
+                variant="outlined"
+                sx={{
+                  mt: 2,
+                  p: 1.5,
+                  borderRadius: 2.5,
+                  borderColor: alpha(theme.palette.primary.main, 0.24),
+                  bgcolor: alpha(theme.palette.primary.main, 0.04),
+                }}
+              >
+                <Typography fontWeight={900} sx={{ mb: 1 }}>
+                  حدود وسياسات البيع
+                </Typography>
+                <Grid container spacing={1.2}>
+                  <Grid size={{ xs: 12, sm: 6 }}>
+                    <TextField
+                      size="small"
+                      type="number"
+                      label="نسبة ضريبة افتراضية %"
+                      value={cashierSysDraft.defaultTaxRate ?? 0}
+                      onChange={(e) =>
+                        setCashierSysDraft((p) => ({
+                          ...p,
+                          defaultTaxRate: Math.max(0, Number(e.target.value || 0)),
+                        }))
+                      }
+                      fullWidth
+                      inputProps={{ min: 0, max: 100, step: 0.5 }}
+                    />
+                  </Grid>
+                  <Grid size={{ xs: 12, sm: 6 }}>
+                    <TextField
+                      size="small"
+                      type="number"
+                      label="خصم % بدون موافقة"
+                      value={cashierSysDraft.maxDiscountPercentNoApproval ?? 10}
+                      onChange={(e) =>
+                        setCashierSysDraft((p) => ({
+                          ...p,
+                          maxDiscountPercentNoApproval: Math.max(0, Number(e.target.value || 0)),
+                        }))
+                      }
+                      fullWidth
+                      inputProps={{ min: 0, max: 100, step: 1 }}
+                    />
+                  </Grid>
+                  <Grid size={{ xs: 12, sm: 6 }}>
+                    <TextField
+                      size="small"
+                      type="number"
+                      label="حد البيع الآجل بدون موافقة (شيكل)"
+                      value={cashierSysDraft.creditLimitNoApproval ?? 500}
+                      onChange={(e) =>
+                        setCashierSysDraft((p) => ({
+                          ...p,
+                          creditLimitNoApproval: Math.max(0, Number(e.target.value || 0)),
+                        }))
+                      }
+                      fullWidth
+                      inputProps={{ min: 0, step: 10 }}
+                    />
+                  </Grid>
+                  <Grid size={{ xs: 12, sm: 6 }}>
+                    <TextField
+                      size="small"
+                      type="number"
+                      label="نافذة مرتجع الكاشير (دقيقة)"
+                      value={cashierSysDraft.returnWindowMinutesCashier ?? 30}
+                      onChange={(e) =>
+                        setCashierSysDraft((p) => ({
+                          ...p,
+                          returnWindowMinutesCashier: Math.max(1, Number(e.target.value || 1)),
+                        }))
+                      }
+                      fullWidth
+                      inputProps={{ min: 1, step: 1 }}
+                    />
+                  </Grid>
+                  <Grid size={{ xs: 12, sm: 6 }}>
+                    <TextField
+                      size="small"
+                      type="number"
+                      label="نافذة مرتجع سوبر كاشير (دقيقة)"
+                      value={cashierSysDraft.returnWindowMinutesSupervisor ?? 1440}
+                      onChange={(e) =>
+                        setCashierSysDraft((p) => ({
+                          ...p,
+                          returnWindowMinutesSupervisor: Math.max(1, Number(e.target.value || 1)),
+                        }))
+                      }
+                      fullWidth
+                      inputProps={{ min: 1, step: 1 }}
+                    />
+                  </Grid>
+                  <Grid size={{ xs: 12, sm: 6 }}>
+                    <TextField
+                      size="small"
+                      type="number"
+                      label="حد إعادة طباعة الكاشير"
+                      value={cashierSysDraft.reprintMaxCashier ?? 1}
+                      onChange={(e) =>
+                        setCashierSysDraft((p) => ({
+                          ...p,
+                          reprintMaxCashier: Math.max(1, Number(e.target.value || 1)),
+                        }))
+                      }
+                      fullWidth
+                      inputProps={{ min: 1, step: 1 }}
+                    />
+                  </Grid>
+                </Grid>
+              </Card>
+              <Card
+                variant="outlined"
+                sx={{
+                  mt: 2,
+                  p: 1.5,
+                  borderRadius: 2.5,
+                  borderColor: alpha(theme.palette.warning.main, 0.3),
+                  bgcolor: alpha(theme.palette.warning.main, 0.06),
+                }}
+              >
+                <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
+                  <Typography fontWeight={900}>طلبات الموافقة المعلقة</Typography>
+                  <Chip
+                    size="small"
+                    color={pendingApprovals.length ? "warning" : "success"}
+                    label={pendingApprovals.length ? `${pendingApprovals.length} طلب` : "لا يوجد طلبات"}
                   />
                 </Stack>
-              ))}
+                <Divider sx={{ mb: 1 }} />
+                {pendingApprovals.length === 0 ? (
+                  <Typography variant="body2" color="text.secondary">
+                    لا توجد طلبات موافقة حالياً.
+                  </Typography>
+                ) : (
+                  <Stack sx={{ gap: 1 }}>
+                    {pendingApprovals.map((req) => (
+                      <Card key={req.id} variant="outlined" sx={{ p: 1.1, borderRadius: 2 }}>
+                        <Stack direction={{ xs: "column", md: "row" }} spacing={1.2} alignItems={{ md: "center" }}>
+                          <Box sx={{ flex: 1, minWidth: 0 }}>
+                            <Typography fontWeight={800}>{approvalTypeLabel(req.requestType)}</Typography>
+                            <Typography variant="caption" color="text.secondary" display="block">
+                              بواسطة: {req.requestedBy || "—"} | سبب: {req.reason || "—"}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary" display="block">
+                              الفاتورة: {req.invoiceId || "—"} | ينتهي:{" "}
+                              {req.expiresAt ? new Date(req.expiresAt).toLocaleString("en-GB") : "—"}
+                            </Typography>
+                          </Box>
+                          <TextField
+                            size="small"
+                            label="سبب الرفض"
+                            value={rejectNotes[req.id] || ""}
+                            onChange={(e) => setRejectNotes((p) => ({ ...p, [req.id]: e.target.value }))}
+                            sx={{ minWidth: { xs: "100%", md: 220 } }}
+                          />
+                          <Stack direction="row" spacing={0.8}>
+                            <Button
+                              size="small"
+                              variant="contained"
+                              color="success"
+                              onClick={() => handleApproveRequest(req.id)}
+                              sx={{ textTransform: "none", fontWeight: 800 }}
+                            >
+                              قبول
+                            </Button>
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              color="error"
+                              onClick={() => handleRejectRequest(req.id)}
+                              sx={{ textTransform: "none", fontWeight: 800 }}
+                            >
+                              رفض
+                            </Button>
+                          </Stack>
+                        </Stack>
+                      </Card>
+                    ))}
+                  </Stack>
+                )}
+              </Card>
+              <Card
+                variant="outlined"
+                sx={{
+                  mt: 1.25,
+                  p: 1.5,
+                  borderRadius: 2.5,
+                  borderColor: alpha(theme.palette.info.main, 0.28),
+                  bgcolor: alpha(theme.palette.info.main, 0.05),
+                }}
+              >
+                <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
+                  <Typography fontWeight={900}>سجل قرارات الموافقات</Typography>
+                  <Chip
+                    size="small"
+                    color={approvalHistoryRows.length ? "info" : "default"}
+                    label={approvalHistoryRows.length ? `${approvalHistoryRows.length} سجل` : "لا يوجد سجلات"}
+                  />
+                </Stack>
+                <Grid container spacing={1} sx={{ mb: 1 }}>
+                  <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+                    <Select fullWidth size="small" value={approvalHistoryStatus} onChange={(e) => setApprovalHistoryStatus(e.target.value)}>
+                      <MenuItem value="all">كل الحالات</MenuItem>
+                      <MenuItem value="approved">مقبول</MenuItem>
+                      <MenuItem value="rejected">مرفوض</MenuItem>
+                      <MenuItem value="expired">منتهي</MenuItem>
+                    </Select>
+                  </Grid>
+                  <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+                    <Select fullWidth size="small" value={approvalHistoryType} onChange={(e) => setApprovalHistoryType(e.target.value)}>
+                      <MenuItem value="all">كل الأنواع</MenuItem>
+                      <MenuItem value="discount">موافقة خصم</MenuItem>
+                      <MenuItem value="credit_debt">موافقة بيع آجل</MenuItem>
+                      <MenuItem value="refund">موافقة مرتجع</MenuItem>
+                      <MenuItem value="reprint">موافقة إعادة طباعة</MenuItem>
+                    </Select>
+                  </Grid>
+                  <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+                    <Select fullWidth size="small" value={approvalHistoryUser} onChange={(e) => setApprovalHistoryUser(e.target.value)}>
+                      <MenuItem value="all">كل المستخدمين</MenuItem>
+                      {approvalHistoryUsers.map((u) => (
+                        <MenuItem key={u} value={u}>
+                          {u}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </Grid>
+                  <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      label="بحث"
+                      value={approvalHistoryQuery}
+                      onChange={(e) => setApprovalHistoryQuery(e.target.value)}
+                    />
+                  </Grid>
+                </Grid>
+                {approvalHistoryRows.length === 0 ? (
+                  <Typography variant="body2" color="text.secondary">
+                    لا توجد نتائج مطابقة.
+                  </Typography>
+                ) : (
+                  <Stack sx={{ gap: 0.9 }}>
+                    {approvalHistoryRows.slice(0, 120).map((row) => (
+                      <Card key={row.id} variant="outlined" sx={{ p: 1, borderRadius: 2 }}>
+                        <Stack direction={{ xs: "column", md: "row" }} spacing={1} alignItems={{ md: "center" }}>
+                          <Box sx={{ flex: 1, minWidth: 0 }}>
+                            <Stack direction="row" alignItems="center" spacing={0.8} sx={{ mb: 0.35, flexWrap: "wrap" }}>
+                              <Typography fontWeight={800}>{approvalTypeLabel(row.requestType)}</Typography>
+                              <Chip size="small" label={approvalStatusLabel(row.status)} />
+                            </Stack>
+                            <Typography variant="caption" color="text.secondary" display="block">
+                              الطالب: {row.requestedBy || "—"} | المعالج: {row.approvedBy || "—"} | فاتورة: {row.invoiceId || "—"}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary" display="block">
+                              أُنشئ: {row.createdAt ? new Date(row.createdAt).toLocaleString("en-GB") : "—"}
+                              {" | "}
+                              عولج: {row.approvedAt ? new Date(row.approvedAt).toLocaleString("en-GB") : "—"}
+                            </Typography>
+                            <Typography variant="caption" display="block" sx={{ mt: 0.3 }}>
+                              السبب: {row.reason || "—"}
+                            </Typography>
+                            {row.rejectedReason ? (
+                              <Typography variant="caption" color="error.main" display="block">
+                                سبب الرفض: {row.rejectedReason}
+                              </Typography>
+                            ) : null}
+                            {row.executionResult ? (
+                              <Typography variant="caption" color="success.main" display="block">
+                                النتيجة: {row.executionResult}
+                              </Typography>
+                            ) : null}
+                          </Box>
+                        </Stack>
+                      </Card>
+                    ))}
+                  </Stack>
+                )}
+              </Card>
               <Button
                 variant="contained"
                 startIcon={<Save />}
@@ -1615,6 +2184,169 @@ export default function SettingsPage({
               >
                 حفظ إعدادات الكاشير
               </Button>
+            </Card>
+          ) : null}
+
+          {isInstructionsSettings ? (
+            <Card sx={{ p: 2.2, borderRadius: 3, border: `1px solid ${alpha(theme.palette.primary.main, 0.2)}` }}>
+              <Stack sx={{ gap: 2 }}>
+                <Card
+                  variant="outlined"
+                  sx={{
+                    p: 1.75,
+                    borderRadius: 2.5,
+                    borderColor: alpha(theme.palette.warning.main, 0.3),
+                    bgcolor: alpha(theme.palette.warning.main, 0.06),
+                  }}
+                >
+                  <Typography fontWeight={900} sx={{ mb: 1 }}>
+                    إرشادات تشغيل النظام (مختصر عملي)
+                  </Typography>
+                  <Stack sx={{ gap: 0.7 }}>
+                    {[
+                      "فعّل أي ميزة جديدة من إعدادات الكاشير أولاً، وإذا لم تُفعّل تبقى العملية بالسلوك الأساسي.",
+                      "جرّب الإعدادات بحساب اختبار قبل تطبيقها على كل الكاشيرين في وقت الذروة.",
+                      "راجع «طلبات الموافقة المعلقة» يوميًا حتى لا تبقى عمليات البيع معلقة.",
+                      "أي موافقة/رفض مهم يفضّل كتابة سبب واضح له لتسهيل التدقيق لاحقًا.",
+                    ].map((line) => (
+                      <Typography key={line} variant="body2" sx={{ lineHeight: 1.7 }}>
+                        • {line}
+                      </Typography>
+                    ))}
+                  </Stack>
+                </Card>
+
+                <Card
+                  variant="outlined"
+                  sx={{
+                    p: 1.75,
+                    borderRadius: 2.5,
+                    borderColor: alpha(theme.palette.primary.main, 0.28),
+                    bgcolor: alpha(theme.palette.primary.main, 0.05),
+                  }}
+                >
+                  <Typography fontWeight={900} sx={{ mb: 1 }}>
+                    تعليمات بخصوص الصلاحيات
+                  </Typography>
+                  <Stack sx={{ gap: 0.7 }}>
+                    {[
+                      "راجِع الدور قبل منح الصلاحيات: كاشير < سوبر كاشير < أدمن < سوبر أدمن.",
+                      "أي عملية حذف/تعطيل لحساب يجب أن تسجّل سبب واضح في الملاحظات الداخلية.",
+                      "تغيير كلمة المرور للمستخدمين يتم فقط من شاشة الموظفين وتُبلغ للمستخدم بشكل آمن.",
+                      "لا تمنح صلاحيات أعلى إلا لحاجة تشغيلية واضحة ومؤقتة إن أمكن.",
+                    ].map((line) => (
+                      <Typography key={line} variant="body2" sx={{ lineHeight: 1.7 }}>
+                        • {line}
+                      </Typography>
+                    ))}
+                  </Stack>
+                </Card>
+
+                <Card
+                  variant="outlined"
+                  sx={{
+                    p: 1.75,
+                    borderRadius: 2.5,
+                    borderColor: alpha(theme.palette.warning.main, 0.3),
+                    bgcolor: alpha(theme.palette.warning.main, 0.05),
+                  }}
+                >
+                  <Typography fontWeight={900} sx={{ mb: 1 }}>
+                    تعليمات الموافقات (Approvals Flow)
+                  </Typography>
+                  <Stack sx={{ gap: 0.7 }}>
+                    {[
+                      "من سلوك شاشة الكاشير فعّل: تفعيل مسار الموافقات + نوع الموافقة المطلوب (خصم/آجل/مرتجع/طباعة).",
+                      "عند تجاوز الحد أثناء البيع، النظام ينشئ طلب موافقة تلقائيًا بدل تنفيذ العملية مباشرة.",
+                      "المشرف يفتح «طلبات الموافقة المعلقة»، يراجع التفاصيل، ثم يختار قبول أو رفض مع سبب.",
+                      "القبول ينفذ العملية تلقائيًا حسب نوع الطلب، والرفض يمنعها مع حفظ سبب الرفض في السجل.",
+                      "راجع «سجل قرارات الموافقات» للفلاتر والتدقيق (الحالة، النوع، المستخدم، البحث).",
+                    ].map((line) => (
+                      <Typography key={line} variant="body2" sx={{ lineHeight: 1.7 }}>
+                        • {line}
+                      </Typography>
+                    ))}
+                  </Stack>
+                </Card>
+
+                <Card
+                  variant="outlined"
+                  sx={{
+                    p: 1.75,
+                    borderRadius: 2.5,
+                    borderColor: alpha(theme.palette.info.main, 0.3),
+                    bgcolor: alpha(theme.palette.info.main, 0.05),
+                  }}
+                >
+                  <Typography fontWeight={900} sx={{ mb: 1 }}>
+                    تعليمات المرتجع والإلغاء والطباعة
+                  </Typography>
+                  <Stack sx={{ gap: 0.7 }}>
+                    {[
+                      "حدود الزمن وحدود المبالغ تُضبط من قسم حدود وسياسات البيع.",
+                      "إذا فعّلت موافقة المرتجع أو الطباعة، أي حالة خارج السياسة ستنتقل مباشرة لمسار الموافقة.",
+                      "في المرتجع تأكد من مطابقة رقم الفاتورة والكمية قبل الاعتماد لتجنب تضارب المخزون.",
+                      "في إعادة الطباعة وثّق سبب الطباعة عند الرفض/القبول للحفاظ على سجل رقابي واضح.",
+                    ].map((line) => (
+                      <Typography key={line} variant="body2" sx={{ lineHeight: 1.7 }}>
+                        • {line}
+                      </Typography>
+                    ))}
+                  </Stack>
+                </Card>
+
+                <Card
+                  variant="outlined"
+                  sx={{
+                    p: 1.75,
+                    borderRadius: 2.5,
+                    borderColor: alpha(theme.palette.success.main, 0.3),
+                    bgcolor: alpha(theme.palette.success.main, 0.05),
+                  }}
+                >
+                  <Typography fontWeight={900} sx={{ mb: 1 }}>
+                    تعليمات بخصوص المبيعات
+                  </Typography>
+                  <Stack sx={{ gap: 0.7 }}>
+                    {[
+                      "تأكد من طريقة الدفع الصحيحة قبل تأكيد الفاتورة (كاش/تطبيق/آجل).",
+                      "لا تُستخدم الخصومات إلا عند الحاجة ومع سبب واضح للحفاظ على دقة الربح.",
+                      "المرتجعات تُنفّذ حسب الصلاحية مع توثيق السبب لتسهيل المراجعة لاحقًا.",
+                      "أي فرق في الأسعار أو كميات غير متوقعة يُراجع مباشرة من لوحة التقارير.",
+                    ].map((line) => (
+                      <Typography key={line} variant="body2" sx={{ lineHeight: 1.7 }}>
+                        • {line}
+                      </Typography>
+                    ))}
+                  </Stack>
+                </Card>
+
+                <Card
+                  variant="outlined"
+                  sx={{
+                    p: 1.75,
+                    borderRadius: 2.5,
+                    borderColor: alpha(theme.palette.secondary.main, 0.3),
+                    bgcolor: alpha(theme.palette.secondary.main, 0.06),
+                  }}
+                >
+                  <Typography fontWeight={900} sx={{ mb: 1 }}>
+                    تعليمات بخصوص المشتريات
+                  </Typography>
+                  <Stack sx={{ gap: 0.7 }}>
+                    {[
+                      "سجل شراء كل توريد فورًا مع طريقة الدفع الصحيحة (كاش/تطبيق).",
+                      "حدّث سعر الشراء بدقة لأنه يؤثر مباشرة على حساب الربح وقيمة المخزون.",
+                      "عند إضافة بونص، أدخله في خانة البونص وليس ضمن الكمية المدفوعة.",
+                      "قبل الحفظ تأكد من الكمية، تاريخ الانتهاء، والقسم الصحيح لكل صنف.",
+                    ].map((line) => (
+                      <Typography key={line} variant="body2" sx={{ lineHeight: 1.7 }}>
+                        • {line}
+                      </Typography>
+                    ))}
+                  </Stack>
+                </Card>
+              </Stack>
             </Card>
           ) : null}
 

@@ -10,6 +10,7 @@ import {
   DialogContent,
   DialogActions,
   FormControl,
+  FormControlLabel,
   InputLabel,
   Select,
   MenuItem,
@@ -30,6 +31,7 @@ import {
   Card,
   Badge,
   Tooltip,
+  Switch,
 } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
 import ShoppingCartIcon from "@mui/icons-material/ShoppingCart";
@@ -186,6 +188,10 @@ const Purchases = () => {
     name: "",
     unit: "gram",
     category_id: "",
+    allow_split_sales: false,
+    strip_unit_count: "",
+    split_item_name: "حبة",
+    split_sale_options: ["pill", "strip"],
   });
   const [addItemErrors, setAddItemErrors] = useState({});
 
@@ -226,7 +232,7 @@ const Purchases = () => {
     try {
       setLoading(true);
       const res = await Axios.get("products", {
-        params: { per_page: 500, include_inactive: 0, scope: "purchase" },
+        params: { per_page: 100, include_inactive: 0, scope: "purchase" },
       });
       if (res.data?.success) setProducts(res.data.data || []);
     } catch (e) {
@@ -316,7 +322,15 @@ const Purchases = () => {
   const collapseAll = useCallback(() => setExpandedCategories({}), []);
 
   const handleOpenAddItem = () => {
-    setAddItemForm({ name: "", unit: "gram", category_id: categories[0]?.id || "" });
+    setAddItemForm({
+      name: "",
+      unit: "gram",
+      category_id: categories[0]?.id || "",
+      allow_split_sales: false,
+      strip_unit_count: "",
+      split_item_name: "حبة",
+      split_sale_options: ["pill", "strip"],
+    });
     setAddItemErrors({});
     setOpenAddItem(true);
   };
@@ -376,31 +390,61 @@ const Purchases = () => {
     const err = {};
     if (!addItemForm.name.trim()) err.name = "اسم الصنف مطلوب";
     if (!addItemForm.category_id) err.category_id = "اختر القسم";
+    
+    // ⭐ إضافة: تأكد من وجود unit
+    if (!addItemForm.unit) err.unit = "اختر النوع";
+    
+    if (addItemForm.allow_split_sales) {
+        const stripCount = Number(addItemForm.strip_unit_count || 0);
+        if (!Number.isFinite(stripCount) || stripCount <= 0) {
+            err.strip_unit_count = "أدخل عدد صحيح للحبات داخل الشريط";
+        }
+    }
     setAddItemErrors(err);
     if (Object.keys(err).length > 0) return;
 
     setLoadingAdd(true);
     try {
-      await Axios.post("products", {
-        name: addItemForm.name.trim(),
-        unit: addItemForm.unit,
-        category_id: addItemForm.category_id,
-        categories: [addItemForm.category_id],
-        price: 0,
-        purchase_price: 0,
-        stock: 0,
-        is_active: true,
-      });
-      await fetchProducts();
-      handleCloseAddItem();
+        // ⭐⭐ البيانات المرسلة - تأكد من جميع الحقول
+        const productData = {
+            name: addItemForm.name.trim(),
+            unit: addItemForm.unit,              // ✅ موجود
+            category_id: addItemForm.category_id, // ✅ موجود (رقم)
+            categories: [addItemForm.category_id],
+            price: 0,
+            purchase_price: 0,
+            stock: 0,
+            is_active: true,
+            allow_split_sales: !!addItemForm.allow_split_sales,
+            strip_unit_count: addItemForm.allow_split_sales ? Number(addItemForm.strip_unit_count || 0) || null : null,
+            split_item_name: addItemForm.allow_split_sales ? (addItemForm.split_item_name || "حبة") : null,
+            split_sale_options: addItemForm.allow_split_sales ? addItemForm.split_sale_options : null,
+        };
+        
+        // ⭐⭐ تسجيل البيانات في الكونسول للتأكد
+        
+        const res = await Axios.post("products", productData);
+        
+        if (res?.data?.success && res?.data?.data) {
+            setProducts((prev) => {
+                const created = res.data.data;
+                const exists = prev.some((p) => Number(p.id) === Number(created.id));
+                if (exists) return prev;
+                return [created, ...prev];
+            });
+        }
+        await Promise.all([fetchProducts(), fetchMainCategories()]);
+        handleCloseAddItem();
+        alert("تمت إضافة الصنف بنجاح"); // استخدم showAppToast إن وجد
     } catch (e) {
-      setAddItemErrors({
-        submit: e.response?.data?.message || e.response?.data?.errors?.name?.[0] || "فشل في إضافة الصنف",
-      });
+        console.error("❌ خطأ الإضافة:", e.response?.data);
+        setAddItemErrors({
+            submit: e.response?.data?.message || e.response?.data?.errors?.name?.[0] || "فشل في إضافة الصنف",
+        });
     } finally {
-      setLoadingAdd(false);
+        setLoadingAdd(false);
     }
-  };
+};
 
   const addToCart = (product, quantity, unitPrice) => {
     setCart((prev) => {
@@ -482,6 +526,7 @@ const Purchases = () => {
         total_price: parseFloat(c.total_price),
       }));
       const totalAmount = items.reduce((s, i) => s + i.total_price, 0);
+      const pm = paymentMethod === "app" ? "app" : "cash";
       await Axios.post("purchases", {
         invoice_number: generateInvoiceNumber(),
         items,
@@ -490,7 +535,9 @@ const Purchases = () => {
         status: "completed",
         purchase_date: new Date().toISOString().split("T")[0],
         notes: "",
-        payment_method: paymentMethod,
+        payment_method: pm,
+        cash_amount: pm === "app" ? 0 : totalAmount,
+        app_amount: pm === "app" ? totalAmount : 0,
         treasury_note: `شراء ${items.length} صنف`,
       });
       setCart([]);
@@ -858,6 +905,41 @@ const Purchases = () => {
                 <Typography variant="caption" color="error" sx={{ mt: 0.5, display: "block" }}>{addItemErrors.category_id}</Typography>
               )}
             </FormControl>
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={!!addItemForm.allow_split_sales}
+                  onChange={(e) => setAddItemForm((p) => ({ ...p, allow_split_sales: e.target.checked }))}
+                />
+              }
+              label="تفعيل البيع بالتجزئة (مثال: الحبة من الشريط)"
+            />
+            {addItemForm.allow_split_sales && (
+              <Box sx={{ display: "flex", flexDirection: "column", gap: 1.2 }}>
+                <TextField
+                  label="عدد الحبات في الشريط"
+                  type="number"
+                  size="small"
+                  value={addItemForm.strip_unit_count}
+                  onChange={(e) => setAddItemForm((p) => ({ ...p, strip_unit_count: e.target.value }))}
+                  inputProps={{ min: 1, step: 1 }}
+                  helperText="مثال: 10 أو 30"
+                  error={!!addItemErrors.strip_unit_count}
+                />
+                {addItemErrors.strip_unit_count ? (
+                  <Typography variant="caption" color="error">
+                    {addItemErrors.strip_unit_count}
+                  </Typography>
+                ) : null}
+                <TextField
+                  label="اسم وحدة التجزئة"
+                  size="small"
+                  value={addItemForm.split_item_name}
+                  onChange={(e) => setAddItemForm((p) => ({ ...p, split_item_name: e.target.value }))}
+                  placeholder="حبة"
+                />
+              </Box>
+            )}
           </Box>
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>

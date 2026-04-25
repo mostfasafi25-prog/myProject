@@ -1,7 +1,7 @@
-import { CssBaseline, ThemeProvider, createTheme, alpha } from "@mui/material";
+import { Box, CircularProgress, CssBaseline, ThemeProvider, Typography, createTheme, alpha } from "@mui/material";
 import { darken, getContrastRatio, lighten } from "@mui/material/styles";
 import { useEffect, useMemo, useState } from "react";
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import Cookies from "universal-cookie";
 import { Axios } from "./Api/Axios";
 import { logHealthResult } from "./Api/apiDebugLog";
@@ -11,20 +11,20 @@ import HomeDashboard from "./pages/Admin/HomeDashboard";
 import CashierPage from "./pages/CashierPage";
 import CashierNotificationsPage from "./pages/CashierNotificationsPage";
 import InventoryPage from "./pages/Admin/InventoryPage";
-import CategoriesPage from "./pages/Admin/CategoriesPage";
-import InvoicesPage from "./pages/Admin/InvoicesPage";
 import ReturnsPage from "./pages/Admin/ReturnsPage";
-import ReportsPage from "./pages/Admin/ReportsPage";
 import StaffPage from "./pages/Admin/StaffPage";
-import ActivityLogPage from "./pages/Admin/ActivityLogPage";
 import SettingsPage from "./pages/Admin/SettingsPage";
 import AIAssistantPage from "./pages/Admin/AIAssistantPage";
-import PurchasesPage from "./pages/Admin/PurchasesPage";
+import EnhancedPurchasesPage from "./pages/Admin/EnhancedPurchasesPage";
+import SalesReportPage from "./pages/Admin/SalesReportPage";
+import SuppliersPage from "./pages/Admin/SuppliersPage";
 import DebtCustomersPage from "./pages/Admin/DebtCustomersPage";
-import StocktakePage from "./pages/Admin/StocktakePage";
 import NotificationsPage from "./pages/Admin/NotificationsPage";
 import SuperCashierDashboardPage from "./pages/SuperCashierDashboardPage";
-import { mergeUserWithProfileExtras } from "./utils/staffProfileExtras";
+import { mergeUserWithProfileExtras, readSessionUser } from "./utils/staffProfileExtras";
+import { getSyncBaseUrl, pullAllToLocal, pushAllLocalCollections } from "./utils/pharmacyDataSync";
+import { hydrateCriticalKeys } from "./utils/criticalSyncStorage";
+import { persistAuthTokenInCookie } from "./utils/authTokenCookie";
 
 /** true = دخول مباشر للإدارة بدون تسجيل دخول. عطّل للإنتاج: false */
 const TEMP_BYPASS_AUTH_TO_ADMIN = false;
@@ -96,7 +96,7 @@ function tempBypassAdminUser() {
 function getStoredUser() {
   if (TEMP_BYPASS_AUTH_TO_ADMIN) return tempBypassAdminUser();
   try {
-    const raw = JSON.parse(localStorage.getItem("user"));
+    const raw = readSessionUser();
     return mergeUserWithProfileExtras(raw);
   } catch {
     return null;
@@ -110,9 +110,11 @@ function isAdminPanelRole(role) {
 
 function isAuthenticated() {
   if (TEMP_BYPASS_AUTH_TO_ADMIN) return true;
+  const tokenRaw = cookies.get("token");
+  const token = tokenRaw != null ? String(tokenRaw).trim() : "";
+  if (!token) return false;
   const user = getStoredUser();
-  const token = cookies.get("token");
-  return Boolean(user?.role && token);
+  return Boolean(user && user.role);
 }
 
 function ProtectedRoleRoute({ allowRoles, children }) {
@@ -135,6 +137,32 @@ function RootRedirect() {
   return <Navigate to="/login" replace />;
 }
 
+function AdminBootstrapGate({ loading, children }) {
+  const location = useLocation();
+  if (!loading) return children;
+  if (!String(location.pathname || "").startsWith("/admin")) return children;
+  return (
+    <Box
+      sx={{
+        minHeight: "100vh",
+        display: "grid",
+        placeItems: "center",
+        textAlign: "center",
+        p: 2,
+        bgcolor: "background.default",
+      }}
+    >
+      <Box>
+        <CircularProgress size={34} />
+        <Typography sx={{ mt: 1.25, fontWeight: 800 }}>جاري تحميل البيانات من السيرفر...</Typography>
+        <Typography variant="body2" color="text.secondary">
+          سيتم فتح لوحة الإدارة تلقائيًا عند الجاهزية
+        </Typography>
+      </Box>
+    </Box>
+  );
+}
+
 function getStoredUiSettings() {
   try {
     const raw = JSON.parse(localStorage.getItem(UI_SETTINGS_KEY));
@@ -148,10 +176,11 @@ function getStoredUiSettings() {
 function App() {
   const [mode, setMode] = useState(() => localStorage.getItem("themeMode") || "light");
   const [uiSettings, setUiSettings] = useState(getStoredUiSettings);
+  const [adminBootstrapLoading, setAdminBootstrapLoading] = useState(false);
 
   useEffect(() => {
     if (TEMP_BYPASS_AUTH_TO_ADMIN) {
-      cookies.set("token", "__TEMP_BYPASS_AUTH__", { path: "/" });
+      persistAuthTokenInCookie("__TEMP_BYPASS_AUTH__");
     }
   }, []);
 
@@ -171,6 +200,70 @@ function App() {
     })();
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (TEMP_BYPASS_AUTH_TO_ADMIN) return undefined;
+    const token = cookies.get("token");
+    const syncBase = getSyncBaseUrl();
+    const role = getStoredUser()?.role;
+    const shouldGateAdmin = isAdminPanelRole(role);
+    if (shouldGateAdmin) setAdminBootstrapLoading(true);
+    if (!token || !syncBase) {
+      if (shouldGateAdmin) setAdminBootstrapLoading(false);
+      return undefined;
+    }
+    let stopped = false;
+    let initialDone = false;
+    let initialTimeoutId;
+
+    const runPull = async () => {
+      try {
+        await pullAllToLocal();
+      } catch (e) {
+        console.warn("[SYNC] pull failed", e);
+      } finally {
+        if (!initialDone) {
+          initialDone = true;
+          if (initialTimeoutId) window.clearTimeout(initialTimeoutId);
+          if (shouldGateAdmin && !stopped) setAdminBootstrapLoading(false);
+        }
+      }
+    };
+
+    const runPush = async () => {
+      try {
+        await pushAllLocalCollections(getStoredUser);
+      } catch (e) {
+        console.warn("[SYNC] push failed", e);
+      }
+    };
+
+    initialTimeoutId = window.setTimeout(() => {
+      if (!initialDone) {
+        initialDone = true;
+        if (shouldGateAdmin && !stopped) setAdminBootstrapLoading(false);
+      }
+    }, 12000);
+
+    runPull();
+    void hydrateCriticalKeys([
+      "pharmacyDebtCustomers_v1",
+      "pharmacyDebtCustomerLedger_v1",
+      "pharmacySecurityAuditLog_v1",
+    ]);
+    runPush();
+    const t = window.setInterval(runPush, 25000);
+    const onFocus = () => {
+      if (!stopped) runPush();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      stopped = true;
+      if (initialTimeoutId) window.clearTimeout(initialTimeoutId);
+      window.clearInterval(t);
+      window.removeEventListener("focus", onFocus);
     };
   }, []);
 
@@ -433,7 +526,8 @@ function App() {
       <CssBaseline />
       <BrowserRouter>
         <SiteSeo />
-        <Routes>
+        <AdminBootstrapGate loading={adminBootstrapLoading}>
+          <Routes>
           <Route
             path="/login"
             element={
@@ -450,7 +544,7 @@ function App() {
           <Route
             path="/admin"
             element={
-              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin", "cashier", "super_cashier"]}>
                 <HomeDashboard mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
@@ -458,7 +552,7 @@ function App() {
           <Route
             path="/admin/inventory"
             element={
-              <ProtectedRoleRoute allowRoles={["admin", "super_admin", "super_cashier"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
                 <InventoryPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
@@ -466,8 +560,8 @@ function App() {
           <Route
             path="/admin/categories"
             element={
-              <ProtectedRoleRoute allowRoles={["admin", "super_admin", "super_cashier"]}>
-                <CategoriesPage mode={mode} onToggleMode={toggleMode} />
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
+                <Navigate to="/admin/inventory?section=categories" replace />
               </ProtectedRoleRoute>
             }
           />
@@ -475,26 +569,19 @@ function App() {
             path="/admin/stocktake"
             element={
               <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
-                <StocktakePage mode={mode} onToggleMode={toggleMode} />
+                <Navigate to="/admin/inventory?stocktake=1" replace />
               </ProtectedRoleRoute>
             }
           />
           <Route
             path="/admin/debt-customers"
             element={
-              <ProtectedRoleRoute allowRoles={["admin", "super_admin", "super_cashier"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
                 <DebtCustomersPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
           />
-          <Route
-            path="/admin/invoices"
-            element={
-              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
-                <InvoicesPage mode={mode} onToggleMode={toggleMode} />
-              </ProtectedRoleRoute>
-            }
-          />
+        
           <Route
             path="/admin/returns"
             element={
@@ -514,40 +601,34 @@ function App() {
           <Route
             path="/admin/returns/purchases"
             element={
-              <ProtectedRoleRoute allowRoles={["admin", "super_admin", "super_cashier"]}>
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
                 <ReturnsPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
           />
-          <Route
-            path="/admin/reports"
-            element={
-              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
-                <ReportsPage mode={mode} onToggleMode={toggleMode} />
-              </ProtectedRoleRoute>
-            }
-          />
+        
           <Route
             path="/admin/reports/sales"
             element={
               <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
-                <ReportsPage mode={mode} onToggleMode={toggleMode} />
+                <SalesReportPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
           />
-          <Route
-            path="/admin/reports/purchases"
-            element={
-              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
-                <ReportsPage mode={mode} onToggleMode={toggleMode} />
-              </ProtectedRoleRoute>
-            }
-          />
+         
           <Route
             path="/admin/purchases"
             element={
-              <ProtectedRoleRoute allowRoles={["admin", "super_admin", "super_cashier"]}>
-                <PurchasesPage mode={mode} onToggleMode={toggleMode} />
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
+                <EnhancedPurchasesPage mode={mode} onToggleMode={toggleMode} />
+              </ProtectedRoleRoute>
+            }
+          />
+          <Route
+            path="/admin/suppliers"
+            element={
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
+                <SuppliersPage mode={mode} onToggleMode={toggleMode} />
               </ProtectedRoleRoute>
             }
           />
@@ -559,14 +640,7 @@ function App() {
               </ProtectedRoleRoute>
             }
           />
-          <Route
-            path="/admin/activity-log"
-            element={
-              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
-                <ActivityLogPage mode={mode} onToggleMode={toggleMode} />
-              </ProtectedRoleRoute>
-            }
-          />
+         
           <Route
             path="/admin/notifications"
             element={
@@ -645,6 +719,21 @@ function App() {
           />
           <Route
             path="/admin/settings/cashier"
+            element={
+              <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
+                <SettingsPage
+                  mode={mode}
+                  onToggleMode={toggleMode}
+                  onThemeModeChange={setThemeMode}
+                  uiSettings={uiSettings}
+                  onUiSettingsChange={updateUiSettings}
+                  defaultUiSettings={defaultUiSettings}
+                />
+              </ProtectedRoleRoute>
+            }
+          />
+          <Route
+            path="/admin/settings/instructions"
             element={
               <ProtectedRoleRoute allowRoles={["admin", "super_admin"]}>
                 <SettingsPage
@@ -738,7 +827,8 @@ function App() {
           />
           <Route path="/" element={<RootRedirect />} />
           <Route path="*" element={<RootRedirect />} />
-        </Routes>
+          </Routes>
+        </AdminBootstrapGate>
       </BrowserRouter>
     </ThemeProvider>
   );

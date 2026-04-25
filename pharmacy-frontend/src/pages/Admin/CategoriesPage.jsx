@@ -18,18 +18,18 @@ import {
   Typography,
   useTheme,
 } from "@mui/material";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
+import { Axios } from "../../Api/Axios";
 import FilterBarRow from "../../components/FilterBarRow";
 import { adminPageContainerSx, adminPageSubtitleSx, adminPageTitleRowSx } from "../../utils/adminPageLayout";
 import AdminLayout from "./AdminLayout";
 import { confirmApp, showAppToast } from "../../utils/appToast";
 import { getStoredUser, isSuperCashier } from "../../utils/userRoles";
 import {
-  fetchAndPersistSalesCategories,
   PHARMACY_ADMIN_CATEGORIES_SYNCED,
-  readAdminCategoriesFromStorage,
+  persistSalesCategories,
 } from "../../utils/backendCategoriesSync";
-import { buildInitialDemoCategories } from "../../data/pharmacyDemoCatalog";
+
 const unifiedToggleSx = {
   direction: "ltr",
   width: 54,
@@ -59,108 +59,143 @@ const unifiedToggleSx = {
   },
 };
 
-const CATEGORIES_KEY = "adminCategories";
 const ROWS_PER_PAGE = 5;
+
 function getStoredCategories() {
-  const synced = readAdminCategoriesFromStorage();
-  if (synced?.length) return synced;
-  try {
-    const raw = JSON.parse(localStorage.getItem(CATEGORIES_KEY));
-    if (Array.isArray(raw) && raw.length) return raw;
-  } catch {
-    // ignore
-  }
-  const fallback = buildInitialDemoCategories();
-  try {
-    localStorage.setItem(CATEGORIES_KEY, JSON.stringify(fallback));
-    window.dispatchEvent(new CustomEvent(PHARMACY_ADMIN_CATEGORIES_SYNCED));
-  } catch {
-    // ignore
-  }
-  return fallback;
+  return [];
 }
 
-export default function CategoriesPage({ mode, onToggleMode }) {
+export default function CategoriesPage({ mode, onToggleMode, embedded = false, onDataChanged }) {
   const theme = useTheme();
   const superCashier = isSuperCashier(getStoredUser());
-  const [categories, setCategories] = useState(getStoredCategories);
+  const [categories, setCategories] = useState([]);
+  const [allProducts, setAllProducts] = useState([]);
+  const isMounted = useRef(false);
+  
+  const fetchApiData = async () => {
+    try {
+      const [catsRes, productsRes] = await Promise.all([
+        Axios.get("categories/main", { 
+          params: { 
+            scope: "purchase",
+            include_inactive: 1  // ← أضف هذا لجلب الأقسام المعطلة أيضاً
+          } 
+        }),
+        Axios.get("products", { params: { per_page: 100, include_inactive: 1, scope: "all" } }),
+      ]);
+      const cats = catsRes?.data?.success && Array.isArray(catsRes.data.data)
+        ? catsRes.data.data.map((c) => ({
+            id: c.id,
+            name: c.name,
+            productsCount: Number(c.products_count ?? 0),
+            status: c.is_active === false ? "معطّل" : "نشط",
+            active: c.is_active !== false,
+            createdAt: c.created_at || new Date().toISOString(),
+          }))
+        : [];
+      const products = productsRes?.data?.success && Array.isArray(productsRes.data.data) ? productsRes.data.data : [];
+      setCategories(cats);
+      setAllProducts(products);
+      persistSalesCategories(cats);
+    } catch (error) {
+      console.error("Error fetching data:", error);
+    }
+  };
+  
+  // ✅ الحل: استخدام useRef لمنع التكرار + إزالة المستمع لتجنب الحلقة اللانهائية
   useEffect(() => {
-    const reload = () => setCategories(getStoredCategories());
-    window.addEventListener(PHARMACY_ADMIN_CATEGORIES_SYNCED, reload);
-    let cancelled = false;
-    fetchAndPersistSalesCategories().finally(() => {
-      if (!cancelled) reload();
-    });
+    if (isMounted.current) return;
+    isMounted.current = true;
+    
+    // جلب البيانات مرة واحدة عند تحميل الصفحة
+    fetchApiData();
+    
+    // ✅ اختيارياً: إذا أردت الاستماع للتغييرات من مكان آخر، استخدم setTimeout لتجنب الحلقة
+    const handleReload = () => {
+      setTimeout(() => fetchApiData(), 100);
+    };
+    
+    window.addEventListener(PHARMACY_ADMIN_CATEGORIES_SYNCED, handleReload);
+    
     return () => {
-      cancelled = true;
-      window.removeEventListener(PHARMACY_ADMIN_CATEGORIES_SYNCED, reload);
+      window.removeEventListener(PHARMACY_ADMIN_CATEGORIES_SYNCED, handleReload);
     };
   }, []);
+  
   const [openAddDialog, setOpenAddDialog] = useState(false);
-  const [newCategory, setNewCategory] = useState({ name: "", manager: "" });
+  const [newCategory, setNewCategory] = useState({ name: "" });
   const [error, setError] = useState("");
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [editTarget, setEditTarget] = useState(null);
-  const [editForm, setEditForm] = useState({ name: "", manager: "" });
+  const [editForm, setEditForm] = useState({ name: "" });
   const [editError, setEditError] = useState("");
+  
+  const categoryProductCountMap = useMemo(() => {
+    const map = new Map();
+    for (const cat of categories) {
+      map.set(cat.id, 0);
+    }
+    for (const p of allProducts) {
+      if (p.category_id && map.has(p.category_id)) {
+        map.set(p.category_id, (map.get(p.category_id) || 0) + 1);
+      }
+    }
+    return map;
+  }, [allProducts, categories]);
+  
+  const productsInEditCategory = useMemo(() => {
+    if (!editTarget?.id) return [];
+    return allProducts.filter((p) => String(p.category_id) === String(editTarget.id));
+  }, [allProducts, editTarget]);
 
-  const addCategory = () => {
+  const addCategory = async () => {
     setError("");
-    if (!newCategory.name || !newCategory.manager) {
-      setError("يرجى إدخال اسم القسم والمسؤول");
+    if (!newCategory.name) {
+      setError("يرجى إدخال اسم القسم");
       return;
     }
     if (categories.some((c) => c.name === newCategory.name)) {
       setError("اسم القسم موجود مسبقًا");
       return;
     }
-
-    const next = [
-      {
-        id: Date.now(),
-        name: newCategory.name,
-        manager: newCategory.manager,
-        productsCount: 0,
-        status: "جديد",
-        active: true,
-        createdAt: new Date().toISOString(),
-      },
-      ...categories,
-    ];
-    setCategories(next);
-    localStorage.setItem(CATEGORIES_KEY, JSON.stringify(next));
-    setNewCategory({ name: "", manager: "" });
+    await Axios.post("categories", {
+      name: newCategory.name,
+      scope: "purchase",
+      is_main: true,
+      parent_id: null,
+      is_active: true,
+    });
+    await fetchApiData();
+    onDataChanged?.();
+    setNewCategory({ name: "" });
     setOpenAddDialog(false);
     showAppToast("تم إضافة القسم بنجاح", "success");
   };
 
-  const toggleCategoryActive = (id, checked) => {
-    const next = categories.map((c) => (c.id === id ? { ...c, active: checked } : c));
-    setCategories(next);
-    localStorage.setItem(CATEGORIES_KEY, JSON.stringify(next));
+  const toggleCategoryActive = async (id, checked) => {
+    await Axios.put(`categories/${id}`, { is_active: checked });
+    await fetchApiData();
+    onDataChanged?.();
     showAppToast(checked ? "تم تفعيل القسم" : "تم تعطيل القسم", "info");
   };
 
-  const saveCategoryEdit = () => {
+  const saveCategoryEdit = async () => {
     setEditError("");
     if (!editTarget) return;
     const name = editForm.name.trim();
-    const manager = editForm.manager.trim();
-    if (!name || !manager) {
-      setEditError("اسم القسم والمسؤول مطلوبان");
+    if (!name) {
+      setEditError("اسم القسم مطلوب");
       return;
     }
     if (categories.some((c) => c.id !== editTarget.id && c.name === name)) {
       setEditError("اسم القسم مستخدم مسبقًا");
       return;
     }
-    const next = categories.map((c) =>
-      c.id === editTarget.id ? { ...c, name, manager, status: c.status || "نشط" } : c,
-    );
-    setCategories(next);
-    localStorage.setItem(CATEGORIES_KEY, JSON.stringify(next));
+    await Axios.put(`categories/${editTarget.id}`, { name });
+    await fetchApiData();
+    onDataChanged?.();
     setEditTarget(null);
     showAppToast("تم حفظ تعديل القسم", "success");
   };
@@ -176,19 +211,16 @@ export default function CategoriesPage({ mode, onToggleMode }) {
       confirmText: "نعم، احذف",
     });
     if (!ok) return;
-    const next = categories.filter((c) => c.id !== id);
-    setCategories(next);
-    localStorage.setItem(CATEGORIES_KEY, JSON.stringify(next));
+    await Axios.delete(`categories/${id}`);
+    await fetchApiData();
+    onDataChanged?.();
     showAppToast("تم حذف القسم بنجاح", "success");
   };
 
   const filteredSortedCategories = useMemo(() => {
     const q = search.trim().toLowerCase();
     const filtered = categories.filter((cat) => {
-      const matchesSearch =
-        !q ||
-        String(cat.name || "").toLowerCase().includes(q) ||
-        String(cat.manager || "").toLowerCase().includes(q);
+      const matchesSearch = !q || String(cat.name || "").toLowerCase().includes(q);
       const matchesStatus =
         statusFilter === "all" ||
         (statusFilter === "active" && cat.active) ||
@@ -202,24 +234,29 @@ export default function CategoriesPage({ mode, onToggleMode }) {
       return Number(b.id || 0) - Number(a.id || 0);
     });
   }, [categories, search, statusFilter]);
+  
   const pageCount = Math.max(1, Math.ceil(filteredSortedCategories.length / ROWS_PER_PAGE));
   const safePage = Math.min(page, pageCount);
   const paginatedCategories = useMemo(() => {
     const start = (safePage - 1) * ROWS_PER_PAGE;
     return filteredSortedCategories.slice(start, start + ROWS_PER_PAGE);
   }, [filteredSortedCategories, safePage]);
+  
   const stats = useMemo(() => {
-    const totalProducts = filteredSortedCategories.reduce((sum, c) => sum + c.productsCount, 0);
+    let totalProducts = 0;
+    for (const cat of filteredSortedCategories) {
+      totalProducts += categoryProductCountMap.get(cat.id) || 0;
+    }
     return {
       totalCategories: filteredSortedCategories.length,
       totalProducts,
       avgPerCategory: filteredSortedCategories.length ? Math.round(totalProducts / filteredSortedCategories.length) : 0,
     };
-  }, [filteredSortedCategories]);
+  }, [filteredSortedCategories, categoryProductCountMap]);
 
-  return (
-    <AdminLayout mode={mode} onToggleMode={onToggleMode}>
-      <Box sx={adminPageContainerSx}>
+  const inner = (
+      <Box sx={embedded ? { width: "100%", minWidth: 0 } : adminPageContainerSx}>
+        {!embedded ? (
         <Stack sx={adminPageTitleRowSx}>
           <Box>
             <Typography variant="h5" fontWeight={900}>
@@ -233,6 +270,13 @@ export default function CategoriesPage({ mode, onToggleMode }) {
             إضافة قسم
           </Button>
         </Stack>
+        ) : (
+          <Stack direction="row" justifyContent="flex-end" sx={{ mb: 1.5 }}>
+            <Button variant="contained" startIcon={<Add />} onClick={() => setOpenAddDialog(true)} sx={{ textTransform: "none", fontWeight: 800 }}>
+              إضافة قسم
+            </Button>
+          </Stack>
+        )}
 
         <Grid container spacing={2}>
           <Grid size={{ xs: 12 }}>
@@ -251,7 +295,7 @@ export default function CategoriesPage({ mode, onToggleMode }) {
               <FilterBarRow alignItems="center">
                 <TextField
                   size="small"
-                  placeholder="ابحث باسم القسم أو المسؤول..."
+                  placeholder="ابحث باسم القسم..."
                   value={search}
                   onChange={(e) => {
                     setSearch(e.target.value);
@@ -355,7 +399,7 @@ export default function CategoriesPage({ mode, onToggleMode }) {
               borderRadius: 2,
             }}
           >
-            <Grid size={{ xs: 12, md: 3 }}>
+            <Grid size={{ xs: 12, md: 4 }}>
               <Typography variant="caption" fontWeight={800} color="text.secondary">
                 القسم
               </Typography>
@@ -370,7 +414,7 @@ export default function CategoriesPage({ mode, onToggleMode }) {
                 الحالة
               </Typography>
             </Grid>
-            <Grid size={{ xs: 12, md: 3 }}>
+            <Grid size={{ xs: 12, md: 2 }}>
               <Typography variant="caption" fontWeight={800} color="text.secondary">
                 نشط / غير نشط
               </Typography>
@@ -389,7 +433,7 @@ export default function CategoriesPage({ mode, onToggleMode }) {
                 variant="outlined"
                 onClick={() => {
                   setEditTarget(cat);
-                  setEditForm({ name: cat.name || "", manager: cat.manager || "" });
+                  setEditForm({ name: cat.name || "" });
                   setEditError("");
                 }}
                 sx={{
@@ -419,7 +463,7 @@ export default function CategoriesPage({ mode, onToggleMode }) {
                       {cat.name}
                     </Typography>
                     <Typography variant="caption" color="text.secondary">
-                      {cat.productsCount} صنف
+                      {categoryProductCountMap.get(cat.id) || 0} صنف
                     </Typography>
                   </Box>
                   <Chip
@@ -452,11 +496,11 @@ export default function CategoriesPage({ mode, onToggleMode }) {
                   </Box>
                 </Stack>
                 <Grid container alignItems="center" sx={{ display: { xs: "none", md: "flex" } }}>
-                  <Grid size={{ xs: 12, md: 3 }}>
+                  <Grid size={{ xs: 12, md: 4 }}>
                     <Typography fontWeight={800}>{cat.name}</Typography>
                   </Grid>
                   <Grid size={{ xs: 12, md: 2 }}>
-                    <Typography>{cat.productsCount}</Typography>
+                    {categoryProductCountMap.get(cat.id) || 0}
                   </Grid>
                   <Grid size={{ xs: 12, md: 2 }}>
                     <Chip
@@ -466,7 +510,7 @@ export default function CategoriesPage({ mode, onToggleMode }) {
                       variant="outlined"
                     />
                   </Grid>
-                  <Grid size={{ xs: 12, md: 3 }} onClick={(e) => e.stopPropagation()}>
+                  <Grid size={{ xs: 12, md: 2}} onClick={(e) => e.stopPropagation()}>
                     <Stack direction="row" alignItems="center" sx={{ gap: 0.5 }}>
                       <Switch
                         checked={Boolean(cat.active)}
@@ -516,13 +560,32 @@ export default function CategoriesPage({ mode, onToggleMode }) {
                 fullWidth
                 inputProps={{ style: { textAlign: "right" } }}
               />
-              <TextField
-                label="اسم المسؤول"
-                value={editForm.manager}
-                onChange={(e) => setEditForm((p) => ({ ...p, manager: e.target.value }))}
-                fullWidth
-                inputProps={{ style: { textAlign: "right" } }}
-              />
+              <Card
+                variant="outlined"
+                sx={{
+                  p: 1.2,
+                  borderRadius: 2,
+                  borderColor: alpha(theme.palette.primary.main, 0.25),
+                  bgcolor: alpha(theme.palette.primary.main, 0.04),
+                }}
+              >
+                <Typography variant="subtitle2" fontWeight={900}>
+                  الأصناف داخل هذا القسم ({productsInEditCategory.length})
+                </Typography>
+                <Stack sx={{ mt: 0.8, maxHeight: 180, overflowY: "auto", gap: 0.5 }}>
+                  {productsInEditCategory.length === 0 ? (
+                    <Typography variant="caption" color="text.secondary">
+                      لا توجد أصناف مرتبطة بهذا القسم حالياً.
+                    </Typography>
+                  ) : (
+                    productsInEditCategory.map((p) => (
+                      <Typography key={`${p.id}-${p.name}`} variant="caption" sx={{ fontWeight: 700 }}>
+                        • {String(p.name || "صنف")}
+                      </Typography>
+                    ))
+                  )}
+                </Stack>
+              </Card>
             </Stack>
           </DialogContent>
           <DialogActions sx={{ px: 3, pb: 2 }}>
@@ -543,13 +606,6 @@ export default function CategoriesPage({ mode, onToggleMode }) {
                 fullWidth
                 inputProps={{ style: { textAlign: "right" } }}
               />
-              <TextField
-                label="اسم المسؤول"
-                value={newCategory.manager}
-                onChange={(e) => setNewCategory((p) => ({ ...p, manager: e.target.value }))}
-                fullWidth
-                inputProps={{ style: { textAlign: "right" } }}
-              />
             </Stack>
           </DialogContent>
           <DialogActions sx={{ px: 3, pb: 2 }}>
@@ -558,6 +614,14 @@ export default function CategoriesPage({ mode, onToggleMode }) {
           </DialogActions>
         </Dialog>
       </Box>
+  );
+
+  if (embedded) {
+    return inner;
+  }
+  return (
+    <AdminLayout mode={mode} onToggleMode={onToggleMode}>
+      {inner}
     </AdminLayout>
   );
 }

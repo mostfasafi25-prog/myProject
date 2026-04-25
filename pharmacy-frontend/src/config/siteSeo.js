@@ -22,13 +22,13 @@ const RULES = [
   },
   {
     test: (p) => p.startsWith("/admin/inventory"),
-    title: `المخزون والأصناف — ${PHARMACY_DISPLAY_NAME}`,
-    description: "متابعة الكميات، التنبيهات، والتوريد لكل صنف.",
+    title: `المخزون والأصناف والأقسام — ${PHARMACY_DISPLAY_NAME}`,
+    description: "الأصناف، الأقسام، والجرد في صفحة واحدة مع التصفية والبحث.",
   },
   {
     test: (p) => p.startsWith("/admin/categories"),
-    title: `أقسام المبيعات — ${PHARMACY_DISPLAY_NAME}`,
-    description: "تنظيم أقسام العرض والمبيعات بما يتوافق مع عمل الصيدلية.",
+    title: `أقسام المخزون — ${PHARMACY_DISPLAY_NAME}`,
+    description: "يُعاد توجيهك إلى صفحة المخزون (عرض الأقسام).",
   },
   {
     test: (p) => p.startsWith("/admin/purchases"),

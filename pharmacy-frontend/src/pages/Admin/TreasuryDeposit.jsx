@@ -107,6 +107,7 @@ const TreasuryDeposit = () => {
   const [depositDialogOpen, setDepositDialogOpen] = useState(false);
   const [resetDialogOpen, setResetDialogOpen] = useState(false);
   const [depositAmount, setDepositAmount] = useState("");
+  const [depositPaymentMethod, setDepositPaymentMethod] = useState("cash");
   const [depositNotes, setDepositNotes] = useState(""); // ===== حالات تقرير الوجبات =====
   const [mealReport, setMealReport] = useState(null);
   const [mealReportLoading, setMealReportLoading] = useState(false);
@@ -244,7 +245,6 @@ const TreasuryDeposit = () => {
       // أضف هذا للتأكد من تضمين الخيارات
       params.append("include_options", "true");
 
-      console.log("🔍 جلب التقرير بالمعاملات:", params.toString());
 
       const response = await axios.get(
         `${API_BASE_URL}/orders/sales-detailed-report?${params.toString()}`,
@@ -475,7 +475,6 @@ const TreasuryDeposit = () => {
       .catch(() => setError("فشل في جلب تقرير المنتجات"))
       .finally(() => setMealReportLoading(false));
   };
-  console.log(treasuryData, "treasuryData");
 
   // ===== حالات الفلاتر =====
   const [filters, setFilters] = useState({
@@ -699,7 +698,6 @@ const TreasuryDeposit = () => {
       setLoading(false);
     }
   };
-  console.log(treasuryData, "TreasuryData");
 
   // ===== جلب حالة المبيعات =====
   const fetchSalesStatus = async () => {
@@ -824,12 +822,14 @@ const TreasuryDeposit = () => {
         amount: parseFloat(depositAmount),
         description: depositNotes || "إيداع نقدي في الخزنة", // غير من notes إلى description
         type: "deposit",
+        payment_method: depositPaymentMethod === "app" ? "app" : "cash",
       });
 
       if (response.data && response.data.success) {
         setSuccess("تم إيداع المبلغ بنجاح");
         setDepositDialogOpen(false);
         setDepositAmount("");
+        setDepositPaymentMethod("cash");
         setDepositNotes("");
         fetchTreasuryData();
       } else {
@@ -989,6 +989,19 @@ const TreasuryDeposit = () => {
                   <Typography variant="h3" color="primary" sx={{ fontWeight: "bold", mb: 1 }}>
                     {formatCurrency(treasuryData.treasury.balance || 0)}
                   </Typography>
+                  <Stack spacing={0.5} sx={{ mb: 1 }}>
+                    <Typography variant="body2" color="text.secondary">
+                      كاش:{" "}
+                      {formatCurrency(
+                        treasuryData.treasury.balance_cash != null
+                          ? treasuryData.treasury.balance_cash
+                          : treasuryData.treasury.balance || 0,
+                      )}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      تطبيق: {formatCurrency(treasuryData.treasury.balance_app ?? 0)}
+                    </Typography>
+                  </Stack>
                   <Typography variant="body2" color="text.secondary">
                     آخر تحديث: {new Date().toLocaleDateString("ar-EG")}
                   </Typography>
@@ -3079,6 +3092,18 @@ const TreasuryDeposit = () => {
             onChange={(e) => setDepositNotes(e.target.value)}
             margin="normal"
           />
+          <TextField
+            select
+            fullWidth
+            label="قناة الإيداع"
+            value={depositPaymentMethod}
+            onChange={(e) => setDepositPaymentMethod(e.target.value)}
+            margin="normal"
+            SelectProps={{ native: false }}
+          >
+            <MenuItem value="cash">كاش</MenuItem>
+            <MenuItem value="app">تطبيق</MenuItem>
+          </TextField>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setDepositDialogOpen(false)}>إلغاء</Button>
