@@ -3041,14 +3041,19 @@ public function getTodayTransactions(Request $request)
     try {
         $today = now()->startOfDay();
         $tomorrow = now()->endOfDay();
+        $mineOnly = $request->boolean('mine');
+        $authUser = $request->user();
         
         $transactions = collect();
         
         // ===== 1. جلب فواتير البيع (من orders) =====
-        $orders = Order::whereBetween('created_at', [$today, $tomorrow])
+        $ordersQuery = Order::whereBetween('created_at', [$today, $tomorrow])
             ->with(['customer', 'createdBy'])
-            ->orderBy('created_at', 'desc')
-            ->get();
+            ->orderBy('created_at', 'desc');
+        if ($mineOnly && $authUser) {
+            $ordersQuery->where('created_by', $authUser->id);
+        }
+        $orders = $ordersQuery->get();
         
         foreach ($orders as $order) {
             $transactions->push([
@@ -3100,11 +3105,14 @@ public function getTodayTransactions(Request $request)
 
 // ===== 4. جلب حركات الخزنة النقدية (Treasury transactions) =====
 if (Schema::hasTable('treasury_transactions')) {
-    $treasuryTrans = TreasuryTransaction::whereBetween('transaction_date', [$today, $tomorrow])
+    $treasuryTransQuery = TreasuryTransaction::whereBetween('transaction_date', [$today, $tomorrow])
         ->whereIn('type', ['expense', 'income'])
         ->whereNotIn('category', ['sales_income', 'meal_income'])
-        ->orderBy('transaction_date', 'desc')
-        ->get();
+        ->orderBy('transaction_date', 'desc');
+    if ($mineOnly && $authUser && Schema::hasColumn('treasury_transactions', 'created_by')) {
+        $treasuryTransQuery->where('created_by', $authUser->id);
+    }
+    $treasuryTrans = $treasuryTransQuery->get();
     
     foreach ($treasuryTrans as $tt) {
         $transactions->push([
@@ -3129,10 +3137,13 @@ if (Schema::hasTable('treasury_transactions')) {
 }
         // ===== 2. جلب حركات تسديد الديون (من customer_credit_movements) =====
         if (Schema::hasTable('customer_credit_movements')) {
-            $payments = CustomerCreditMovement::whereBetween('occurred_at', [$today, $tomorrow])
+            $paymentsQuery = CustomerCreditMovement::whereBetween('occurred_at', [$today, $tomorrow])
                 ->where('movement_type', 'debt_payment')
-                ->orderBy('occurred_at', 'desc')
-                ->get();
+                ->orderBy('occurred_at', 'desc');
+            if ($mineOnly && $authUser) {
+                $paymentsQuery->where('cashier_name', $authUser->username);
+            }
+            $payments = $paymentsQuery->get();
             
             foreach ($payments as $payment) {
                 // delta_amount سالب = دفع دين (رصيد دائن)
