@@ -92,7 +92,10 @@ Route::middleware($apiAuthMiddleware)->group(function () {
     Route::get('/orders/stats/summary', [OrderController::class, 'stats']);
     Route::get('/orders/credit-customers', [OrderController::class, 'creditCustomersSummary']);
     Route::post('/orders/credit-customers', [OrderController::class, 'createCreditCustomer']);
-    Route::get('/orders/credit-customers/{customerId}/movements', [OrderController::class, 'creditCustomerMovements']);
+// حركات اليوم (فواتير + تسديدات)
+Route::get('/orders/today-transactions', [OrderController::class, 'getTodayTransactions']);
+    Route::get('/orders/credit-customers/{customerId}/movements', [OrderController::class, 'getCreditCustomerMovements']);
+
     Route::post('/orders/credit-customers/{customerId}/pay', [OrderController::class, 'applyCreditPayment']);
     Route::get('/dashboard/summary', [AdminDashboardController::class, 'summary']);
     Route::apiResource('orders', OrderController::class)->only(['index', 'store', 'show']);

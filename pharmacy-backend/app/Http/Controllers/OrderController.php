@@ -44,6 +44,7 @@ class OrderController extends Controller
             'items.*.discount' => 'nullable|numeric|min:0',
             'subtotal' => 'required|numeric|min:0',
             'total' => 'required|numeric|min:0',
+            
             'payment_method' => 'required|in:cash,app,card,bank_transfer,mixed,credit', // ✅ أضف credit
 
 'paid_amount' => 'required_if:payment_method,!=,credit|numeric|min:0',
@@ -191,7 +192,7 @@ $status = $this->normalizeOrderStatusForStorage($status);
                 'total' => $totalAmount,
                 'paid_amount' => $paidAmount,
                 'due_amount' => $dueAmount,
-                'payment_method' => $request->payment_method,
+'payment_method' => $this->normalizePaymentMethod($request->payment_method),
                 'status' => $status,
                 'notes' => $orderNotes,
                 'created_by' => $resolvedCreatedBy,
@@ -272,7 +273,29 @@ $status = $this->normalizeOrderStatusForStorage($status);
     }
 
 
-
+/**
+ * تطبيع طريقة الدفع لتتوافق مع قيم ENUM في قاعدة البيانات
+ */
+private function normalizePaymentMethod($method)
+{
+    $method = strtolower(trim((string) $method));
+    
+    // قائمة القيم المسموحة في قاعدة البيانات حالياً
+    $allowedValues = ['cash', 'app', 'card', 'bank_transfer', 'credit'];
+    
+    // إذا كانت القيمة مسموحة، أرجعها كما هي
+    if (in_array($method, $allowedValues)) {
+        return $method;
+    }
+    
+    // إذا كانت 'mixed'، حولها إلى 'cash' (لأن cash_amount و app_amount مرسلة)
+    if ($method === 'mixed') {
+        return 'cash';
+    }
+    
+    // أي قيمة أخرى، افتراضياً 'cash'
+    return 'cash';
+}
 
 /**
  * تقرير تفصيلي للوجبات المباعة
@@ -2285,10 +2308,58 @@ public function sellReadyMeal(Request $request)
             $meta = $this->extractMetaFromNotes($order->notes);
             $order->setAttribute('customer_name', $order->customer?->name ?: ($meta['customer_name'] ?? null));
             $order->setAttribute('created_by_name', $meta['cashier_name'] ?? ($order->createdBy?->username ?: $order->createdBy?->name));
-
+            
+            // ✅ تحويل العناصر (items) إلى الشكل المطلوب للـ Frontend
+            $formattedItems = [];
+            
+            if (str_starts_with($order->order_number, 'MEAL-')) {
+                // للوجبات
+                foreach ($order->mealItems as $item) {
+                    $formattedItems[] = [
+                        'id' => $item->id,
+                        'name' => $item->meal_name,
+                        'quantity' => $item->quantity,
+                        'unit_price' => $item->unit_price,
+                        'total_price' => $item->total_price,
+                        'profit' => $item->total_profit,
+                    ];
+                }
+            } else {
+                // للمنتجات العادية
+                foreach ($order->items as $item) {
+                    $formattedItems[] = [
+                        'id' => $item->id,
+                        'name' => $item->item_name,
+                        'quantity' => $item->quantity,
+                        'unit_price' => $item->unit_price,
+                        'total_price' => $item->total_price,
+                        'profit' => $item->item_profit,
+                    ];
+                }
+            }
+            
+            // ✅ بناء الـ response بشكل منظم
             return response()->json([
                 'success' => true,
-                'data' => $order,
+                'data' => [
+                    'id' => $order->id,
+                    'order_number' => $order->order_number,
+                    'created_at' => $order->created_at,
+                    'customer_id' => $order->customer_id,
+                    'customer_name' => $order->customer_name,
+                    'created_by' => $order->created_by,
+                    'created_by_name' => $order->created_by_name,
+                    'payment_method' => $order->payment_method,
+                    'status' => $order->status,
+                    'subtotal' => $order->subtotal,
+                    'discount' => $order->discount,
+                    'total' => $order->total,
+                    'paid_amount' => $order->paid_amount,
+                    'due_amount' => $order->due_amount,
+                    'total_profit' => $order->total_profit,
+                    'notes' => $order->notes,
+                    'items' => $formattedItems,
+                ],
                 'message' => 'تم جلب بيانات الطلب بنجاح'
             ]);
             
@@ -2325,10 +2396,10 @@ public function sellReadyMeal(Request $request)
                     $balance += (float) $movement->delta_amount;
                 }
                 
-                // ✅ الرصيد الموجب = دين على الزبون (يجب تحصيله)
-                // ✅ الرصيد السالب = رصيد دائن (الزبون دفع زيادة)
-                $totalDue = max(0, $balance);  // الدين المطلوب من الزبون
-                $availableCredit = max(0, -$balance);  // الرصيد الدائن (دفع زيادة)
+                // الرصيد الموجب = الزبون "عليه" (دين علينا تحصيله)
+                // الرصيد السالب = الزبون "له" (رصيد دائن له عندنا)
+                $totalDue = max(0, $balance);
+                $availableCredit = max(0, -$balance);
                 
                 // ✅ جلب إجمالي المشتريات والمدفوعات من الفواتير
                 $customerOrders = Order::where('customer_id', $customer->id)
@@ -2352,9 +2423,15 @@ public function sellReadyMeal(Request $request)
                     'notes' => '',
                     'total_sales' => round($totalSales, 2),
                     'total_paid' => round($totalPaid, 2),
-                    'total_due' => round($totalDue, 2),  // ✅ كم بدو مني (دين)
-                    'available_credit' => round($availableCredit, 2),  // ✅ قديش بدو مني (رصيد دائن)
-                    'balance' => round($balance, 2),  // ✅ الرصيد الفعلي (موجب = دين، سالب = دائن)
+                    // حقول موحدة ودلالتها ثابتة:
+                    // - balance: موجب = عليه، سالب = له
+                    // - total_due / debt_amount: عليه
+                    // - available_credit / credit_amount: له
+                    'total_due' => round($totalDue, 2),
+                    'available_credit' => round($availableCredit, 2),
+                    'balance' => round($balance, 2),
+                    'debt_amount' => round($totalDue, 2),
+                    'credit_amount' => round($availableCredit, 2),
                     'credit_limit_display' => ($customer->credit_limit ?? 0) > 0 
                         ? number_format($customer->credit_limit, 2) . ' ش'
                         : 'غير محدد',
@@ -2443,6 +2520,8 @@ public function updateCreditLimit(Request $request, $customerId)
         $validator = Validator::make($request->all(), [
             'name' => 'required|string|max:120',
             'phone' => 'nullable|string|max:30',
+            'credit_limit' => 'nullable|numeric|min:0', // ✅ أضف هذا
+            'notes' => 'nullable|string|max:500', // ✅ أضف هذا
         ]);
         if ($validator->fails()) {
             return response()->json([
@@ -2476,6 +2555,8 @@ public function updateCreditLimit(Request $request, $customerId)
             $customer = Customer::create([
                 'name' => $name,
                 'phone' => $phone !== '' ? $phone : '—',
+                'credit_limit' => $request->credit_limit ?? 0, // ✅ حفظ السقف
+                'notes' => $request->notes ?? '', // ✅ حفظ الملاحظات
                 'department' => 'زبائن آجل',
                 'shift' => 'صباحي',
                 'salary' => 0,
@@ -2597,7 +2678,138 @@ public function updateCreditLimit(Request $request, $customerId)
             ], 500);
         }
     }
-
+/**
+ * ✅ دالة جديدة: جلب حركات زبون الآجل من الفواتير (بدون الاعتماد على customer_credit_movements)
+ */
+/**
+ * ✅ دالة جديدة: جلب حركات زبون الآجل من الفواتير مباشرة
+ */
+public function getCreditCustomerMovements($customerId)
+{
+    try {
+        // جلب معلومات الزبون
+        $customer = Customer::find($customerId);
+        
+        if (!$customer) {
+            return response()->json([
+                'success' => false,
+                'message' => 'الزبون غير موجود'
+            ], 404);
+        }
+        
+        $movements = collect();
+        
+        // 1. حركات البيع الآجل (الفواتير)
+        $creditOrders = Order::where('customer_id', $customerId)
+            ->where('payment_method', 'credit')
+            ->whereNotIn('status', ['cancelled', 'returned'])
+            ->with('createdBy')
+            ->orderBy('created_at', 'asc')
+            ->get();
+        
+        foreach ($creditOrders as $order) {
+            $movements->push([
+                'id' => 'sale_' . $order->id,
+                'type' => 'sale',
+                'movement_type' => 'credit_sale',
+                'delta_amount' => (float) $order->total,
+                'balance_after' => 0,
+                'reference_order_id' => $order->id,
+                'order_number' => $order->order_number,
+                'payment_method' => $order->payment_method,
+                'cashier_name' => $order->createdBy?->username ?? '—',
+                'note' => "فاتورة بيع آجل - {$order->order_number}",
+                'occurred_at' => $order->created_at->toISOString(),
+            ]);
+        }
+        
+        // 2. حركات التسديد (من جدول customer_credit_movements إذا كان موجود)
+        if (Schema::hasTable('customer_credit_movements')) {
+            $payments = CustomerCreditMovement::where('customer_id', $customerId)
+                ->where('movement_type', 'debt_payment')
+                ->orderBy('occurred_at', 'asc')
+                ->get();
+            
+            foreach ($payments as $payment) {
+                $movements->push([
+                    'id' => 'payment_' . $payment->id,
+                    'type' => 'payment',
+                    'movement_type' => 'debt_payment',
+                    'delta_amount' => (float) $payment->delta_amount,
+                    'balance_after' => 0,
+                    'reference_order_id' => $payment->reference_order_id,
+                    'order_number' => null,
+                    'payment_method' => $payment->payment_method,
+                    'cashier_name' => $payment->cashier_name,
+                    'note' => $payment->note,
+                    'occurred_at' => $payment->occurred_at->toISOString(),
+                ]);
+            }
+        }
+        
+        // 3. الفواتير النقدية ذات الدفع الجزئي
+        $partialOrders = Order::where('customer_id', $customerId)
+            ->where('payment_method', 'cash')
+            ->where('status', 'pending')  // partially_paid يتحول إلى pending
+            ->where('due_amount', '>', 0)
+            ->with('createdBy')
+            ->orderBy('created_at', 'asc')
+            ->get();
+        
+        foreach ($partialOrders as $order) {
+            $movements->push([
+                'id' => 'partial_' . $order->id,
+                'type' => 'sale',
+                'movement_type' => 'partial_payment_sale',
+                'delta_amount' => (float) $order->due_amount,
+                'balance_after' => 0,
+                'reference_order_id' => $order->id,
+                'order_number' => $order->order_number,
+                'payment_method' => $order->payment_method,
+                'cashier_name' => $order->createdBy?->username ?? '—',
+                'note' => "فاتورة نقدية - متبقي {$order->due_amount} شيكل",
+                'occurred_at' => $order->created_at->toISOString(),
+            ]);
+        }
+        
+        // حساب الرصيد التراكمي
+        $sortedMovements = $movements->sortBy('occurred_at');
+        $runningBalance = 0;
+        $result = [];
+        
+        foreach ($sortedMovements as $movement) {
+            $delta = (float) $movement['delta_amount'];
+            $runningBalance += $delta;
+            $movement['balance_after'] = round($runningBalance, 2);
+            $result[] = $movement;
+        }
+        
+        // ترتيب تنازلي (الأحدث أولاً)
+        $result = collect($result)->sortByDesc('occurred_at')->values();
+        
+        return response()->json([
+            'success' => true,
+            'data' => $result,
+            'customer' => [
+                'id' => $customer->id,
+                'name' => $customer->name,
+                'phone' => $customer->phone ?? '',
+                'current_balance' => round($runningBalance, 2),
+                'total_debt' => round($creditOrders->sum('total'), 2),
+                'total_paid' => round(abs($movements->where('type', 'payment')->sum('delta_amount')), 2),
+            ]
+        ]);
+        
+    } catch (\Exception $e) {
+        Log::error('getCreditCustomerMovements error: ' . $e->getMessage());
+        
+        return response()->json([
+            'success' => false,
+            'message' => 'حدث خطأ في جلب حركات الزبون',
+            'error' => config('app.debug') ? $e->getMessage() : null
+        ], 500);
+    }
+}
     public function creditCustomerMovements($customerId)
     {
         try {
@@ -2794,6 +3006,183 @@ public function updateCreditLimit(Request $request, $customerId)
             ], 500);
         }
     }
+
+
+
+
+
+
+    /**
+ * جلب جميع حركات اليوم (فواتير البيع + تسديدات الديون)
+ * لتظهر في جدول بيع اليوم للكاشير
+ */
+
+
+
+
+public function getTodayTransactions(Request $request)
+{
+    try {
+        $today = now()->startOfDay();
+        $tomorrow = now()->endOfDay();
+        
+        $transactions = collect();
+        
+        // ===== 1. جلب فواتير البيع (من orders) =====
+        $orders = Order::whereBetween('created_at', [$today, $tomorrow])
+            ->with(['customer', 'createdBy'])
+            ->orderBy('created_at', 'desc')
+            ->get();
+        
+        foreach ($orders as $order) {
+            $transactions->push([
+                'id' => 'order_' . $order->id,
+                'transaction_id' => $order->id,
+                'type' => 'sale',
+                'type_label' => 'فاتورة بيع',
+                'reference_number' => $order->order_number,
+                'customer_id' => $order->customer_id,
+                'customer_name' => $order->customer?->name ?? $this->extractMetaFromNotes($order->notes)['customer_name'] ?? 'زبون عابر',
+                'payment_method' => $order->payment_method,
+                'total_amount' => (float) $order->total,
+                'paid_amount' => (float) $order->paid_amount,
+                'due_amount' => (float) $order->due_amount,
+                'cashier_name' => $order->createdBy?->username ?? $this->extractMetaFromNotes($order->notes)['cashier_name'] ?? '—',
+                'status' => $order->status,
+                'items_count' => $order->items->count(),
+                'occurred_at' => $order->created_at->toISOString(),
+                'icon' => 'receipt',
+                'color' => 'primary'
+            ]);
+        }
+        if (Schema::hasTable('category_purchases')) {
+    $purchases = DB::table('category_purchases')
+        ->whereBetween('created_at', [$today, $tomorrow])
+        ->orderBy('created_at', 'desc')
+        ->get();
+    
+    foreach ($purchases as $purchase) {
+        $transactions->push([
+            'id' => 'purchase_' . $purchase->id,
+            'type' => 'purchase',
+            'type_label' => 'شراء مخزون',
+            'reference_number' => $purchase->purchase_number ?? 'PUR-' . $purchase->id,
+            'customer_name' => $purchase->supplier_name ?? 'مورد',
+            'payment_method' => $purchase->payment_method ?? 'cash',
+            'total_amount' => -(float) $purchase->total_amount, // سالب لأنه صرف من الخزنة
+            'paid_amount' => (float) $purchase->paid_amount,
+            'due_amount' => (float) $purchase->due_amount,
+            'cashier_name' => $purchase->created_by_name ?? auth()->user()?->username,
+            'status' => 'completed',
+            'items_count' => 1,
+            'occurred_at' => $purchase->created_at->toISOString(),
+            'icon' => 'shopping_cart',
+            'color' => 'warning'
+        ]);
+    }
+}
+
+// ===== 4. جلب حركات الخزنة النقدية (Treasury transactions) =====
+if (Schema::hasTable('treasury_transactions')) {
+    $treasuryTrans = TreasuryTransaction::whereBetween('transaction_date', [$today, $tomorrow])
+        ->whereIn('type', ['expense', 'income'])
+        ->whereNotIn('category', ['sales_income', 'meal_income'])
+        ->orderBy('transaction_date', 'desc')
+        ->get();
+    
+    foreach ($treasuryTrans as $tt) {
+        $transactions->push([
+            'id' => 'treasury_' . $tt->id,
+            'type' => $tt->type === 'expense' ? 'expense' : 'income',
+            'type_label' => $tt->type === 'expense' ? 'صرف نقدي' : 'إيداع نقدي',
+            'reference_number' => 'حركة #' . $tt->id,
+            'customer_name' => '—',
+            'payment_method' => $tt->payment_method ?? 'cash',
+            'total_amount' => $tt->type === 'expense' ? -(float) $tt->amount : (float) $tt->amount,
+            'paid_amount' => (float) $tt->amount,
+            'due_amount' => 0,
+            'cashier_name' => optional($tt->createdBy)->username ?? '—',
+            'status' => 'completed',
+            'items_count' => 0,
+            'occurred_at' => $tt->transaction_date->toISOString(),
+            'icon' => $tt->type === 'expense' ? 'money_off' : 'attach_money',
+            'color' => $tt->type === 'expense' ? 'error' : 'success',
+            'note' => $tt->description
+        ]);
+    }
+}
+        // ===== 2. جلب حركات تسديد الديون (من customer_credit_movements) =====
+        if (Schema::hasTable('customer_credit_movements')) {
+            $payments = CustomerCreditMovement::whereBetween('occurred_at', [$today, $tomorrow])
+                ->where('movement_type', 'debt_payment')
+                ->orderBy('occurred_at', 'desc')
+                ->get();
+            
+            foreach ($payments as $payment) {
+                // delta_amount سالب = دفع دين (رصيد دائن)
+                $paidAmount = abs((float) $payment->delta_amount);
+                
+                $transactions->push([
+                    'id' => 'payment_' . $payment->id,
+                    'transaction_id' => $payment->id,
+                    'type' => 'debt_payment',
+                    'type_label' => 'تسديد دين',
+                    'reference_number' => 'تسديد #' . $payment->id,
+                    'customer_id' => $payment->customer_id,
+                    'customer_name' => $payment->customer_name ?? 'زبون آجل',
+                    'payment_method' => $payment->payment_method ?? 'cash',
+                    'total_amount' => $paidAmount,
+                    'paid_amount' => $paidAmount,
+                    'due_amount' => 0,
+                    'cashier_name' => $payment->cashier_name ?? '—',
+                    'status' => 'completed',
+                    'items_count' => 0,
+                    'occurred_at' => $payment->occurred_at->toISOString(),
+                    'icon' => 'payments',
+                    'color' => 'success',
+                    'note' => $payment->note
+                ]);
+            }
+        }
+        
+        // ===== 3. ترتيب حسب التاريخ (الأحدث أولاً) =====
+        $sortedTransactions = $transactions->sortByDesc('occurred_at')->values();
+        
+        // ===== 4. إحصائيات اليوم =====
+        $stats = [
+            'total_sales' => $orders->sum('total'),
+            'total_paid' => $orders->sum('paid_amount'),
+            'total_debt_paid' => $transactions->where('type', 'debt_payment')->sum('total_amount'),
+            'total_purchases' => abs($transactions->where('type', 'purchase')->sum('total_amount')),
+            'total_expenses' => abs($transactions->where('type', 'expense')->sum('total_amount')),
+            'total_income' => $transactions->where('type', 'income')->sum('total_amount'),
+            'total_orders' => $orders->count(),
+            'total_payments' => $transactions->where('type', 'debt_payment')->count(),
+            'net_cash_flow' => $orders->sum('total') - abs($transactions->where('type', 'purchase')->sum('total_amount')),
+        ];
+        
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'transactions' => $sortedTransactions,
+                'stats' => $stats,
+                'date' => now()->toDateString()
+            ],
+            'message' => 'تم جلب حركات اليوم بنجاح'
+        ]);
+        
+    } catch (\Exception $e) {
+        Log::error('getTodayTransactions error: ' . $e->getMessage());
+        
+        return response()->json([
+            'success' => false,
+            'message' => 'حدث خطأ في جلب حركات اليوم',
+            'error' => env('APP_DEBUG') ? $e->getMessage() : null
+        ], 500);
+    }
+}
+
+
 
     /**
      * إرجاع الطلب بالكامل (مرتجع كامل - مناسب لطلبات الوجبات)

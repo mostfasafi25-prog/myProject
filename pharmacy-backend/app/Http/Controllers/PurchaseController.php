@@ -1121,14 +1121,14 @@ private function getPurchasesByDay($period = 'month')
                     'message' => 'ميزة الإرجاع غير مفعلة بعد. يرجى تشغيل ترحيلات قاعدة البيانات (migrations) الخاصة بالإرجاع.'
                 ], 422);
             }
-
+    
             $validated = $request->validate([
                 'items' => 'required|array|min:1',
                 'items.*.purchase_item_id' => 'required|integer|exists:purchase_items,id',
                 'items.*.quantity' => 'required|numeric|min:0.1',
                 'reason' => 'nullable|string'
             ]);
-
+    
             // Check if purchase is already returned
             if ($purchase->status === 'returned') {
                 return response()->json([
@@ -1136,15 +1136,15 @@ private function getPurchasesByDay($period = 'month')
                     'message' => 'لا يمكن إرجاع أصناف من فاتورة تم إرجاعها بالكامل مسبقاً'
                 ], 422);
             }
-
+    
             DB::beginTransaction();
-
+    
             $returnedTotal = 0;
             $returnedItems = [];
             $paidBeforeReturn = (float) $purchase->paid_amount;
             $cashPaidBeforeReturn = (float) ($purchase->cash_amount ?? 0);
             $appPaidBeforeReturn = (float) ($purchase->app_amount ?? 0);
-
+    
             foreach ($validated['items'] as $item) {
                 $purchaseItem = PurchaseItem::where('purchase_id', $purchase->id)
                     ->where('id', $item['purchase_item_id'])
@@ -1153,7 +1153,7 @@ private function getPurchasesByDay($period = 'month')
                 if (!$purchaseItem || $purchaseItem->purchase_id !== $purchase->id) {
                     continue;
                 }
-
+    
                 // Check if return quantity is valid
                 $availableQty = $purchaseItem->quantity - ($purchaseItem->returned_quantity ?? 0);
                 if ($item['quantity'] > $availableQty) {
@@ -1162,22 +1162,37 @@ private function getPurchasesByDay($period = 'month')
                         'message' => "الكمية المطلوب إرجاعها للصنف {$purchaseItem->product_name} أكبر من المتاح"
                     ], 422);
                 }
-
+    
                 // Update purchase item returned quantity
                 $purchaseItem->returned_quantity = ($purchaseItem->returned_quantity ?? 0) + $item['quantity'];
                 $purchaseItem->save();
-
-                // Update product stock (decrease)
+    
+                // ✅ التعديل هنا: إزالة max(0, ...) للسماح بالمخزون السالب
                 $product = Product::find($purchaseItem->product_id);
                 if ($product) {
-                    $product->stock = max(0, (float) $product->stock - (float) $item['quantity']);
+                    $oldStock = (float) $product->stock;
+                    $newStock = $oldStock - (float) $item['quantity'];  // بدون max(0, ...)
+                    $product->stock = $newStock;
                     $product->save();
+                    
+                    // تسجيل حركة المخزون للتدقيق (اختياري)
+                    Log::channel('stock')->info('إرجاع منتج من فاتورة شراء', [
+                        'product_id' => $product->id,
+                        'product_name' => $product->name,
+                        'old_stock' => $oldStock,
+                        'quantity_returned' => $item['quantity'],
+                        'new_stock' => $newStock,
+                        'purchase_id' => $purchase->id,
+                        'purchase_item_id' => $purchaseItem->id,
+                        'user_id' => auth()->id() ?? 1,
+                        'timestamp' => now()->toDateTimeString()
+                    ]);
                 }
-
+    
                 // Calculate returned amount
                 $returnedAmount = $item['quantity'] * $purchaseItem->unit_price;
                 $returnedTotal += $returnedAmount;
-
+    
                 $returnedItems[] = [
                     'product_name' => $purchaseItem->product_name,
                     'quantity' => $item['quantity'],
@@ -1185,7 +1200,7 @@ private function getPurchasesByDay($period = 'month')
                     'total' => $returnedAmount
                 ];
             }
-
+    
             if ($returnedTotal <= 0 || count($returnedItems) === 0) {
                 DB::rollBack();
                 return response()->json([
@@ -1193,7 +1208,7 @@ private function getPurchasesByDay($period = 'month')
                     'message' => 'لم يتم تحديد أصناف صالحة للإرجاع'
                 ], 422);
             }
-
+    
             // Create return record
             PurchaseReturn::create([
                 'purchase_id' => $purchase->id,
@@ -1204,13 +1219,13 @@ private function getPurchasesByDay($period = 'month')
                 'reason' => $validated['reason'] ?? 'إرجاع أصناف',
                 'created_by' => auth()->id() ?? 1
             ]);
-
+    
             // Update purchase totals
             $newTotalAmount = max(0, (float) $purchase->total_amount - $returnedTotal);
             $newPaidAmount = min($paidBeforeReturn, $newTotalAmount);
             $refundAmount = max(0, $paidBeforeReturn - $newPaidAmount);
             $newRemainingAmount = max(0, $newTotalAmount - $newPaidAmount);
-
+    
             // توزيع الاسترجاع على الكاش/التطبيق بنفس نسبة الدفع الأصلية
             $cashRefund = 0.0;
             if ($refundAmount > 0 && $paidBeforeReturn > 0) {
@@ -1220,14 +1235,14 @@ private function getPurchasesByDay($period = 'month')
             $appRefund = max(0, $refundAmount - $cashRefund);
             $newCashAmount = max(0, $cashPaidBeforeReturn - $cashRefund);
             $newAppAmount = max(0, $appPaidBeforeReturn - $appRefund);
-
+    
             $treasuryRemaining = $this->mainTreasuryDebitRemaining($purchase);
             $treasuryCashRefund = 0.0;
             if ($refundAmount > 0.00001 && $paidBeforeReturn > 0.00001 && $treasuryRemaining > 0.00001) {
                 $treasuryCashRefund = round($refundAmount * ($treasuryRemaining / $paidBeforeReturn), 2);
             }
             $treasuryCashRefund = max(0.0, min($treasuryCashRefund, $treasuryRemaining, $refundAmount));
-
+    
             $purchase->total_amount = $newTotalAmount;
             $purchase->grand_total = $newTotalAmount;
             $purchase->paid_amount = $newPaidAmount;
@@ -1235,7 +1250,7 @@ private function getPurchasesByDay($period = 'month')
             $purchase->due_amount = $newRemainingAmount;
             $purchase->cash_amount = $newCashAmount;
             $purchase->app_amount = $newAppAmount;
-
+    
             if ($newTotalAmount <= 0.01) {
                 $purchase->status = $this->supportsReturnedStatus() ? 'returned' : 'completed';
             } elseif ($newRemainingAmount <= 0.01) {
@@ -1245,13 +1260,13 @@ private function getPurchasesByDay($period = 'month')
             } else {
                 $purchase->status = 'pending';
             }
-
+    
             if (Schema::hasColumn('purchases', 'treasury_cash_debit')) {
                 $purchase->treasury_cash_debit = max(0.0, round($treasuryRemaining - $treasuryCashRefund, 2));
             }
-
+    
             $purchase->save();
-
+    
             if ($treasuryCashRefund > 0.00001) {
                 $treasury = Treasury::first();
                 if ($treasury) {
@@ -1260,7 +1275,7 @@ private function getPurchasesByDay($period = 'month')
                     $refundApp = round($treasuryCashRefund - $refundCash, 2);
                     $treasury->applyLiquidityDelta($refundCash, $refundApp);
                     $treasury->save();
-
+    
                     foreach (
                         [
                             ['amt' => $refundCash, 'method' => 'cash', 'suffix' => ' — كاش'],
@@ -1285,9 +1300,9 @@ private function getPurchasesByDay($period = 'month')
                     }
                 }
             }
-
+    
             DB::commit();
-
+    
             return response()->json([
                 'success' => true,
                 'message' => 'تم إرجاع الأصناف بنجاح',
@@ -1300,7 +1315,7 @@ private function getPurchasesByDay($period = 'month')
                     'purchase_new_total' => $purchase->total_amount
                 ]
             ]);
-
+    
         } catch (\Exception $e) {
             DB::rollBack();
             return response()->json([
@@ -1358,7 +1373,7 @@ private function getPurchasesByDay($period = 'month')
                     // Update product stock
                     $product = Product::find($item->product_id);
                     if ($product) {
-                        $product->stock = max(0, (float) $product->stock - (float) $remainingQty);
+                        $product->stock = (float) $product->stock - (float) $remainingQty;
                         $product->save();
                     }
 

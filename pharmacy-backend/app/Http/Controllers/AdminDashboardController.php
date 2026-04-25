@@ -21,13 +21,11 @@ class AdminDashboardController extends Controller
 
         $today = Carbon::today()->toDateString();
         $monthStart = Carbon::now()->startOfMonth()->toDateString();
-
+        $daysInMonth = Carbon::now()->daysInMonth; // عدد أيام الشهر الحالي
         $monthlyDays = [];
-        for ($d = 0; $d < 12; $d++) {
-            $day = Carbon::now()->startOfMonth()->addDays($d);
-            if ($day->month !== Carbon::now()->month) {
-                break;
-            }
+        
+        for ($d = 1; $d <= $daysInMonth; $d++) {
+            $day = Carbon::now()->startOfMonth()->addDays($d - 1);
             $ds = $day->toDateString();
             $monthlyDays[] = [
                 'date' => $ds,
@@ -36,6 +34,7 @@ class AdminDashboardController extends Controller
                 'count' => Order::whereDate('created_at', $ds)->count(),
             ];
         }
+      
 
         return response()->json([
             'success' => true,

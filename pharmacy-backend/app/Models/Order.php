@@ -22,6 +22,8 @@ protected $guarded = [];
         'total' => 'decimal:2',
         'paid_amount' => 'decimal:2',
         'due_amount' => 'decimal:2',
+        'total_profit' => 'decimal:2',  // ✅ أضف هذا السطر
+        'total_cost' => 'decimal:2',  // ✅ أضف هذا السطر
         'created_at' => 'datetime',
         'updated_at' => 'datetime'
     ];
@@ -119,6 +121,48 @@ public function createdBy(): BelongsTo
     /**
      * حساب الإجماليات من العناصر
      */
+   
+    
+    
+    
+    public function getTotalCostAttribute(): float
+    {
+        if (isset($this->attributes['total_cost']) && $this->attributes['total_cost'] !== null) {
+            return (float) $this->attributes['total_cost'];
+        }
+        
+        $cost = 0;
+        foreach ($this->items as $item) {
+            $cost += $item->unit_cost * $item->quantity;
+        }
+        return $cost;
+    }
+    
+    /**
+     * حساب الربح الإجمالي للطلب
+     */
+    public function getTotalProfitAttribute(): float
+    {
+        if (isset($this->attributes['total_profit']) && $this->attributes['total_profit'] !== null) {
+            return (float) $this->attributes['total_profit'];
+        }
+        
+        return $this->total - $this->total_cost;
+    }
+    
+    // في دالة booted() أضف:
+    protected static function booted()
+    {
+        static::saving(function ($order) {
+            if ($order->items->isNotEmpty()) {
+                $order->total_cost = $order->items->sum(function($item) {
+                    return $item->unit_cost * $item->quantity;
+                });
+                $order->total_profit = $order->total - $order->total_cost;
+            }
+        });
+    }
+    
     public function calculateTotals(): void
     {
         $subtotal = $this->items->sum('total_price');
@@ -128,6 +172,10 @@ public function createdBy(): BelongsTo
         $this->tax = $this->subtotal * 0.15;
         $this->total = $this->subtotal + $this->tax;
         $this->due_amount = $this->total - $this->paid_amount;
+        $this->total_cost = $this->items->sum(function($item) {
+            return $item->unit_cost * $item->quantity;
+        });
+        $this->total_profit = $this->total - $this->total_cost; // ✅ أضف هذا
     }
 
 }

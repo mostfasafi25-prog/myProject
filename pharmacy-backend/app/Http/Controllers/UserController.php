@@ -47,6 +47,21 @@ class UserController extends Controller
         ]);
     }
     
+    private function canManageUser(Request $request, User $user): bool
+{
+    $actor = $request->user();
+    
+    if ($actor->role === 'super_admin') {
+        return true;
+    }
+    
+    if ($actor->role === 'admin') {
+        // الأدمن العادي يقدر يدير الكاشير فقط
+        return $user->role === 'cashier';
+    }
+    
+    return false;
+}
     /**
      * إنشاء مستخدم جديد
      */
@@ -115,6 +130,17 @@ class UserController extends Controller
     {
         if (!in_array($request->user()?->role, ['admin', 'super_admin'], true)) {
             return response()->json(['success' => false, 'message' => 'غير مصرح'], 403);
+        }
+        if ($request->has('role')) {
+            $newRole = $request->input('role');
+            $actor = $request->user();
+            
+            if ($actor->role === 'admin' && !in_array($newRole, ['cashier', 'super_cashier'])) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'الأدمن العادي يمكنه تعيين أدوار الكاشير فقط'
+                ], 403);
+            }
         }
         $user = User::find($id);
         
