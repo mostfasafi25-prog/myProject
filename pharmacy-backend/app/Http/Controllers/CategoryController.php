@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\DB;
 use App\Models\Product;
 use Illuminate\Support\Facades\Log;
 use App\Models\TreasuryTransaction;
+use App\Support\ActivityLogger;
 use Carbon\Carbon;
 class CategoryController extends Controller
 {
@@ -181,6 +182,14 @@ public function store(Request $request)
         }
         
         $category = Category::create($data);
+
+        ActivityLogger::log($request, [
+            'action_type' => 'category_create',
+            'entity_type' => 'category',
+            'entity_id' => $category->id,
+            'description' => "إضافة قسم: {$category->name}",
+            'meta' => ['scope' => $category->scope],
+        ]);
         
         return response()->json([
             'success' => true,
@@ -1910,6 +1919,13 @@ public function getAllCategoryProducts($id)
 'parent_id' => $request->has('parent_id') ? $request->parent_id : $category->parent_id,                'is_active' => $request->has('is_active') ? $request->boolean('is_active') : $category->is_active,
                 'sort_order' => $request->sort_order ?? $category->sort_order
             ]);
+
+            ActivityLogger::log($request, [
+                'action_type' => 'category_update',
+                'entity_type' => 'category',
+                'entity_id' => $category->id,
+                'description' => "تحديث قسم: {$category->name}",
+            ]);
             
             return response()->json([
                 'success' => true,
@@ -1974,7 +1990,15 @@ public function getAllCategoryProducts($id)
                 ], 400);
             }
             
+            $categoryName = $category->name;
             $category->delete();
+
+            ActivityLogger::log(request(), [
+                'action_type' => 'category_delete',
+                'entity_type' => 'category',
+                'entity_id' => $id,
+                'description' => "حذف قسم: {$categoryName}",
+            ]);
             
             return response()->json([
                 'success' => true,

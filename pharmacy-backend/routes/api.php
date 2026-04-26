@@ -14,6 +14,8 @@ use App\Http\Controllers\CashierShiftCloseController;
 use App\Http\Controllers\ImageUploadController;
 use App\Http\Controllers\SupplierController;
 use App\Http\Controllers\PurchaseController;
+use App\Http\Controllers\StaffActivityController;
+use App\Http\Controllers\SystemNotificationController;
 use App\Http\Controllers\TreasuryController;
 
 /*
@@ -126,9 +128,22 @@ Route::get('/orders/today-transactions', [OrderController::class, 'getTodayTrans
     Route::get('/treasury-balance', [TreasuryController::class, 'getSimpleBalance']);
     Route::post('/treasury-init', [TreasuryController::class, 'initTreasury']);
     Route::post('/system/reset-all', [TreasuryController::class, 'resetEverything']);
+    Route::post('/system/reset-suppliers', [TreasuryController::class, 'resetSuppliers']);
       // ✅ أضف هاتين السطرين هنا
       Route::post('/treasury/manual-deposit', [TreasuryController::class, 'manualDeposit']);
       Route::post('/treasury/manual-withdraw', [TreasuryController::class, 'manualWithdraw']);
     /** الأقسام */
     Route::apiResource('categories', CategoryController::class);
+
+    /** الإشعارات النظامية */
+    Route::post('/notifications', [SystemNotificationController::class, 'store']);
+
+    Route::get('/notifications', [SystemNotificationController::class, 'index']);
+    Route::post('/notifications/read-all', [SystemNotificationController::class, 'markReadAll']);
+    Route::post('/notifications/delete-all', [SystemNotificationController::class, 'markDeletedAll']);
+    Route::post('/notifications/{id}/read', [SystemNotificationController::class, 'markRead']);
+    Route::post('/notifications/{id}/delete', [SystemNotificationController::class, 'markDeleted']);
+
+    /** نشاط الموظفين */
+    Route::get('/staff-activities', [StaffActivityController::class, 'index']);
 });

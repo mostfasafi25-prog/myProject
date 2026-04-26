@@ -22,6 +22,8 @@ use Carbon\Carbon;
 use App\Models\MealIngredient;
 use App\Models\MealProductIngredient;
 use App\Models\CustomerCreditMovement;
+use App\Models\SystemNotification;
+use App\Support\ActivityLogger;
 
 class OrderController extends Controller
 {
@@ -255,6 +257,44 @@ $status = $this->normalizeOrderStatusForStorage($status);
                     $request->input('app_amount')
                 );
             }
+
+            try {
+                if (Schema::hasTable('system_notifications')) {
+                    SystemNotification::create([
+                        'type' => 'sale',
+                        'pref_category' => 'sale',
+                        'title' => 'تم تسجيل عملية بيع',
+                        'message' => 'فاتورة ' . ($order->order_number ?? $order->id) . ' بقيمة ' . number_format((float) $order->total, 2),
+                        'details' => 'المدفوع: ' . number_format((float) $order->paid_amount, 2) .
+                            "\nالمتبقي: " . number_format((float) $order->due_amount, 2) .
+                            "\nعدد الأصناف: " . count($request->items ?? []),
+                        'from_management' => false,
+                        'management_label' => null,
+                        'recipients_type' => 'all',
+                        'created_by' => auth()->id() ?: null,
+                    ]);
+                }
+            } catch (\Throwable $notificationError) {
+                Log::warning('Failed to create sale notification', [
+                    'order_id' => $order->id ?? null,
+                    'error' => $notificationError->getMessage(),
+                ]);
+            }
+
+            ActivityLogger::log($request, [
+                'action_type' => 'sale_create',
+                'entity_type' => 'order',
+                'entity_id' => $order->id,
+                'description' => "تنفيذ عملية بيع {$order->order_number}",
+                'meta' => [
+                    'total' => (float) $order->total,
+                    'total_profit' => (float) ($order->total_profit ?? 0),
+                    'paid' => (float) $order->paid_amount,
+                    'due' => (float) $order->due_amount,
+                    'items_count' => count($request->items ?? []),
+                    'total_quantity' => collect($request->items ?? [])->sum(fn ($it) => (float) ($it['quantity'] ?? 0)),
+                ],
+            ]);
 
             DB::commit();
 

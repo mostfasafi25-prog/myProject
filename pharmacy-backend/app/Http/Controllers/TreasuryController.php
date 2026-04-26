@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
 use App\Models\Employee;
 use App\Models\SalaryPayment;
+use App\Support\ActivityLogger;
 
 class TreasuryController extends Controller
 {
@@ -378,6 +379,18 @@ public function manualDeposit(Request $request)
         
         DB::commit();
 
+        ActivityLogger::log($request, [
+            'action_type' => 'treasury_manual_deposit',
+            'entity_type' => 'treasury',
+            'entity_id' => $treasury->id ?? null,
+            'description' => 'إضافة يدوية للخزنة',
+            'meta' => [
+                'amount' => (float) $request->amount,
+                'payment_method' => $pm,
+                'description' => (string) $request->description,
+            ],
+        ]);
+
         return response()->json([
             'success' => true,
             'message' => '✅ تم إضافة المبلغ للخزنة يدويًا',
@@ -476,6 +489,18 @@ public function manualWithdraw(Request $request)
         ]);
         
         DB::commit();
+
+        ActivityLogger::log($request, [
+            'action_type' => 'treasury_manual_withdraw',
+            'entity_type' => 'treasury',
+            'entity_id' => $treasury->id ?? null,
+            'description' => 'سحب يدوي من الخزنة',
+            'meta' => [
+                'amount' => (float) $request->amount,
+                'payment_method' => $pm,
+                'description' => (string) $request->description,
+            ],
+        ]);
 
         return response()->json([
             'success' => true,
@@ -879,7 +904,8 @@ public function resetEverything(Request $request)
             'orders_count' => \App\Models\Order::count(),
             'transactions_count' => TreasuryTransaction::count(),
             'purchases_count' => \App\Models\Purchase::count(),
-            'treasury_balance' => Treasury::sum('balance') ?? 0
+            'treasury_balance' => Treasury::sum('balance') ?? 0,
+            'suppliers_count' => \App\Models\Supplier::count(),
         ];
 
         DB::beginTransaction();
@@ -919,6 +945,25 @@ public function resetEverything(Request $request)
         \App\Models\Product::query()->delete();
         \App\Models\Category::query()->delete();
 
+        // 9. تصفير الموردين بالكامل
+        \App\Models\Supplier::query()->delete();
+
+        // 10. تنظيف جداول مساندة (إن كانت موجودة)
+        if (\Schema::hasTable('staff_activities')) {
+            \App\Models\StaffActivity::query()->delete();
+        }
+        if (\Schema::hasTable('system_notifications')) {
+            \App\Models\SystemNotification::query()->delete();
+        }
+
+        // 11. إبقاء حسابات الإدارة فقط (admin / super_admin)
+        if (\Schema::hasTable('users')) {
+            DB::table('users')
+                ->whereNotIn('role', ['admin', 'super_admin'])
+                ->whereRaw('LOWER(COALESCE(username, "")) <> ?', ['admin'])
+                ->delete();
+        }
+
         DB::commit();
 
         return response()->json([
@@ -931,7 +976,8 @@ public function resetEverything(Request $request)
                 'المعاملات' => 0,
                 'رصيد_الخزنة' => 0,
                 'الأصناف' => 0,
-                'الأقسام' => 0
+                'الأقسام' => 0,
+                'الموردين' => 0,
             ]
         ]);
 
@@ -941,6 +987,31 @@ public function resetEverything(Request $request)
             'success' => false,
             'message' => '❌ فشل: ' . $e->getMessage(),
             'hint' => 'استخدم delete() بدلاً من truncate() للحذف'
+        ], 500);
+    }
+}
+
+/**
+ * تصفير الموردين فقط
+ */
+public function resetSuppliers(Request $request)
+{
+    try {
+        DB::beginTransaction();
+        $count = \App\Models\Supplier::count();
+        \App\Models\Supplier::query()->delete();
+        DB::commit();
+
+        return response()->json([
+            'success' => true,
+            'message' => '✅ تم تصفير الموردين بنجاح',
+            'deleted_suppliers' => $count,
+        ]);
+    } catch (\Exception $e) {
+        DB::rollBack();
+        return response()->json([
+            'success' => false,
+            'message' => '❌ فشل تصفير الموردين: ' . $e->getMessage(),
         ], 500);
     }
 }

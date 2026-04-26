@@ -9,6 +9,7 @@ use App\Models\TreasuryTransaction;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
+use App\Support\ActivityLogger;
 
 class SupplierController extends Controller
 {
@@ -79,6 +80,13 @@ class SupplierController extends Controller
                 'balance' => $request->balance ?? 0,
                 'notes' => $request->notes,
                 'is_active' => $request->boolean('is_active', true)
+            ]);
+
+            ActivityLogger::log($request, [
+                'action_type' => 'supplier_create',
+                'entity_type' => 'supplier',
+                'entity_id' => $supplier->id,
+                'description' => "إضافة مورد جديد: {$supplier->name}",
             ]);
             
             return response()->json([
@@ -163,6 +171,13 @@ class SupplierController extends Controller
                 'notes' => $request->has('notes') ? $request->notes : $supplier->notes,
                 'is_active' => $request->has('is_active') ? $request->boolean('is_active') : $supplier->is_active
             ]);
+
+            ActivityLogger::log($request, [
+                'action_type' => 'supplier_update',
+                'entity_type' => 'supplier',
+                'entity_id' => $supplier->id,
+                'description' => "تحديث بيانات المورد: {$supplier->name}",
+            ]);
             
             return response()->json([
                 'success' => true,
@@ -207,7 +222,15 @@ class SupplierController extends Controller
                 ], 400);
             }
             
+            $supplierName = $supplier->name;
             $supplier->delete();
+
+            ActivityLogger::log(request(), [
+                'action_type' => 'supplier_delete',
+                'entity_type' => 'supplier',
+                'entity_id' => $id,
+                'description' => "حذف المورد: {$supplierName}",
+            ]);
             
             return response()->json([
                 'success' => true,
@@ -618,6 +641,17 @@ class SupplierController extends Controller
             }
 
             DB::commit();
+
+            ActivityLogger::log($request, [
+                'action_type' => 'supplier_debt_payment',
+                'entity_type' => 'supplier',
+                'entity_id' => $supplier->id,
+                'description' => "تسديد دين مورد: {$supplier->name}",
+                'meta' => [
+                    'amount_paid' => (float) $amount,
+                    'payment_method' => $paymentMethod,
+                ],
+            ]);
 
             return response()->json([
                 'success' => true,

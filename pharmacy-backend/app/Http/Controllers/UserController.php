@@ -7,6 +7,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Hash;
+use App\Support\ActivityLogger;
 
 class UserController extends Controller
 {
@@ -101,6 +102,14 @@ class UserController extends Controller
                 'role' => $request->role,
                 'approval_status' => $request->approval_status ?: 'approved',
                 'is_active' => $request->boolean('is_active', true),
+            ]);
+
+            ActivityLogger::log($request, [
+                'action_type' => 'user_create',
+                'entity_type' => 'user',
+                'entity_id' => $user->id,
+                'description' => "إنشاء مستخدم جديد @{$user->username}",
+                'meta' => ['role' => $user->role],
             ]);
             
             return response()->json([
@@ -200,6 +209,14 @@ class UserController extends Controller
             if (array_key_exists('is_active', $updateData) && !$user->is_active) {
                 $user->tokens()->delete();
             }
+
+            ActivityLogger::log($request, [
+                'action_type' => 'user_update',
+                'entity_type' => 'user',
+                'entity_id' => $user->id,
+                'description' => "تحديث بيانات المستخدم @{$user->username}",
+                'meta' => ['updated_fields' => array_keys($updateData)],
+            ]);
             
             return response()->json([
                 'success' => true,
@@ -257,7 +274,17 @@ class UserController extends Controller
         }
         
         try {
+            $deletedUsername = $user->username;
+            $deletedRole = $user->role;
             $user->delete();
+
+            ActivityLogger::log(request(), [
+                'action_type' => 'user_delete',
+                'entity_type' => 'user',
+                'entity_id' => $id,
+                'description' => "حذف المستخدم @{$deletedUsername}",
+                'meta' => ['role' => $deletedRole],
+            ]);
             
             return response()->json([
                 'success' => true,

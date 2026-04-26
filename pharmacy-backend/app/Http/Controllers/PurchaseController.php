@@ -7,12 +7,14 @@ use App\Models\PurchaseItem;
 use App\Models\PurchaseReturn;
 use App\Models\Product;
 use App\Models\Supplier;
+use App\Models\SystemNotification;
 use App\Models\Treasury;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use App\Models\TreasuryTransaction;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
+use App\Support\ActivityLogger;
 
 class PurchaseController extends Controller
 {
@@ -266,12 +268,15 @@ public function store(Request $request)
             $qtyInPieces = $this->convertQuantityToPieces($product, $qty, $purchaseUnit);
             $effectiveQty = max(0.0, $qtyInPieces);
             $effectiveUnitPrice = $effectiveQty > 0 ? ($totalPrice > 0 ? $totalPrice / $effectiveQty : $unitPrice) : $unitPrice;
+            $lineSalePrice = isset($item['sale_price']) ? (float) $item['sale_price'] : (float) ($item['unit_price'] ?? 0);
+
             PurchaseItem::create([
                 'purchase_id' => $purchase->id,
                 'product_id' => $item['product_id'],
                 'product_name' => $item['product_name'],
                 'quantity' => $effectiveQty,
                 'unit_price' => $effectiveUnitPrice,
+                'sale_price' => $lineSalePrice,
                 'total_price' => $effectiveQty * $effectiveUnitPrice,
                 'subtotal' => $effectiveQty * $effectiveUnitPrice,
                 'discount' => 0,
@@ -287,12 +292,13 @@ public function store(Request $request)
                 $costPerPiece = $effectiveUnitPrice;
                 $perSaleUnit = max(0.000001, $product->piecesPerSaleUnit());
                 $alignedCost = round($costPerPiece * $perSaleUnit, 2);
-                $salePrice = (float) $product->price;
+                $salePrice = $lineSalePrice > 0.00001 ? $lineSalePrice : (float) $product->price;
                 $profitAmount = $product->profit_amount;
                 if ($salePrice > 0.00001) {
                     $profitAmount = round($salePrice - $alignedCost, 2);
                 }
                 $product->update([
+                    'price' => $salePrice > 0.00001 ? $salePrice : $product->price,
                     'purchase_price' => $alignedCost,
                     'cost_price' => $alignedCost,
                     'profit_amount' => $profitAmount,
@@ -398,6 +404,45 @@ public function store(Request $request)
                 }
             }
         }
+
+        try {
+            if (Schema::hasTable('system_notifications')) {
+                SystemNotification::create([
+                    'type' => 'purchase',
+                    'pref_category' => 'purchase',
+                    'title' => 'تم تسجيل شراء جديد',
+                    'message' => 'تم تسجيل فاتورة شراء ' . ($purchase->invoice_number ?? $purchase->id),
+                    'details' => 'المورد: ' . ($purchase->supplier?->name ?? 'غير محدد') .
+                        "\nالإجمالي: " . number_format((float) $purchase->total_amount, 2) .
+                        "\nالمدفوع: " . number_format((float) $purchase->paid_amount, 2) .
+                        "\nالمتبقي: " . number_format((float) $purchase->remaining_amount, 2),
+                    'from_management' => true,
+                    'management_label' => 'إدارة النظام',
+                    'recipients_type' => 'admin_only',
+                    'created_by' => auth()->id() ?: null,
+                ]);
+            }
+        } catch (\Throwable $notificationError) {
+            Log::warning('Failed to create purchase notification', [
+                'purchase_id' => $purchase->id ?? null,
+                'error' => $notificationError->getMessage(),
+            ]);
+        }
+
+        ActivityLogger::log($request, [
+            'action_type' => 'purchase_create',
+            'entity_type' => 'purchase',
+            'entity_id' => $purchase->id,
+            'description' => "تسجيل فاتورة شراء {$purchase->invoice_number}",
+            'meta' => [
+                'total' => (float) $purchase->total_amount,
+                'paid' => (float) $purchase->paid_amount,
+                'remaining' => (float) $purchase->remaining_amount,
+                'supplier_id' => $purchase->supplier_id,
+                'items_count' => is_countable($request->items ?? null) ? count($request->items) : 0,
+                'total_quantity' => collect($request->items ?? [])->sum(fn ($it) => (float) ($it['quantity'] ?? 0)),
+            ],
+        ]);
 
         DB::commit();
 

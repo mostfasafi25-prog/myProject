@@ -11,6 +11,7 @@ use App\Models\TreasuryTransaction;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
+use App\Support\ActivityLogger;
 
 class ProductController extends Controller
 {
@@ -311,6 +312,22 @@ public function index(Request $request)
             if ($price === null || $price === '') {
                 $price = null;
             }
+
+            $pricingError = $this->validateNoLossPricing(
+                $request,
+                (float) ($costPrice ?? 0),
+                $price !== null ? (float) $price : null,
+                (int) ($request->input('divide_into', 0) ?: 0),
+                (int) ($request->input('pieces_count', 0) ?: 0),
+                $request->boolean('allow_split_sales')
+            );
+            if ($pricingError) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'لا يمكن حفظ الصنف بسعر بيع يسبب خسارة',
+                    'errors' => $pricingError,
+                ], 422);
+            }
             
             $productPayload = [
                 'name' => $request->name,
@@ -359,6 +376,18 @@ public function index(Request $request)
                 'profit_amount' => $product->profit_amount,
                 'price' => $product->price,
                 'cost_price' => $product->cost_price
+            ]);
+
+            ActivityLogger::log($request, [
+                'action_type' => 'product_create',
+                'entity_type' => 'product',
+                'entity_id' => $product->id,
+                'description' => "إضافة صنف جديد: {$product->name}",
+                'meta' => [
+                    'price' => (float) ($product->price ?? 0),
+                    'stock' => (float) ($product->stock ?? 0),
+                    'barcode' => $product->barcode,
+                ],
             ]);
             
             return response()->json([
@@ -664,6 +693,32 @@ public function getProductsByCategory($categoryId)
             if ($request->has('cost_price') && !$request->has('profit_amount') && $price && $costPrice) {
                 $profitAmount = $price - $costPrice;
             }
+
+            $divForPricing = $request->has('divide_into')
+                ? (int) $request->input('divide_into')
+                : (int) ($product->divide_into ?? $product->strips_per_box ?? 0);
+            $piecesForPricing = $request->has('pieces_count')
+                ? (int) $request->input('pieces_count')
+                : (int) ($product->pieces_count ?? 0);
+            $allowSplitPricing = $request->has('allow_split_sales')
+                ? $request->boolean('allow_split_sales')
+                : (bool) $product->allow_split_sales;
+
+            $pricingError = $this->validateNoLossPricing(
+                $request,
+                (float) ($costPrice ?? 0),
+                $price !== null ? (float) $price : null,
+                $divForPricing,
+                $piecesForPricing,
+                $allowSplitPricing
+            );
+            if ($pricingError) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'لا يمكن حفظ الصنف بسعر بيع يسبب خسارة',
+                    'errors' => $pricingError,
+                ], 422);
+            }
             
             // تحديث البيانات الأساسية
             $updatePayload = [
@@ -709,6 +764,17 @@ public function getProductsByCategory($categoryId)
             
             // ⭐⭐ إعادة تحميل العلاقات
             $product->load(['categories:id,name']);
+
+            ActivityLogger::log($request, [
+                'action_type' => 'product_update',
+                'entity_type' => 'product',
+                'entity_id' => $product->id,
+                'description' => "تحديث الصنف: {$product->name}",
+                'meta' => [
+                    'price' => (float) ($product->price ?? 0),
+                    'stock' => (float) ($product->stock ?? 0),
+                ],
+            ]);
             
             return response()->json([
                 'success' => true,
@@ -873,6 +939,68 @@ public function getProductsByCategory($categoryId)
             'sale_unit' => 'box',
             'unit' => 'box',
         ];
+    }
+
+    /**
+     * يمنع حفظ تسعير يسبب خسارة (سعر بيع أقل من التكلفة) للوحدة الكاملة أو الفروع.
+     *
+     * @return array<string, array<int, string>>|null
+     */
+    private function validateNoLossPricing(
+        Request $request,
+        float $costPrice,
+        ?float $salePrice,
+        int $divideInto,
+        int $piecesCount,
+        bool $allowSplitSales
+    ): ?array {
+        if ($costPrice <= 0) {
+            return null;
+        }
+
+        if ($salePrice !== null && $salePrice + 0.0001 < $costPrice) {
+            return ['price' => ['سعر بيع الوحدة الكاملة أقل من التكلفة']];
+        }
+
+        if (!$allowSplitSales) {
+            return null;
+        }
+
+        $div = max(1, $divideInto);
+        $pieceCount = max(0, $piecesCount);
+
+        $splitSalePrice = $request->has('split_sale_price') ? (float) $request->input('split_sale_price') : null;
+        if ($splitSalePrice !== null) {
+            $minSplitCost = $costPrice / $div;
+            if ($splitSalePrice + 0.0001 < $minSplitCost) {
+                return ['split_sale_price' => ['سعر بيع الجزء أقل من تكلفته']];
+            }
+        }
+
+        $options = $request->input('split_sale_options');
+        if (is_array($options)) {
+            foreach ($options as $option) {
+                if (!is_array($option)) {
+                    continue;
+                }
+                $optPrice = isset($option['price']) ? (float) $option['price'] : null;
+                if ($optPrice === null) {
+                    continue;
+                }
+                $saleType = strtolower((string) ($option['saleType'] ?? $option['sale_type'] ?? ''));
+                $minCost = $costPrice;
+                if ($saleType === 'strip') {
+                    $minCost = $costPrice / $div;
+                } elseif ($saleType === 'pill' && $pieceCount > 0) {
+                    $minCost = $costPrice / $pieceCount;
+                }
+                if ($optPrice + 0.0001 < $minCost) {
+                    return ['split_sale_options' => ['إحدى أسعار الفروع أقل من التكلفة وستسبب خسارة']];
+                }
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -1073,8 +1201,17 @@ public function destroy($id)
             }
         }
 
+        $deletedProductId = $product->id;
+        $deletedProductName = $product->name;
         $product->categories()->detach();
         $product->delete();
+
+        ActivityLogger::log(request(), [
+            'action_type' => 'product_delete',
+            'entity_type' => 'product',
+            'entity_id' => $deletedProductId,
+            'description' => "حذف الصنف: {$deletedProductName}",
+        ]);
 
         DB::commit();
 

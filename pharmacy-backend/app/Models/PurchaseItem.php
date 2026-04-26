@@ -18,7 +18,8 @@ class PurchaseItem extends Model
         'unit_price',
         'total_price',
         'discount',
-        'tax',
+        'tax',        'sale_price',        // ✅ أضف هذا
+
         'subtotal'
     ];
 
@@ -27,7 +28,8 @@ class PurchaseItem extends Model
         'returned_quantity' => 'decimal:2',
         'unit_price' => 'decimal:2',
         'total_price' => 'decimal:2',
-        'discount' => 'decimal:2',
+        'discount' => 'decimal:2',        'sale_price' => 'decimal:2',    // ✅ أضف هذا
+
         'tax' => 'decimal:2',
         'subtotal' => 'decimal:2'
     ];
