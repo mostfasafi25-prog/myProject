@@ -143,6 +143,13 @@ public function index(Request $request)
     {
         // ⭐ LOG 1: البيانات الواردة
         \Log::info('📦 STORE REQUEST:', ['data' => $request->all()]);
+
+        $incomingBarcode = trim((string) $request->input('barcode', ''));
+        if ($incomingBarcode === '') {
+            $request->merge(['barcode' => $this->generateUniqueBarcode()]);
+        } else {
+            $request->merge(['barcode' => $incomingBarcode]);
+        }
         
         // ⭐⭐ التحقق أولاً إذا كان الاسم موجود مسبقاً
         $existingProduct = Product::where('name', $request->name)->first();
@@ -560,6 +567,10 @@ public function getProductsByCategory($categoryId)
      */
     public function update(Request $request, $id)
     {
+        if ($request->has('barcode')) {
+            $request->merge(['barcode' => trim((string) $request->input('barcode', ''))]);
+        }
+
         $product = Product::find($id);
         
         if (!$product) {
@@ -1815,6 +1826,15 @@ public function resetAllProducts()
             'error' => env('APP_DEBUG') ? $e->getMessage() : null
         ], 500);
     }
+}
+
+private function generateUniqueBarcode(): string
+{
+    do {
+        $candidate = 'BC' . now()->format('ymdHis') . random_int(100, 999);
+    } while (Product::where('barcode', $candidate)->exists());
+
+    return $candidate;
 }
 
 }
