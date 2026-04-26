@@ -8,6 +8,10 @@ return new class extends Migration
 {
     public function up(): void
     {
+        if (Schema::hasTable('system_notifications')) {
+            return;
+        }
+
         Schema::create('system_notifications', function (Blueprint $table) {
             $table->id();
             $table->string('type')->nullable();
