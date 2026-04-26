@@ -251,6 +251,8 @@ private function generateDescriptionFromMeta($data)
             'user_delete' => ['title' => 'حذف مستخدم', 'icon' => 'person_remove', 'color' => 'error', 'kind_key' => 'user_delete', 'kind_ar' => 'حذف مستخدم'],
             'treasury_manual_deposit' => ['title' => 'إيداع يدوي خزنة', 'icon' => 'account_balance_wallet', 'color' => 'success', 'kind_key' => 'treasury_deposit', 'kind_ar' => 'إيداع خزنة'],
             'treasury_manual_withdraw' => ['title' => 'سحب يدوي خزنة', 'icon' => 'money_off', 'color' => 'warning', 'kind_key' => 'treasury_withdraw', 'kind_ar' => 'سحب خزنة'],
+            'stocktake_adjustment' => ['title' => 'تعديل مخزون عبر الجرد', 'icon' => 'fact_check', 'color' => 'warning', 'kind_key' => 'stocktake', 'kind_ar' => 'جرد مخزون'],
+            'stocktake_apply' => ['title' => 'تطبيق جرد المخزون', 'icon' => 'fact_check', 'color' => 'warning', 'kind_key' => 'stocktake', 'kind_ar' => 'جرد مخزون'],
         ];
 
         if (isset($map[$action])) {

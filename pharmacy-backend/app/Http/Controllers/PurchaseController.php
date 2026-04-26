@@ -29,7 +29,12 @@ class PurchaseController extends Controller
             $supplierId = $request->get('supplier_id');
             $status = $request->get('status');
             
-            $query = Purchase::with(['items', 'supplier']);
+            $query = Purchase::with(['items', 'supplier', 'latestReturn.creator:id,username'])
+                ->withSum([
+                    'treasuryTransactions as return_refund_total' => function ($q) {
+                        $q->where('type', 'income')->where('reference_type', 'purchase_return');
+                    }
+                ], 'amount');
             
             if ($search) {
                 $query->where('invoice_number', 'LIKE', "%{$search}%")
@@ -61,9 +66,30 @@ class PurchaseController extends Controller
                 ->orderBy('id', 'desc')
                 ->paginate($perPage);
             
+            $rows = collect($purchases->items())->map(function ($p) {
+                $latestReturn = $p->latestReturn;
+                if ($latestReturn) {
+                    $p->setAttribute('latest_return', [
+                        'id' => $latestReturn->id,
+                        'total_amount' => (float) ($latestReturn->total_amount ?? 0),
+                        'return_date' => $latestReturn->return_date,
+                        'reason' => $latestReturn->reason,
+                        'is_full_return' => (bool) ($latestReturn->is_full_return ?? false),
+                        'created_by' => [
+                            'id' => $latestReturn->creator?->id,
+                            'username' => $latestReturn->creator?->username,
+                            'name' => null,
+                        ],
+                        'refund_to_treasury' => (float) ($p->return_refund_total ?? 0),
+                        'was_paid_before_return' => ((float) ($p->return_refund_total ?? 0) > 0.00001),
+                    ]);
+                }
+                return $p;
+            })->values();
+
             return response()->json([
                 'success' => true,
-                'data' => $purchases->items(),
+                'data' => $rows,
                 'pagination' => [
                     'total' => $purchases->total(),
                     'per_page' => $purchases->perPage(),
@@ -1130,8 +1156,13 @@ private function getPurchasesByDay($period = 'month')
                 'supplier:id,name',
                 'category:id,name',
                 'items.product:id,name,unit,sku,barcode',
-                'createdBy:id,name'
-            ])->find($id);
+'createdBy:id,username',
+                'latestReturn.creator:id,username',
+            ])->withSum([
+                'treasuryTransactions as return_refund_total' => function ($q) {
+                    $q->where('type', 'income')->where('reference_type', 'purchase_return');
+                }
+            ], 'amount')->find($id);
             
             if (!$purchase) {
                 return response()->json([
@@ -1140,6 +1171,24 @@ private function getPurchasesByDay($period = 'month')
                 ], 404);
             }
             
+            if ($purchase->latestReturn) {
+                $lr = $purchase->latestReturn;
+                $purchase->setAttribute('latest_return', [
+                    'id' => $lr->id,
+                    'total_amount' => (float) ($lr->total_amount ?? 0),
+                    'return_date' => $lr->return_date,
+                    'reason' => $lr->reason,
+                    'is_full_return' => (bool) ($lr->is_full_return ?? false),
+                    'created_by' => [
+                        'id' => $lr->creator?->id,
+                        'username' => $lr->creator?->username,
+                        'name' => null,
+                    ],
+                    'refund_to_treasury' => (float) ($purchase->return_refund_total ?? 0),
+                    'was_paid_before_return' => ((float) ($purchase->return_refund_total ?? 0) > 0.00001),
+                ]);
+            }
+
             return response()->json([
                 'success' => true,
                 'data' => $purchase

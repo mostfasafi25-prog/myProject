@@ -8,6 +8,7 @@ use App\Models\Purchase;
 use App\Models\Category;
 use App\Models\Treasury;
 use App\Models\TreasuryTransaction;
+use App\Models\SystemNotification;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
@@ -732,6 +733,16 @@ public function getProductsByCategory($categoryId)
             }
             
             // تحديث البيانات الأساسية
+            $beforeSnapshot = [
+                'name' => (string) ($product->name ?? ''),
+                'barcode' => (string) ($product->barcode ?? ''),
+                'price' => (float) ($product->price ?? 0),
+                'cost_price' => (float) ($product->cost_price ?? 0),
+                'stock' => (float) ($product->stock ?? 0),
+                'category_id' => $product->category_id,
+                'is_active' => (bool) ($product->is_active ?? true),
+            ];
+
             $updatePayload = [
                 'name' => $request->name ?? $product->name,
                 'description' => $request->has('description') ? $request->description : $product->description,
@@ -776,6 +787,26 @@ public function getProductsByCategory($categoryId)
             // ⭐⭐ إعادة تحميل العلاقات
             $product->load(['categories:id,name']);
 
+            $afterSnapshot = [
+                'name' => (string) ($product->name ?? ''),
+                'barcode' => (string) ($product->barcode ?? ''),
+                'price' => (float) ($product->price ?? 0),
+                'cost_price' => (float) ($product->cost_price ?? 0),
+                'stock' => (float) ($product->stock ?? 0),
+                'category_id' => $product->category_id,
+                'is_active' => (bool) ($product->is_active ?? true),
+            ];
+            $changes = [];
+            foreach ($afterSnapshot as $field => $afterValue) {
+                $beforeValue = $beforeSnapshot[$field] ?? null;
+                if ((string) $beforeValue !== (string) $afterValue) {
+                    $changes[$field] = [
+                        'before' => $beforeValue,
+                        'after' => $afterValue,
+                    ];
+                }
+            }
+
             ActivityLogger::log($request, [
                 'action_type' => 'product_update',
                 'entity_type' => 'product',
@@ -784,6 +815,9 @@ public function getProductsByCategory($categoryId)
                 'meta' => [
                     'price' => (float) ($product->price ?? 0),
                     'stock' => (float) ($product->stock ?? 0),
+                    'before' => $beforeSnapshot,
+                    'after' => $afterSnapshot,
+                    'changes' => $changes,
                 ],
             ]);
             
@@ -818,7 +852,7 @@ public function getProductsByCategory($categoryId)
         $allowSplit = $request->has('allow_split_sales')
             ? $request->boolean('allow_split_sales')
             : (bool) ($existing?->allow_split_sales ?? false);
-
+    
         $rawFull = $request->input('full_unit_name');
         if ($rawFull !== null && $rawFull !== '') {
             $fullUnitName = (string) $rawFull;
@@ -828,51 +862,61 @@ public function getProductsByCategory($categoryId)
         if ($fullUnitName === '') {
             $fullUnitName = null;
         }
-
+    
         $divideInto = $request->has('divide_into')
             ? max(0, (int) $request->input('divide_into'))
             : (int) ($existing?->divide_into ?? 0);
+        
+        // ⭐⭐ إذا كان divide_into غير موجود، استخدم strips_per_box
         if ($divideInto < 1 && $existing) {
             $divideInto = (int) ($existing->strips_per_box ?? 0);
         }
-
+    
         $allowSmall = $request->has('allow_small_pieces')
             ? $request->boolean('allow_small_pieces')
             : (bool) ($existing?->allow_small_pieces ?? false);
-
-        $piecesCount = $request->has('pieces_count')
-            ? max(0, (int) $request->input('pieces_count'))
-            : (int) ($existing?->pieces_count ?? 0);
-
-        if ($piecesCount < 1 && $existing) {
-            $ps = (int) ($existing->pieces_per_strip ?? 0);
-            $sb = (int) ($existing->strips_per_box ?? 0);
-            if ($ps > 0 && $sb > 0) {
-                $piecesCount = $ps * $sb;
-            } elseif ($ps > 0) {
-                $piecesCount = $ps;
+    
+        // ⭐⭐⭐ التعديل الأهم: حساب pieces_count بشكل صحيح
+        $piecesCount = null;
+        
+        // إذا أرسل المستخدم pieces_count، استخدمه
+        if ($request->has('pieces_count')) {
+            $piecesCount = max(0, (int) $request->input('pieces_count'));
+        } 
+        // وإذا كان عندنا strips_per_box و pieces_per_strip من الـ request
+        elseif ($request->has('strips_per_box') && $request->has('pieces_per_strip')) {
+            $sb = (int) $request->input('strips_per_box');
+            $ps = (int) $request->input('pieces_per_strip');
+            if ($sb > 0 && $ps > 0) {
+                $piecesCount = $sb * $ps;
             }
         }
-
-        // واجهة قديمة: strip_unit_count فقط
-        if (
-            $existing === null
-            && $request->boolean('allow_split_sales')
-            && !$request->has('divide_into')
-            && $request->filled('strip_unit_count')
-            && !$request->has('pieces_count')
-        ) {
-            $divideInto = max(1, $divideInto);
-            $allowSmall = true;
-            $piecesCount = max($piecesCount, (int) $request->input('strip_unit_count'));
+        // وإذا كان عندنا منتج موجود، احسب منه
+        elseif ($existing) {
+            $sb = (int) ($existing->strips_per_box ?? 0);
+            $ps = (int) ($existing->pieces_per_strip ?? 0);
+            if ($sb > 0 && $ps > 0) {
+                $piecesCount = $sb * $ps;
+            } else {
+                $piecesCount = (int) ($existing->pieces_count ?? 0);
+            }
         }
-
+    
+        // ⭐⭐ التحقق من صحة الأرقام: piecesCount يجب أن يقبل القسمة على divideInto
+        if ($allowSplit && $allowSmall && $divideInto > 0 && $piecesCount > 0) {
+            if ($piecesCount % $divideInto !== 0) {
+                // إذا كان العدد لا يقبل القسمة، نحاول إيجاد أقرب رقم صحيح
+                $piecesCount = round($piecesCount / $divideInto) * $divideInto;
+                if ($piecesCount <= 0) $piecesCount = $divideInto;
+            }
+        }
+    
         if (!$allowSplit) {
             return [
                 'full_unit_name' => $fullUnitName,
                 'divide_into' => $divideInto > 0 ? $divideInto : null,
                 'allow_small_pieces' => false,
-                'pieces_count' => $piecesCount > 0 ? $piecesCount : null,
+                'pieces_count' => null,
                 'strip_unit_count' => null,
                 'split_item_name' => null,
                 'split_sale_options' => null,
@@ -883,30 +927,24 @@ public function getProductsByCategory($categoryId)
                 'unit' => $request->input('unit', $existing?->unit ?? 'box'),
             ];
         }
-
+    
         $allowSmall = $allowSmall && $allowSplit;
         $divideInto = max(1, $divideInto);
         $stripsPerBox = $divideInto;
-
+    
         $piecesPerStrip = 1;
         $stripUnitCount = null;
         $splitItemName = null;
         $pcsStored = null;
-
+    
         if ($allowSmall && $piecesCount > 0) {
+            // ⭐⭐ حساب pieces_per_strip = piecesCount / stripsPerBox
             $piecesPerStrip = max(1, (int) round($piecesCount / max(1, $stripsPerBox)));
             $stripUnitCount = $piecesPerStrip;
             $pcsStored = $piecesCount;
-            $splitItemName = 'حبة';
-        } elseif ($allowSmall && $piecesCount <= 0) {
-            // ⭐ إذا تم تفعيل القطع الصغيرة ولكن لم يتم إدخال عدد القطع
-            // نستخدم قيمة افتراضية (مثلاً 1) أو نتركها null
-            $pcsStored = null;
-            $piecesPerStrip = 1;
-            $stripUnitCount = 1;
-            $splitItemName = 'حبة';
+            $splitItemName = $request->input('split_item_name', 'حبة');
         }
-
+    
         $customSplitOptions = null;
         if ($request->has('split_sale_options') && is_array($request->input('split_sale_options'))) {
             $tmp = [];
@@ -930,12 +968,7 @@ public function getProductsByCategory($categoryId)
                 $customSplitOptions = array_values($tmp);
             }
         }
-
-        $splitOptions = ['box'];
-        if ($stripsPerBox > 1) $splitOptions[] = 'strip';
-        if ($allowSmall && $piecesCount > 0) $splitOptions[] = 'pill';
-        $splitOptions = array_values(array_unique($splitOptions));
-
+    
         return [
             'full_unit_name' => $fullUnitName,
             'divide_into' => $divideInto,
@@ -944,7 +977,7 @@ public function getProductsByCategory($categoryId)
             'strips_per_box' => $stripsPerBox,
             'pieces_per_strip' => $piecesPerStrip,
             'strip_unit_count' => $stripUnitCount,
-            'split_sale_options' => $customSplitOptions ?? $splitOptions,
+            'split_sale_options' => $customSplitOptions,
             'split_item_name' => $splitItemName,
             'purchase_unit' => 'box',
             'sale_unit' => 'box',
@@ -968,18 +1001,23 @@ public function getProductsByCategory($categoryId)
         if ($costPrice <= 0) {
             return null;
         }
-
+    
         if ($salePrice !== null && $salePrice + 0.0001 < $costPrice) {
             return ['price' => ['سعر بيع الوحدة الكاملة أقل من التكلفة']];
         }
-
+    
         if (!$allowSplitSales) {
             return null;
         }
-
+    
         $div = max(1, $divideInto);
         $pieceCount = max(0, $piecesCount);
-
+    
+        // ⭐⭐ التحقق من أن piecesCount يقبل القسمة على divideInto
+        if ($pieceCount > 0 && $div > 0 && $pieceCount % $div !== 0) {
+            return ['pieces_count' => ['عدد القطع (' . $pieceCount . ') يجب أن يقبل القسمة على عدد الأجزاء (' . $div . ')']];
+        }
+    
         $splitSalePrice = $request->has('split_sale_price') ? (float) $request->input('split_sale_price') : null;
         if ($splitSalePrice !== null) {
             $minSplitCost = $costPrice / $div;
@@ -987,7 +1025,16 @@ public function getProductsByCategory($categoryId)
                 return ['split_sale_price' => ['سعر بيع الجزء أقل من تكلفته']];
             }
         }
-
+    
+        // ⭐⭐ التحقق من سعر القطعة الصغيرة
+        $customChildPrice = $request->has('custom_child_price') ? (float) $request->input('custom_child_price') : null;
+        if ($customChildPrice !== null && $pieceCount > 0) {
+            $minChildCost = $costPrice / $pieceCount;
+            if ($customChildPrice + 0.0001 < $minChildCost) {
+                return ['custom_child_price' => ['سعر بيع القطعة الصغيرة أقل من تكلفتها (' . number_format($minChildCost, 2) . ' شيكل)']];
+            }
+        }
+    
         $options = $request->input('split_sale_options');
         if (is_array($options)) {
             foreach ($options as $option) {
@@ -1010,7 +1057,7 @@ public function getProductsByCategory($categoryId)
                 }
             }
         }
-
+    
         return null;
     }
 
@@ -1789,6 +1836,116 @@ public function enable($id)
             'success' => false,
             'message' => 'حدث خطأ أثناء تفعيل المنتج',
             'error' => env('APP_DEBUG') ? $e->getMessage() : null
+        ], 500);
+    }
+}
+
+/**
+ * تطبيق جرد المخزون دفعة واحدة مع تسجيل النشاط وإشعار الإدارة.
+ */
+public function applyStocktake(Request $request)
+{
+    $validated = $request->validate([
+        'session_id' => 'nullable|string|max:120',
+        'title' => 'nullable|string|max:255',
+        'lines' => 'required|array|min:1',
+        'lines.*.product_id' => 'required|integer|exists:products,id',
+        'lines.*.system_qty' => 'nullable|numeric',
+        'lines.*.counted_qty' => 'required|numeric|min:0',
+    ]);
+
+    DB::beginTransaction();
+    try {
+        $lines = is_array($validated['lines'] ?? null) ? $validated['lines'] : [];
+        $applied = [];
+        $totalChanged = 0;
+
+        foreach ($lines as $line) {
+            $productId = (int) ($line['product_id'] ?? 0);
+            $countedQty = round((float) ($line['counted_qty'] ?? 0), 3);
+            $product = Product::lockForUpdate()->find($productId);
+            if (!$product) {
+                continue;
+            }
+
+            $beforeQty = round((float) ($product->stock ?? 0), 3);
+            $deltaQty = round($countedQty - $beforeQty, 3);
+            if (abs($deltaQty) < 0.0001) {
+                continue;
+            }
+
+            $product->stock = $countedQty;
+            $product->save();
+            $totalChanged++;
+
+            $row = [
+                'product_id' => $product->id,
+                'product_name' => $product->name,
+                'before_qty' => $beforeQty,
+                'after_qty' => $countedQty,
+                'difference' => $deltaQty,
+                'barcode' => $product->barcode,
+            ];
+            $applied[] = $row;
+
+        }
+
+        if ($totalChanged > 0) {
+            ActivityLogger::log($request, [
+                'action_type' => 'stocktake_apply',
+                'entity_type' => 'stocktake',
+                'entity_id' => null,
+                'description' => "تطبيق جرد مخزون على {$totalChanged} صنف",
+                'meta' => [
+                    'stocktake_session_id' => $validated['session_id'] ?? null,
+                    'stocktake_title' => $validated['title'] ?? 'جرد مخزون',
+                    'items_count' => $totalChanged,
+                    'items' => $applied,
+                ],
+            ]);
+        }
+
+        if ($totalChanged > 0 && \Schema::hasTable('system_notifications')) {
+            $detailsLines = array_map(function ($x) {
+                $sign = (float) $x['difference'] >= 0 ? '+' : '';
+                return "{$x['product_name']} | {$x['before_qty']} → {$x['after_qty']} | فرق {$sign}{$x['difference']}";
+            }, array_slice($applied, 0, 30));
+
+            SystemNotification::create([
+                'type' => 'stocktake',
+                'pref_category' => 'stocktake',
+                'title' => 'تم تنفيذ جرد مخزون',
+                'message' => "تم تطبيق الجرد على {$totalChanged} صنف",
+                'details' => implode("\n", $detailsLines),
+                'from_management' => true,
+                'management_label' => 'نظام الجرد',
+                'recipients_type' => 'admin_only',
+                'meta' => [
+                    'stocktake_session_id' => $validated['session_id'] ?? null,
+                    'stocktake_title' => $validated['title'] ?? 'جرد مخزون',
+                    'changed_count' => $totalChanged,
+                    'items' => $applied,
+                ],
+                'created_by' => $request->user()?->username ?? null,
+            ]);
+        }
+
+        DB::commit();
+
+        return response()->json([
+            'success' => true,
+            'message' => "تم تطبيق الجرد على {$totalChanged} صنف",
+            'data' => [
+                'changed_count' => $totalChanged,
+                'items' => $applied,
+            ],
+        ]);
+    } catch (\Exception $e) {
+        DB::rollBack();
+        return response()->json([
+            'success' => false,
+            'message' => 'تعذر تطبيق الجرد',
+            'error' => config('app.debug') ? $e->getMessage() : null,
         ], 500);
     }
 }

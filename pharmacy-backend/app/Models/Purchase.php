@@ -90,6 +90,22 @@ class Purchase extends Model
     }
 
     /**
+     * جميع حركات الإرجاع المرتبطة بالفاتورة.
+     */
+    public function purchaseReturns()
+    {
+        return $this->hasMany(PurchaseReturn::class);
+    }
+
+    /**
+     * آخر حركة إرجاع على الفاتورة.
+     */
+    public function latestReturn()
+    {
+        return $this->hasOne(PurchaseReturn::class)->latestOfMany('id');
+    }
+
+    /**
      * نطاق المشتريات المعلقة
      */
     public function scopePending($query)

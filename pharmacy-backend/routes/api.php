@@ -87,6 +87,7 @@ Route::middleware($apiAuthMiddleware)->group(function () {
     Route::delete('/users/{id}', [UserController::class, 'destroy']);
 
     Route::apiResource('products', ProductController::class);
+    Route::post('/products/stocktake/apply', [ProductController::class, 'applyStocktake']);
     Route::get('/products/stats', [ProductController::class, 'stats']);
     Route::post('/products/reset-all', [ProductController::class, 'resetAllProducts']);
     /** أقسام المبيعات/المشتريات للكاشير والواجهات — بيانات حقيقية من الجدول */
