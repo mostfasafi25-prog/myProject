@@ -42,6 +42,7 @@ class Product extends Model
         'has_addons',
         'is_active',
         'split_sale_price',  // 👈 أضف هذا السطر
+        'custom_child_price',
         'full_unit_name',
         'divide_into',
         'allow_small_pieces',
@@ -65,6 +66,7 @@ class Product extends Model
         'pieces_per_strip' => 'decimal:3',
         'strips_per_box' => 'decimal:3',
         'split_sale_price' => 'decimal:2',  // 👈 أضف هذا السطر
+        'custom_child_price' => 'decimal:2',
         'divide_into' => 'integer',
         'allow_small_pieces' => 'boolean',
         'pieces_count' => 'integer',
@@ -162,23 +164,49 @@ class Product extends Model
      * عدد القطع (الحبات) في وحدة البيع الافتراضية — يطابق منطق OrderController::convertSaleQuantityToPieces.
      * cost_price و purchase_price يُفترض أنهما بنفس وحدة البيع (علبة / شريط / حبة).
      */
-    public function piecesPerSaleUnit(): float
-    {
-        $unit = strtolower((string) ($this->sale_unit ?: $this->unit ?: 'piece'));
-        $piecesPerStrip = (float) ($this->pieces_per_strip ?: $this->strip_unit_count ?: 1);
-        $piecesPerStrip = $piecesPerStrip > 0 ? $piecesPerStrip : 1.0;
-        $stripsPerBox = (float) ($this->strips_per_box ?: 1);
-        $stripsPerBox = $stripsPerBox > 0 ? $stripsPerBox : 1.0;
-
-        if ($unit === 'box') {
-            return $stripsPerBox * $piecesPerStrip;
+   /**
+ * عدد القطع (الحبات) في وحدة البيع الافتراضية
+ * للمنتجات التي تسمح بالتجزئة، نستخدم pieces_count إذا كان متوفراً
+ */
+public function piecesPerSaleUnit(): float
+{
+    // ✅✅✅ التعديل: للمنتجات التي تسمح بالتجزئة
+    if ($this->allow_split_sales) {
+        // إذا كان هناك pieces_count محدد، استخدمه مباشرة
+        if ($this->pieces_count && $this->pieces_count > 0) {
+            return (float) $this->pieces_count;
         }
-        if ($unit === 'strip' || $unit === 'pack') {
-            return $piecesPerStrip;
+        
+        // إذا كان هناك divide_into، فهذا يعني أن الوحدة الكاملة تتجزأ إلى أجزاء
+        if ($this->divide_into && $this->divide_into > 0) {
+            // نحتاج إلى معرفة عدد القطع في الوحدة الكاملة
+            // إذا كان هناك pieces_per_strip و strips_per_box
+            $piecesPerStrip = (float) ($this->pieces_per_strip ?: 1);
+            $stripsPerBox = (float) ($this->strips_per_box ?: 1);
+            if ($piecesPerStrip > 0 && $stripsPerBox > 0) {
+                return $piecesPerStrip * $stripsPerBox;
+            }
+            // افتراضياً: عدد الأجزاء × 1
+            return (float) $this->divide_into;
         }
-
-        return 1.0;
     }
+    
+    // للمنتجات العادية (غير مجزأة)
+    $unit = strtolower((string) ($this->sale_unit ?: $this->unit ?: 'piece'));
+    $piecesPerStrip = (float) ($this->pieces_per_strip ?: $this->strip_unit_count ?: 1);
+    $piecesPerStrip = $piecesPerStrip > 0 ? $piecesPerStrip : 1.0;
+    $stripsPerBox = (float) ($this->strips_per_box ?: 1);
+    $stripsPerBox = $stripsPerBox > 0 ? $stripsPerBox : 1.0;
+
+    if ($unit === 'box') {
+        return $stripsPerBox * $piecesPerStrip;
+    }
+    if ($unit === 'strip' || $unit === 'pack') {
+        return $piecesPerStrip;
+    }
+
+    return 1.0;
+}
 
     /**
      * قيمة المخزون عندما يكون stock بالحبات و cost_price بوحدة البيع (علبة مثلاً).
@@ -239,30 +267,59 @@ class Product extends Model
     /**
      * تكلفة وحدة البيع للسطر (سعر الشراء المحفوظ يخص وحدة المنتج sale_unit، مثلاً العلبة).
      */
-    public function unitCostForSaleType(?string $lineSaleType): float
-    {
-        $cost = (float) ($this->cost_price ?? $this->purchase_price ?? 0);
-        if ($cost <= 0) {
-            return 0.0;
-        }
+   /**
+ * تكلفة وحدة البيع للسطر
+ */
+public function unitCostForSaleType(?string $lineSaleType): float
+{
+    $cost = (float) ($this->cost_price ?? $this->purchase_price ?? 0);
+    if ($cost <= 0) {
+        return 0.0;
+    }
 
-        $refUnit = strtolower((string) ($this->sale_unit ?: $this->unit ?: 'piece'));
-        if ($refUnit === 'piece') {
-            $refUnit = 'pill';
-        }
-        $lineUnit = strtolower((string) ($lineSaleType ?: $refUnit));
-        if ($lineUnit === 'piece') {
-            $lineUnit = 'pill';
-        }
-
-        $piecesRef = $this->saleQuantityToInventoryPieces(1.0, $refUnit);
-        $piecesLine = $this->saleQuantityToInventoryPieces(1.0, $lineUnit);
-        if ($piecesRef <= 0.0000001) {
+    // ✅✅✅ للمنتجات المجزأة، سعر التكلفة للوحدة الكاملة
+    if ($this->allow_split_sales) {
+        $totalPieces = $this->piecesPerSaleUnit();
+        if ($totalPieces <= 0) {
             return round($cost, 4);
         }
-
-        return round($cost * ($piecesLine / $piecesRef), 4);
+        
+        $lineUnit = strtolower((string) ($lineSaleType ?: 'box'));
+        
+        // حساب عدد القطع في وحدة البيع المطلوبة
+        $piecesInLineUnit = 1;
+        if ($lineUnit === 'box') {
+            $piecesInLineUnit = $totalPieces;
+        } elseif ($lineUnit === 'strip') {
+            $piecesPerStrip = (float) ($this->pieces_per_strip ?: 1);
+            $piecesInLineUnit = $piecesPerStrip > 0 ? $piecesPerStrip : 1;
+        } elseif ($lineUnit === 'pill') {
+            $piecesInLineUnit = 1;
+        }
+        
+        // تكلفة الوحدة = (التكلفة الكلية / عدد القطع الكلي) × عدد القطع في الوحدة
+        $costPerPiece = $cost / $totalPieces;
+        return round($costPerPiece * $piecesInLineUnit, 4);
     }
+
+    // للمنتجات العادية (نفس الكود القديم)
+    $refUnit = strtolower((string) ($this->sale_unit ?: $this->unit ?: 'piece'));
+    if ($refUnit === 'piece') {
+        $refUnit = 'pill';
+    }
+    $lineUnit = strtolower((string) ($lineSaleType ?: $refUnit));
+    if ($lineUnit === 'piece') {
+        $lineUnit = 'pill';
+    }
+
+    $piecesRef = $this->saleQuantityToInventoryPieces(1.0, $refUnit);
+    $piecesLine = $this->saleQuantityToInventoryPieces(1.0, $lineUnit);
+    if ($piecesRef <= 0.0000001) {
+        return round($cost, 4);
+    }
+
+    return round($cost * ($piecesLine / $piecesRef), 4);
+}
 
     /**
      * زيادة المخزون

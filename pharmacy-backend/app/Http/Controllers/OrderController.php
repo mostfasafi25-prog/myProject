@@ -6,6 +6,7 @@ use App\Models\Order;
 use App\Models\OrderItem;
 use App\Models\MealOrderItem;
 use App\Models\Product;
+use App\Models\PurchaseItem;
 use App\Models\Customer;
 use App\Models\SavedMeal;
 use App\Models\Meal;
@@ -65,6 +66,24 @@ class OrderController extends Controller
                 'errors' => $validator->errors()
             ], 422);
         }
+
+        $paymentValidation = $this->validateAndNormalizeSalePaymentBreakdown(
+            strtolower((string) ($request->payment_method ?? 'cash')),
+            (float) ($request->paid_amount ?? 0),
+            $request->input('cash_amount'),
+            $request->input('app_amount')
+        );
+        if (!$paymentValidation['ok']) {
+            return response()->json([
+                'success' => false,
+                'message' => $paymentValidation['message'],
+            ], 422);
+        }
+        $request->merge([
+            'paid_amount' => $paymentValidation['paid_amount'],
+            'cash_amount' => $paymentValidation['cash_amount'],
+            'app_amount' => $paymentValidation['app_amount'],
+        ]);
 
         try {
             DB::beginTransaction();
@@ -129,9 +148,14 @@ class OrderController extends Controller
                     ], 422);
                 }
 
-                // تكلفة وحدة البيع تتوافق مع نوع السطر (شريط/حبة وليس دائماً سعر العلبة)
-                $unitCost = $product->unitCostForSaleType($saleType);
-                if ($unitCost <= 0 && isset($item['unit_cost']) && is_numeric($item['unit_cost'])) {
+                // تكلفة السطر من طبقات الشراء (FIFO) حتى لا تختلط الكميات القديمة مع الأسعار الجديدة.
+                $fifoCost = $this->consumePurchaseLayersForSale($product, $stockDeductQty);
+                $lineTotalCost = (float) ($fifoCost['total_cost'] ?? 0);
+                $unitCost = $requestedQty > 0 ? ($lineTotalCost / $requestedQty) : 0.0;
+                if ($unitCost <= 0.00001) {
+                    $unitCost = $product->unitCostForSaleType($saleType);
+                }
+                if ($unitCost <= 0.00001 && isset($item['unit_cost']) && is_numeric($item['unit_cost'])) {
                     $unitCost = (float) $item['unit_cost'];
                 }
 
@@ -147,6 +171,7 @@ class OrderController extends Controller
                     'unit_price' => $item['price'],
                     'line_name' => !empty($item['name']) ? $item['name'] : $product->name,
                     'unit_cost' => $unitCost,
+                    'line_total_cost' => $lineTotalCost,
                     'item_profit' => $itemProfit,
                     'unit_profit' => $unitProfit
                 ];
@@ -3384,6 +3409,107 @@ if (Schema::hasTable('treasury_transactions')) {
     private function convertSaleQuantityToPieces(Product $product, float $quantity, ?string $saleUnit): float
     {
         return $product->saleQuantityToInventoryPieces($quantity, $saleUnit);
+    }
+
+    private function validateAndNormalizeSalePaymentBreakdown(string $paymentMethod, float $paidAmount, $cashAmountInput, $appAmountInput): array
+    {
+        $method = strtolower($paymentMethod);
+        $paid = max(0.0, round((float) $paidAmount, 2));
+        $cash = max(0.0, round((float) ($cashAmountInput ?? 0), 2));
+        $app = max(0.0, round((float) ($appAmountInput ?? 0), 2));
+
+        if ($method === 'credit') {
+            if ($paid > 0.0001 || $cash > 0.0001 || $app > 0.0001) {
+                return ['ok' => false, 'message' => 'البيع الآجل يجب أن يكون بدون مبلغ مدفوع لحظة الفاتورة'];
+            }
+            return ['ok' => true, 'paid_amount' => 0.0, 'cash_amount' => 0.0, 'app_amount' => 0.0];
+        }
+
+        if ($method === 'cash') {
+            $cash = $paid;
+            $app = 0.0;
+            if ($paid > 0.0001 && $cash <= 0.0001) {
+                return ['ok' => false, 'message' => 'طريقة الدفع كاش تتطلب مبلغ كاش أكبر من صفر'];
+            }
+        } elseif ($method === 'app') {
+            $app = $paid;
+            $cash = 0.0;
+            if ($paid > 0.0001 && $app <= 0.0001) {
+                return ['ok' => false, 'message' => 'طريقة الدفع تطبيق تتطلب مبلغ تطبيق أكبر من صفر'];
+            }
+        } elseif ($method === 'mixed') {
+            if ($cash <= 0.0001 || $app <= 0.0001) {
+                return ['ok' => false, 'message' => 'طريقة الدفع المختلط تتطلب مبلغ كاش ومبلغ تطبيق'];
+            }
+            if (abs(($cash + $app) - $paid) > 0.01) {
+                return ['ok' => false, 'message' => 'مجموع الكاش والتطبيق يجب أن يساوي المبلغ المدفوع'];
+            }
+        } else {
+            $cash = $paid;
+            $app = 0.0;
+        }
+
+        return [
+            'ok' => true,
+            'paid_amount' => $paid,
+            'cash_amount' => $cash,
+            'app_amount' => $app,
+        ];
+    }
+
+    /**
+     * سحب تكلفة البيع من طبقات الشراء (FIFO) بناءً على الكمية بالحبات.
+     * هذا يضمن أن الكميات القديمة بسعر قديم لا تختلط مع المشتريات الجديدة.
+     *
+     * @return array{total_cost: float, consumed_qty: float}
+     */
+    private function consumePurchaseLayersForSale(Product $product, float $quantityInPieces): array
+    {
+        $required = max(0.0, (float) $quantityInPieces);
+        if ($required <= 0.00001 || !Schema::hasColumn('purchase_items', 'remaining_quantity')) {
+            return ['total_cost' => 0.0, 'consumed_qty' => 0.0];
+        }
+
+        $layers = PurchaseItem::query()
+            ->where('product_id', $product->id)
+            ->where('remaining_quantity', '>', 0)
+            ->orderBy('id', 'asc')
+            ->lockForUpdate()
+            ->get();
+
+        $remaining = $required;
+        $totalCost = 0.0;
+        $consumed = 0.0;
+
+        foreach ($layers as $layer) {
+            if ($remaining <= 0.00001) {
+                break;
+            }
+            $available = max(0.0, (float) $layer->remaining_quantity);
+            if ($available <= 0.00001) {
+                continue;
+            }
+            $take = min($available, $remaining);
+            $costPerPiece = max(0.0, (float) $layer->unit_price);
+            $totalCost += $take * $costPerPiece;
+            $consumed += $take;
+            $remaining -= $take;
+
+            $layer->remaining_quantity = max(0.0, $available - $take);
+            $layer->save();
+        }
+
+        // في حال كانت البيانات التاريخية بلا طبقات كافية، نكمل بالتكلفة الافتراضية حتى لا يتعطل البيع.
+        if ($remaining > 0.00001) {
+            $fallbackPerPiece = max(0.0, (float) $product->costPricePerInventoryPiece());
+            $totalCost += $remaining * $fallbackPerPiece;
+            $consumed += $remaining;
+        }
+
+        return [
+            'total_cost' => round($totalCost, 6),
+            'consumed_qty' => round($consumed, 6),
+        ];
     }
 
     private function appendReasonKeepMeta(?string $existingNotes, string $reason): string

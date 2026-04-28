@@ -15,6 +15,7 @@ class PurchaseItem extends Model
         'product_name',
         'quantity',
         'returned_quantity',
+        'remaining_quantity',
         'unit_price',
         'total_price',
         'discount',
@@ -24,11 +25,13 @@ class PurchaseItem extends Model
     ];
 
     protected $casts = [
-        'quantity' => 'decimal:2',
-        'returned_quantity' => 'decimal:2',
-        'unit_price' => 'decimal:2',
-        'total_price' => 'decimal:2',
-        'discount' => 'decimal:2',        'sale_price' => 'decimal:2',    // ✅ أضف هذا
+        'quantity' => 'decimal:4',
+        'returned_quantity' => 'decimal:4',
+        'remaining_quantity' => 'decimal:4',
+        'unit_price' => 'decimal:4',
+        'total_price' => 'decimal:4',
+        'discount' => 'decimal:2',
+        'sale_price' => 'decimal:2',    // ✅ أضف هذا
 
         'tax' => 'decimal:2',
         'subtotal' => 'decimal:2'

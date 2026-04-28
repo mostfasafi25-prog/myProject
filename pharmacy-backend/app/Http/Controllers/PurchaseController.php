@@ -247,6 +247,21 @@ public function store(Request $request)
             ], 422);
         }
 
+        $paymentValidation = $this->validateAndNormalizePaymentBreakdown(
+            strtolower((string) $request->payment_method),
+            (float) $request->paid_amount,
+            $request->input('cash_amount'),
+            $request->input('app_amount')
+        );
+        if (!$paymentValidation['ok']) {
+            return response()->json([
+                'success' => false,
+                'message' => $paymentValidation['message'],
+            ], 422);
+        }
+        $normalizedCashAmount = (float) $paymentValidation['cash_amount'];
+        $normalizedAppAmount = (float) $paymentValidation['app_amount'];
+
         DB::beginTransaction();
 
         // حساب المبالغ
@@ -277,8 +292,8 @@ public function store(Request $request)
             'purchase_date' => $request->purchase_date,
             'notes' => $request->notes ?? '',
             'payment_method' => $request->payment_method,
-            'cash_amount' => $request->cash_amount ?? 0,
-            'app_amount' => $request->app_amount ?? 0,
+            'cash_amount' => $normalizedCashAmount,
+            'app_amount' => $normalizedAppAmount,
             'user_id' => auth()->id() ?? 1,
             'created_by' => auth()->id() ?? 1,
             'category_id' => $request->category_id ?? 1,
@@ -295,30 +310,43 @@ public function store(Request $request)
             $effectiveQty = max(0.0, $qtyInPieces);
             $effectiveUnitPrice = $effectiveQty > 0 ? ($totalPrice > 0 ? $totalPrice / $effectiveQty : $unitPrice) : $unitPrice;
             $lineSalePrice = isset($item['sale_price']) ? (float) $item['sale_price'] : (float) ($item['unit_price'] ?? 0);
+            $saleUnit = $product?->sale_unit ?? $product?->unit ?? 'piece';
+            $alignedSalePrice = $this->convertLineUnitPrice(
+                $product,
+                $lineSalePrice,
+                $purchaseUnit,
+                $saleUnit
+            );
 
-            PurchaseItem::create([
+            $purchaseItemPayload = [
                 'purchase_id' => $purchase->id,
                 'product_id' => $item['product_id'],
                 'product_name' => $item['product_name'],
                 'quantity' => $effectiveQty,
                 'unit_price' => $effectiveUnitPrice,
-                'sale_price' => $lineSalePrice,
+                'sale_price' => $alignedSalePrice > 0.00001 ? $alignedSalePrice : $lineSalePrice,
                 'total_price' => $effectiveQty * $effectiveUnitPrice,
                 'subtotal' => $effectiveQty * $effectiveUnitPrice,
                 'discount' => 0,
                 'tax' => 0,
-            ]);
+            ];
+            if (Schema::hasColumn('purchase_items', 'remaining_quantity')) {
+                $purchaseItemPayload['remaining_quantity'] = $effectiveQty;
+            }
+            PurchaseItem::create($purchaseItemPayload);
 
             // زيادة المخزون وتحديث سعر التكلفة/الشراء لآخر شراء
-            // effectiveUnitPrice = تكلفة الحبة (لأن الكمية تُحوَّل إلى قطع). يُخزَّن cost_price/purchase_price
-            // بنفس وحدة البيع (sale_unit) مثل price حتى الربح ونقطة البيع والتقارير تتفق مع «سعر العلبة».
+            // effectiveUnitPrice = تكلفة القطعة بالمخزون (Inventory Piece).
+            // يتم محاذاة التكلفة وسعر البيع مع sale_unit لنفس المنتج حتى تكون حسابات الربح دقيقة.
             if ($product) {
                 $product->increment('stock', $effectiveQty);
                 $product->refresh();
                 $costPerPiece = $effectiveUnitPrice;
                 $perSaleUnit = max(0.000001, $product->piecesPerSaleUnit());
                 $alignedCost = round($costPerPiece * $perSaleUnit, 2);
-                $salePrice = $lineSalePrice > 0.00001 ? $lineSalePrice : (float) $product->price;
+                $salePrice = $alignedSalePrice > 0.00001
+                    ? $alignedSalePrice
+                    : ($lineSalePrice > 0.00001 ? $lineSalePrice : (float) $product->price);
                 $profitAmount = $product->profit_amount;
                 if ($salePrice > 0.00001) {
                     $profitAmount = round($salePrice - $alignedCost, 2);
@@ -329,6 +357,65 @@ public function store(Request $request)
                     'cost_price' => $alignedCost,
                     'profit_amount' => $profitAmount,
                 ]);
+                // بعد تحديث المنتج، أضف هذا الكود لحساب أسعار التجزئة تلقائياً
+if ($product->allow_split_sales && $product->price > 0) {
+    $divideInto = max(1, (int) ($product->divide_into ?? $product->strips_per_box ?? 1));
+    $piecesCount = (int) ($product->pieces_count ?? 0);
+    $allowSmall = (bool) ($product->allow_small_pieces ?? false);
+    $fullUnitName = $product->full_unit_name ?? 'وحدة كاملة';
+    $splitItemName = $product->split_item_name ?? 'حبة';
+    
+    // حساب سعر الجزء
+    $partPrice = round($product->price / $divideInto, 2);
+    
+    // بناء خيارات التجزئة
+    $options = [];
+    
+    // الوحدة الكاملة
+    $options[] = [
+        'id' => 'full',
+        'label' => $fullUnitName,
+        'price' => round($product->price, 2),
+        'saleType' => 'box'
+    ];
+    
+    // اسم الجزء (نصف، ثلث، ربع، إلخ)
+    $partNames = [
+        2 => 'نصف',
+        3 => 'ثلث',
+        4 => 'ربع',
+        5 => 'خمس',
+        6 => 'سدس',
+    ];
+    $partLabel = $partNames[$divideInto] ?? ('1/' . $divideInto);
+    
+    $options[] = [
+        'id' => 'level1',
+        'label' => $partLabel,
+        'price' => $partPrice,
+        'saleType' => 'strip'
+    ];
+    
+    // إذا كان هناك قطع صغيرة
+    if ($allowSmall && $piecesCount > 0 && $piecesCount % $divideInto === 0) {
+        $partsPerSplit = max(1, (int) round($piecesCount / $divideInto));
+        $childPrice = round($partPrice / $partsPerSplit, 2);
+        $options[] = [
+            'id' => 'level2',
+            'label' => $splitItemName,
+            'price' => $childPrice,
+            'saleType' => 'pill'
+        ];
+        
+        // حفظ سعر القطعة الصغيرة
+        $product->custom_child_price = $childPrice;
+    }
+    
+    // حفظ كل شيء
+    $product->split_sale_options = $options;
+    $product->split_sale_price = $partPrice;
+    $product->save();
+}
             }
         }
 
@@ -382,8 +469,8 @@ public function store(Request $request)
                 if ($pm === 'app') {
                     $tApp = round($treasuryDeduction, 2);
                 } elseif ($pm === 'mixed') {
-                    $c = (float) ($request->cash_amount ?? 0);
-                    $a = (float) ($request->app_amount ?? 0);
+                    $c = $normalizedCashAmount;
+                    $a = $normalizedAppAmount;
                     if ($paidTotal > 0.00001 && $c + $a > 0.00001 && abs($c + $a - $paidTotal) < 0.06) {
                         $tCash = round($treasuryDeduction * ($c / $paidTotal), 2);
                         $tApp = round($treasuryDeduction - $tCash, 2);
@@ -392,6 +479,31 @@ public function store(Request $request)
                     }
                 } else {
                     $tCash = round($treasuryDeduction, 2);
+                }
+
+                $availableCash = (float) ($treasury->balance_cash ?? 0);
+                $availableApp = (float) ($treasury->balance_app ?? 0);
+                if ($tCash > $availableCash + 0.0001) {
+                    DB::rollBack();
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'رصيد الكاش غير كافٍ لإتمام عملية الشراء',
+                        'data' => [
+                            'required_cash' => round($tCash, 2),
+                            'available_cash' => round($availableCash, 2),
+                        ],
+                    ], 422);
+                }
+                if ($tApp > $availableApp + 0.0001) {
+                    DB::rollBack();
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'رصيد التطبيق غير كافٍ لإتمام عملية الشراء',
+                        'data' => [
+                            'required_app' => round($tApp, 2),
+                            'available_app' => round($availableApp, 2),
+                        ],
+                    ], 422);
                 }
 
                 $treasury->applyLiquidityDelta(-$tCash, -$tApp);
@@ -1259,6 +1371,13 @@ private function getPurchasesByDay($period = 'month')
     
                 // Update purchase item returned quantity
                 $purchaseItem->returned_quantity = ($purchaseItem->returned_quantity ?? 0) + $item['quantity'];
+                if (Schema::hasColumn('purchase_items', 'remaining_quantity')) {
+                    $purchaseItem->remaining_quantity = max(
+                        0,
+                        (float) ($purchaseItem->remaining_quantity ?? ($purchaseItem->quantity - ($purchaseItem->returned_quantity ?? 0)))
+                        - (float) $item['quantity']
+                    );
+                }
                 $purchaseItem->save();
     
                 // ✅ التعديل هنا: إزالة max(0, ...) للسماح بالمخزون السالب
@@ -1481,6 +1600,9 @@ private function getPurchasesByDay($period = 'month')
 
                 // Mark all quantity as returned
                 $item->returned_quantity = $item->quantity;
+                if (Schema::hasColumn('purchase_items', 'remaining_quantity')) {
+                    $item->remaining_quantity = 0;
+                }
                 $item->save();
             }
 
@@ -1662,18 +1784,63 @@ private function getPurchasesByDay($period = 'month')
         if (!$product) {
             return $qty;
         }
-        $normalizedUnit = strtolower((string) ($unit ?: $product->purchase_unit ?: $product->sale_unit ?: $product->unit ?: 'piece'));
-        $piecesPerStrip = (float) ($product->pieces_per_strip ?: $product->strip_unit_count ?: 1);
-        $piecesPerStrip = $piecesPerStrip > 0 ? $piecesPerStrip : 1.0;
-        $stripsPerBox = (float) ($product->strips_per_box ?: 1);
-        $stripsPerBox = $stripsPerBox > 0 ? $stripsPerBox : 1.0;
 
-        if ($normalizedUnit === 'box') {
-            return $qty * $stripsPerBox * $piecesPerStrip;
+        $normalizedUnit = strtolower((string) ($unit ?: $product->purchase_unit ?: $product->sale_unit ?: $product->unit ?: 'piece'));
+        return $product->saleQuantityToInventoryPieces($qty, $normalizedUnit);
+    }
+
+    /**
+     * تحويل سعر وحدة السطر من وحدة الإدخال إلى وحدة البيع المرجعية للصنف.
+     */
+    private function convertLineUnitPrice(?Product $product, float $price, ?string $fromUnit, ?string $toUnit): float
+    {
+        $raw = (float) $price;
+        if (!$product || $raw <= 0.00001) {
+            return round($raw, 2);
         }
-        if ($normalizedUnit === 'strip' || $normalizedUnit === 'pack') {
-            return $qty * $piecesPerStrip;
+        $from = strtolower((string) ($fromUnit ?: $product->purchase_unit ?: $product->sale_unit ?: $product->unit ?: 'piece'));
+        $to = strtolower((string) ($toUnit ?: $product->sale_unit ?: $product->unit ?: $from));
+        $fromPieces = max(0.000001, $product->saleQuantityToInventoryPieces(1.0, $from));
+        $toPieces = max(0.000001, $product->saleQuantityToInventoryPieces(1.0, $to));
+        $pricePerPiece = $raw / $fromPieces;
+        return round($pricePerPiece * $toPieces, 2);
+    }
+
+    private function validateAndNormalizePaymentBreakdown(string $paymentMethod, float $paidAmount, $cashAmountInput, $appAmountInput): array
+    {
+        $paid = max(0.0, round((float) $paidAmount, 2));
+        $cash = max(0.0, round((float) ($cashAmountInput ?? 0), 2));
+        $app = max(0.0, round((float) ($appAmountInput ?? 0), 2));
+
+        if ($paymentMethod === 'cash') {
+            $cash = $paid;
+            $app = 0.0;
+            if ($paid > 0.0001 && $cash <= 0.0001) {
+                return ['ok' => false, 'message' => 'طريقة الدفع كاش تتطلب مبلغ كاش أكبر من صفر'];
+            }
+        } elseif ($paymentMethod === 'app') {
+            $app = $paid;
+            $cash = 0.0;
+            if ($paid > 0.0001 && $app <= 0.0001) {
+                return ['ok' => false, 'message' => 'طريقة الدفع تطبيق تتطلب مبلغ تطبيق أكبر من صفر'];
+            }
+        } elseif ($paymentMethod === 'mixed') {
+            if ($cash <= 0.0001 || $app <= 0.0001) {
+                return ['ok' => false, 'message' => 'طريقة الدفع المختلط تتطلب إدخال مبلغ كاش ومبلغ تطبيق'];
+            }
+            if (abs(($cash + $app) - $paid) > 0.01) {
+                return ['ok' => false, 'message' => 'مجموع الكاش والتطبيق يجب أن يساوي المبلغ المدفوع'];
+            }
+        } else {
+            $cash = $paid;
+            $app = 0.0;
         }
-        return $qty;
+
+        return [
+            'ok' => true,
+            'cash_amount' => $cash,
+            'app_amount' => $app,
+            'message' => null,
+        ];
     }
 }

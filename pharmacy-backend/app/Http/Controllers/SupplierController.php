@@ -526,11 +526,26 @@ class SupplierController extends Controller
 
             $amount = $validated['amount'];
             $paymentMethod = $validated['payment_method'];
-            $cashAmount = $validated['cash_amount'] ?? 0;
-            $appAmount = $validated['app_amount'] ?? 0;
+            $cashAmount = (float) ($validated['cash_amount'] ?? 0);
+            $appAmount = (float) ($validated['app_amount'] ?? 0);
+
+            // Normalize by payment method
+            if ($paymentMethod === 'cash') {
+                $cashAmount = (float) $amount;
+                $appAmount = 0.0;
+            } elseif ($paymentMethod === 'app') {
+                $appAmount = (float) $amount;
+                $cashAmount = 0.0;
+            }
 
             // Validate mixed payment amounts
             if ($paymentMethod === 'mixed') {
+                if ($cashAmount <= 0.0001 || $appAmount <= 0.0001) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'في الدفع المختلط يجب إدخال كاش وتطبيق معاً'
+                    ], 422);
+                }
                 if (abs($cashAmount + $appAmount - $amount) > 0.01) {
                     return response()->json([
                         'success' => false,
@@ -612,6 +627,31 @@ class SupplierController extends Controller
                     return response()->json([
                         'success' => false,
                         'message' => 'مجموع خصم الكاش والتطبيق لا يطابق المبلغ',
+                    ], 422);
+                }
+
+                $availableCash = (float) ($treasury->balance_cash ?? 0);
+                $availableApp = (float) ($treasury->balance_app ?? 0);
+                if ($deductCash > $availableCash + 0.0001) {
+                    DB::rollBack();
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'لا يوجد رصيد كاش كافٍ (فش معك مصاري كاش)',
+                        'data' => [
+                            'required_cash' => round($deductCash, 2),
+                            'available_cash' => round($availableCash, 2),
+                        ],
+                    ], 422);
+                }
+                if ($deductApp > $availableApp + 0.0001) {
+                    DB::rollBack();
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'لا يوجد رصيد تطبيق كافٍ (فش معك مصاري تطبيق)',
+                        'data' => [
+                            'required_app' => round($deductApp, 2),
+                            'available_app' => round($availableApp, 2),
+                        ],
                     ], 422);
                 }
                 foreach (
