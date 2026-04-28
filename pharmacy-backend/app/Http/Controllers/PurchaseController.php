@@ -33,11 +33,22 @@ class PurchaseController extends Controller
                 ->withSum([
                     'treasuryTransactions as return_refund_total' => function ($q) {
                         $q->where('type', 'income')->where('reference_type', 'purchase_return');
-                    }
+                    },
+                    'treasuryTransactions as other_expenses_total' => function ($q) {
+                        $q->where('type', 'expense')->where('category', 'other_expense');
+                    },
                 ], 'amount');
             
             if ($search) {
                 $query->where('invoice_number', 'LIKE', "%{$search}%")
+                  ->orWhereHas('supplier', function ($q) use ($search) {
+                      $q->where('name', 'LIKE', "%{$search}%");
+                  })
+                  ->orWhereHas('treasuryTransactions', function ($q) use ($search) {
+                      $q->where('type', 'expense')
+                        ->where('category', 'other_expense')
+                        ->where('description', 'LIKE', "%{$search}%");
+                  })
                       ->orWhereHas('items', function ($q) use ($search) {
                           $q->where('product_name', 'LIKE', "%{$search}%");
                       });
@@ -61,12 +72,34 @@ class PurchaseController extends Controller
             if ($status && in_array($status, ['pending', 'partially_paid', 'completed', 'returned'])) {
                 $query->where('status', $status);
             }
+            $purchaseKind = strtolower((string) $request->get('purchase_kind', ''));
+            if ($purchaseKind === 'expenses_only') {
+                $query->whereDoesntHave('items')
+                    ->whereHas('treasuryTransactions', function ($q) {
+                        $q->where('type', 'expense')->where('category', 'other_expense');
+                    });
+            } elseif ($purchaseKind === 'with_items') {
+                $query->whereHas('items');
+            } elseif ($purchaseKind === 'mixed') {
+                $query->whereHas('items')
+                    ->whereHas('treasuryTransactions', function ($q) {
+                        $q->where('type', 'expense')->where('category', 'other_expense');
+                    });
+            }
             
             $purchases = $query->orderBy('purchase_date', 'desc')
                 ->orderBy('id', 'desc')
                 ->paginate($perPage);
+            $purchaseIds = collect($purchases->items())->pluck('id')->filter()->values();
+            $extraExpensesByPurchase = TreasuryTransaction::query()
+                ->whereIn('purchase_id', $purchaseIds)
+                ->where('type', 'expense')
+                ->where('category', 'other_expense')
+                ->orderBy('id')
+                ->get(['purchase_id', 'description', 'amount', 'payment_method', 'transaction_date'])
+                ->groupBy('purchase_id');
             
-            $rows = collect($purchases->items())->map(function ($p) {
+            $rows = collect($purchases->items())->map(function ($p) use ($extraExpensesByPurchase) {
                 $latestReturn = $p->latestReturn;
                 if ($latestReturn) {
                     $p->setAttribute('latest_return', [
@@ -84,6 +117,28 @@ class PurchaseController extends Controller
                         'was_paid_before_return' => ((float) ($p->return_refund_total ?? 0) > 0.00001),
                     ]);
                 }
+                $extraRows = collect($extraExpensesByPurchase->get($p->id, []))->map(function ($tx) {
+                    $desc = (string) ($tx->description ?? '');
+                    $title = $desc;
+                    if (str_contains($desc, ':')) {
+                        $parts = explode(':', $desc, 2);
+                        $title = trim((string) ($parts[1] ?? $desc));
+                    }
+                    return [
+                        'title' => $title ?: 'مصروف إضافي',
+                        'amount' => (float) ($tx->amount ?? 0),
+                        'payment_method' => $tx->payment_method ?: 'cash',
+                        'date' => $tx->transaction_date,
+                    ];
+                })->values();
+                $hasItems = (int) ($p->items?->count() ?? 0) > 0;
+                $hasExtra = $extraRows->isNotEmpty();
+                $purchaseKind = $hasItems && $hasExtra
+                    ? 'mixed'
+                    : ($hasItems ? 'with_items' : ($hasExtra ? 'expenses_only' : 'with_items'));
+                $p->setAttribute('other_expenses', $extraRows->all());
+                $p->setAttribute('other_expenses_total', (float) ($p->other_expenses_total ?? 0));
+                $p->setAttribute('purchase_kind', $purchaseKind);
                 return $p;
             })->values();
 
@@ -152,6 +207,11 @@ class PurchaseController extends Controller
             $days = $startDate->diffInDays($endDate) + 1;
 
             $purchasesData = $purchases->map(function ($purchase) {
+                $otherExpensesTotal = (float) TreasuryTransaction::query()
+                    ->where('purchase_id', $purchase->id)
+                    ->where('type', 'expense')
+                    ->where('category', 'other_expense')
+                    ->sum('amount');
                 $items = $purchase->items->map(function ($item) {
                     return [
                         'category_id' => null,
@@ -170,6 +230,7 @@ class PurchaseController extends Controller
                     'description' => 'فاتورة شراء ' . $purchase->invoice_number,
                     'amount' => (float) $purchase->total_amount,
                     'payment_method' => $purchase->payment_method ?? 'cash',
+                    'other_expenses_total' => $otherExpensesTotal,
                     'items_count' => $purchase->items->count(),
                     'items' => $items,
                 ];
@@ -221,7 +282,7 @@ public function store(Request $request)
         // ✅ تحديث validation ليدعم mixed payment
         $request->validate([
             'invoice_number' => 'required|string|unique:purchases',
-            'items' => 'required|array|min:1',
+            'items' => 'nullable|array',
             'items.*.product_id' => 'required|integer|exists:products,id',
             'items.*.product_name' => 'required|string',
             'items.*.quantity' => ['required', 'numeric', 'regex:/^\d+(\.\d+)?$/', 'min:0.1'],
@@ -238,6 +299,10 @@ public function store(Request $request)
             'cash_amount' => ['nullable', 'numeric', 'regex:/^\d+(\.\d+)?$/', 'min:0'],
             'app_amount' => ['nullable', 'numeric', 'regex:/^\d+(\.\d+)?$/', 'min:0'],
             'treasury_note' => 'nullable|string',
+            'other_expenses' => 'nullable|array',
+            'other_expenses.*.title' => 'required_with:other_expenses|string|max:255',
+            'other_expenses.*.payment_method' => 'required_with:other_expenses|in:cash,app',
+            'other_expenses.*.amount' => ['required_with:other_expenses', 'numeric', 'regex:/^\d+(\.\d+)?$/', 'min:0.01'],
         ]);
 
         if ((float) $request->paid_amount > (float) $request->total_amount + 0.0001) {
@@ -261,6 +326,24 @@ public function store(Request $request)
         }
         $normalizedCashAmount = (float) $paymentValidation['cash_amount'];
         $normalizedAppAmount = (float) $paymentValidation['app_amount'];
+        $otherExpenses = collect($request->input('other_expenses', []))
+            ->map(function ($row) {
+                return [
+                    'title' => trim((string) ($row['title'] ?? '')),
+                    'payment_method' => strtolower((string) ($row['payment_method'] ?? 'cash')) === 'app' ? 'app' : 'cash',
+                    'amount' => round((float) ($row['amount'] ?? 0), 2),
+                ];
+            })
+            ->filter(fn ($row) => $row['title'] !== '' && $row['amount'] > 0.00001)
+            ->values();
+        $otherExpensesTotal = round((float) $otherExpenses->sum('amount'), 2);
+        $itemsInput = collect($request->input('items', []))->values();
+        if ($itemsInput->isEmpty() && $otherExpenses->isEmpty()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'يجب إضافة صنف واحد على الأقل أو مصروف إضافي واحد على الأقل',
+            ], 422);
+        }
 
         DB::beginTransaction();
 
@@ -300,7 +383,7 @@ public function store(Request $request)
         ]);
 
         // 2. إضافة العناصر (نفس الكود)
-        foreach ($request->items as $item) {
+        foreach ($itemsInput as $item) {
             $qty = (float) ($item['quantity'] ?? 0);
             $unitPrice = (float) ($item['unit_price'] ?? 0);
             $totalPrice = (float) ($item['total_price'] ?? 0);
@@ -460,7 +543,7 @@ if ($product->allow_split_sales && $product->price > 0) {
             $purchase->save();
         }
 
-        if ($treasuryDeduction > 0.00001) {
+        if ($treasuryDeduction > 0.00001 || $otherExpensesTotal > 0.00001) {
             $treasury = Treasury::first();
             if ($treasury) {
                 $pm = strtolower((string) $request->payment_method);
@@ -481,33 +564,38 @@ if ($product->allow_split_sales && $product->price > 0) {
                     $tCash = round($treasuryDeduction, 2);
                 }
 
+                $extraCash = round((float) $otherExpenses->where('payment_method', 'cash')->sum('amount'), 2);
+                $extraApp = round((float) $otherExpenses->where('payment_method', 'app')->sum('amount'), 2);
+                $requiredCash = round($tCash + $extraCash, 2);
+                $requiredApp = round($tApp + $extraApp, 2);
+
                 $availableCash = (float) ($treasury->balance_cash ?? 0);
                 $availableApp = (float) ($treasury->balance_app ?? 0);
-                if ($tCash > $availableCash + 0.0001) {
+                if ($requiredCash > $availableCash + 0.0001) {
                     DB::rollBack();
                     return response()->json([
                         'success' => false,
-                        'message' => 'رصيد الكاش غير كافٍ لإتمام عملية الشراء',
+                        'message' => 'رصيد الكاش غير كافٍ لإتمام عملية الشراء مع المصاريف الأخرى',
                         'data' => [
-                            'required_cash' => round($tCash, 2),
+                            'required_cash' => round($requiredCash, 2),
                             'available_cash' => round($availableCash, 2),
                         ],
                     ], 422);
                 }
-                if ($tApp > $availableApp + 0.0001) {
+                if ($requiredApp > $availableApp + 0.0001) {
                     DB::rollBack();
                     return response()->json([
                         'success' => false,
-                        'message' => 'رصيد التطبيق غير كافٍ لإتمام عملية الشراء',
+                        'message' => 'رصيد التطبيق غير كافٍ لإتمام عملية الشراء مع المصاريف الأخرى',
                         'data' => [
-                            'required_app' => round($tApp, 2),
+                            'required_app' => round($requiredApp, 2),
                             'available_app' => round($availableApp, 2),
                         ],
                     ], 422);
                 }
 
-                $treasury->applyLiquidityDelta(-$tCash, -$tApp);
-                $treasury->total_expenses += round($tCash + $tApp, 2);
+                $treasury->applyLiquidityDelta(-$requiredCash, -$requiredApp);
+                $treasury->total_expenses += round($requiredCash + $requiredApp, 2);
                 $treasury->save();
 
                 $baseNote = $request->treasury_note ?? "دفع فاتورة شراء #{$request->invoice_number}";
@@ -539,6 +627,21 @@ if ($product->allow_split_sales && $product->price > 0) {
                             'payment_method' => $part['method'],
                         ]);
                     }
+                }
+                foreach ($otherExpenses as $expense) {
+                    TreasuryTransaction::create([
+                        'treasury_id' => $treasury->id,
+                        'type' => 'expense',
+                        'amount' => (float) $expense['amount'],
+                        'description' => "مصروف شراء إضافي #{$request->invoice_number}: {$expense['title']}",
+                        'category' => 'other_expense',
+                        'purchase_id' => $purchase->id,
+                        'reference_type' => 'purchase',
+                        'reference_id' => $purchase->id,
+                        'created_by' => auth()->id() ?? 1,
+                        'transaction_date' => now()->toDateString(),
+                        'payment_method' => $expense['payment_method'],
+                    ]);
                 }
             }
         }
@@ -577,8 +680,10 @@ if ($product->allow_split_sales && $product->price > 0) {
                 'paid' => (float) $purchase->paid_amount,
                 'remaining' => (float) $purchase->remaining_amount,
                 'supplier_id' => $purchase->supplier_id,
-                'items_count' => is_countable($request->items ?? null) ? count($request->items) : 0,
-                'total_quantity' => collect($request->items ?? [])->sum(fn ($it) => (float) ($it['quantity'] ?? 0)),
+                'items_count' => $itemsInput->count(),
+                'total_quantity' => $itemsInput->sum(fn ($it) => (float) ($it['quantity'] ?? 0)),
+                'other_expenses_total' => $otherExpensesTotal,
+                'other_expenses' => $otherExpenses->values()->all(),
             ],
         ]);
 
@@ -594,6 +699,7 @@ if ($product->allow_split_sales && $product->price > 0) {
                 'debt_reduced' => $debtReduced,
                 'supplier_balance_delta' => $supplierBalanceDelta,
                 'from_main_treasury' => max(0.0, $treasuryDeduction),
+                'other_expenses_total' => $otherExpensesTotal,
             ],
         ], 201);
 
@@ -1273,7 +1379,10 @@ private function getPurchasesByDay($period = 'month')
             ])->withSum([
                 'treasuryTransactions as return_refund_total' => function ($q) {
                     $q->where('type', 'income')->where('reference_type', 'purchase_return');
-                }
+                },
+                'treasuryTransactions as other_expenses_total' => function ($q) {
+                    $q->where('type', 'expense')->where('category', 'other_expense');
+                },
             ], 'amount')->find($id);
             
             if (!$purchase) {
@@ -1300,6 +1409,29 @@ private function getPurchasesByDay($period = 'month')
                     'was_paid_before_return' => ((float) ($purchase->return_refund_total ?? 0) > 0.00001),
                 ]);
             }
+            $extraExpenses = TreasuryTransaction::query()
+                ->where('purchase_id', $purchase->id)
+                ->where('type', 'expense')
+                ->where('category', 'other_expense')
+                ->orderBy('id')
+                ->get(['description', 'amount', 'payment_method', 'transaction_date'])
+                ->map(function ($tx) {
+                    $desc = (string) ($tx->description ?? '');
+                    $title = $desc;
+                    if (str_contains($desc, ':')) {
+                        $parts = explode(':', $desc, 2);
+                        $title = trim((string) ($parts[1] ?? $desc));
+                    }
+                    return [
+                        'title' => $title ?: 'مصروف إضافي',
+                        'amount' => (float) ($tx->amount ?? 0),
+                        'payment_method' => $tx->payment_method ?: 'cash',
+                        'date' => $tx->transaction_date,
+                    ];
+                })
+                ->values();
+            $purchase->setAttribute('other_expenses_total', (float) ($purchase->other_expenses_total ?? 0));
+            $purchase->setAttribute('other_expenses', $extraExpenses);
 
             return response()->json([
                 'success' => true,

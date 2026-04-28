@@ -467,6 +467,16 @@ private function getProductSaleTypeNames($product): array
         }
         
         // ⭐⭐ بناء $productPayload هنا
+        $packagingFields = $this->packagingFieldsForPersistence($request, null);
+        $stockInput = (float) ($request->input('stock', 0) ?? 0);
+        $stockNormalized = $this->normalizeStockToInventoryPieces($stockInput, [
+            'unit' => $request->input('unit', $request->input('sale_unit', 'box')),
+            'sale_unit' => $request->input('sale_unit', $request->input('unit', 'box')),
+            'purchase_unit' => $request->input('purchase_unit', 'box'),
+            'allow_split_sales' => $request->boolean('allow_split_sales', false),
+            ...$packagingFields,
+        ]);
+
         $productPayload = [
             'name' => $request->name,
             'code' => $code,
@@ -477,7 +487,7 @@ private function getProductSaleTypeNames($product): array
             'cost_price' => $costPrice,
             'profit_amount' => $request->profit_amount ?? ($price && $costPrice ? $price - $costPrice : null),
             'category_id' => $request->category_id,
-            'stock' => $request->stock ?? 0,
+            'stock' => $stockNormalized,
             'min_stock' => $request->min_stock ?? 0,
             'max_stock' => $request->max_stock,
             'reorder_point' => $request->reorder_point ?? 0,
@@ -504,7 +514,7 @@ private function getProductSaleTypeNames($product): array
         }
 
         // ⭐ دمج حقول التعبئة
-        foreach ($this->packagingFieldsForPersistence($request, null) as $key => $value) {
+        foreach ($packagingFields as $key => $value) {
             if (\Schema::hasColumn('products', $key)) {
                 $productPayload[$key] = $value;
             }
@@ -897,6 +907,7 @@ public function getProductsByCategory($categoryId)
                 'is_active' => (bool) ($product->is_active ?? true),
             ];
 
+            $packagingFields = $this->packagingFieldsForPersistence($request, $product);
             $updatePayload = [
                 'name' => $request->name ?? $product->name,
                 'description' => $request->has('description') ? $request->description : $product->description,
@@ -908,7 +919,17 @@ public function getProductsByCategory($categoryId)
                 'profit_amount' => $profitAmount, // ⭐ تحديث رقم الربح
                 'category_id' => $request->has('category_id') ? $request->category_id : $product->category_id,
                 'supplier_id' => $request->has('supplier_id') ? $request->supplier_id : $product->supplier_id,
-                'stock' => $request->stock ?? $product->stock,
+                'stock' => $request->has('stock')
+                    ? $this->normalizeStockToInventoryPieces((float) ($request->input('stock') ?? 0), [
+                        'unit' => $request->input('unit', $request->input('sale_unit', $product->unit)),
+                        'sale_unit' => $request->input('sale_unit', $request->input('unit', $product->sale_unit)),
+                        'purchase_unit' => $request->input('purchase_unit', $product->purchase_unit),
+                        'allow_split_sales' => $request->has('allow_split_sales')
+                            ? $request->boolean('allow_split_sales')
+                            : (bool) $product->allow_split_sales,
+                        ...$packagingFields,
+                    ])
+                    : $product->stock,
                 'min_stock' => $request->has('min_stock') ? $request->min_stock : $product->min_stock,
                 'max_stock' => $request->has('max_stock') ? $request->max_stock : $product->max_stock,
                 'reorder_point' => $request->has('reorder_point') ? $request->reorder_point : $product->reorder_point,
@@ -928,7 +949,7 @@ public function getProductsByCategory($categoryId)
                 $updatePayload['custom_child_price'] = $request->input('custom_child_price');
             }
 
-            foreach ($this->packagingFieldsForPersistence($request, $product) as $key => $value) {
+            foreach ($packagingFields as $key => $value) {
                 if (\Schema::hasColumn('products', $key)) {
                     $updatePayload[$key] = $value;
                 }
@@ -1157,6 +1178,26 @@ private function packagingFieldsForPersistence(Request $request, ?Product $exist
     ];
 }
 
+/**
+ * يحوّل كمية المخزون المُدخلة (بوحدة البيع) إلى وحدة التخزين الداخلية (pieces).
+ */
+private function normalizeStockToInventoryPieces(float $stockInput, array $shape): float
+{
+    $qty = max(0.0, (float) $stockInput);
+    if ($qty <= 0.0) {
+        return 0.0;
+    }
+
+    $productShape = new Product();
+    foreach ($shape as $key => $value) {
+        $productShape->{$key} = $value;
+    }
+
+    $saleUnit = (string) ($shape['sale_unit'] ?? $shape['unit'] ?? 'box');
+    $normalized = $productShape->saleQuantityToInventoryPieces($qty, $saleUnit);
+    return max(0.0, round((float) $normalized, 3));
+}
+
     /**
      * يمنع حفظ تسعير يسبب خسارة (سعر بيع أقل من التكلفة) للوحدة الكاملة أو الفروع.
      *
@@ -1273,6 +1314,9 @@ private function packagingFieldsForPersistence(Request $request, ?Product $exist
             $request->merge(['profit_amount' => round($salePrice - $costPrice, 2)]);
         }
     }
+
+
+    
     /**
  * استعادة منتج محذوف
  */

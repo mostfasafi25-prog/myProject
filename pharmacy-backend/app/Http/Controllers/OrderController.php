@@ -6,6 +6,7 @@ use App\Models\Order;
 use App\Models\OrderItem;
 use App\Models\MealOrderItem;
 use App\Models\Product;
+use App\Models\Purchase;
 use App\Models\PurchaseItem;
 use App\Models\Customer;
 use App\Models\SavedMeal;
@@ -24,6 +25,7 @@ use App\Models\MealIngredient;
 use App\Models\MealProductIngredient;
 use App\Models\CustomerCreditMovement;
 use App\Models\SystemNotification;
+use App\Models\StaffActivity;
 use App\Support\ActivityLogger;
 
 class OrderController extends Controller
@@ -2827,6 +2829,53 @@ public function getCreditCustomerMovements($customerId)
                 ]);
             }
         }
+
+        // ===== 2.5. جلب تسديدات ديون الموردين (من staff_activities) =====
+        if (Schema::hasTable('staff_activities')) {
+            $supplierPaymentsQuery = StaffActivity::query()
+                ->where('action_type', 'supplier_debt_payment')
+                ->whereBetween('created_at', [$today, $tomorrow])
+                ->orderBy('created_at', 'desc');
+            if ($mineOnly && $authUser) {
+                $supplierPaymentsQuery->where(function ($q) use ($authUser) {
+                    $q->where('user_id', $authUser->id)
+                      ->orWhere('username', $authUser->username);
+                });
+            }
+            $supplierPayments = $supplierPaymentsQuery->get();
+
+            foreach ($supplierPayments as $payment) {
+                $meta = is_array($payment->meta) ? $payment->meta : (json_decode((string) $payment->meta, true) ?: []);
+                $paidAmount = abs((float) ($meta['amount'] ?? $meta['amount_paid'] ?? 0));
+                $supplierName = (string) ($meta['supplier_name'] ?? 'مورد');
+                $paymentMethod = (string) ($meta['payment_method'] ?? 'cash');
+
+                if ($paidAmount <= 0) {
+                    continue;
+                }
+
+                $transactions->push([
+                    'id' => 'supplier_payment_' . $payment->id,
+                    'transaction_id' => $payment->id,
+                    'type' => 'debt_payment',
+                    'type_label' => 'تسديد دين مورد',
+                    'reference_number' => 'SUP-PAY-' . $payment->id,
+                    'customer_id' => $meta['supplier_id'] ?? null,
+                    'customer_name' => $supplierName,
+                    'payment_method' => $paymentMethod,
+                    'total_amount' => $paidAmount,
+                    'paid_amount' => $paidAmount,
+                    'due_amount' => 0,
+                    'cashier_name' => $payment->username ?? '—',
+                    'status' => 'completed',
+                    'items_count' => 0,
+                    'occurred_at' => optional($payment->created_at)->toISOString(),
+                    'icon' => 'payments',
+                    'color' => 'success',
+                    'note' => $payment->description ?: 'تسديد دين مورد',
+                ]);
+            }
+        }
         
         // 3. الفواتير النقدية ذات الدفع الجزئي
         $partialOrders = Order::where('customer_id', $customerId)
@@ -3141,32 +3190,41 @@ public function getTodayTransactions(Request $request)
                 'color' => 'primary'
             ]);
         }
-        if (Schema::hasTable('category_purchases')) {
-    $purchases = DB::table('category_purchases')
-        ->whereBetween('created_at', [$today, $tomorrow])
-        ->orderBy('created_at', 'desc')
-        ->get();
-    
-    foreach ($purchases as $purchase) {
-        $transactions->push([
-            'id' => 'purchase_' . $purchase->id,
-            'type' => 'purchase',
-            'type_label' => 'شراء مخزون',
-            'reference_number' => $purchase->purchase_number ?? 'PUR-' . $purchase->id,
-            'customer_name' => $purchase->supplier_name ?? 'مورد',
-            'payment_method' => $purchase->payment_method ?? 'cash',
-            'total_amount' => -(float) $purchase->total_amount, // سالب لأنه صرف من الخزنة
-            'paid_amount' => (float) $purchase->paid_amount,
-            'due_amount' => (float) $purchase->due_amount,
-            'cashier_name' => $purchase->created_by_name ?? auth()->user()?->username,
-            'status' => 'completed',
-            'items_count' => 1,
-            'occurred_at' => $purchase->created_at->toISOString(),
-            'icon' => 'shopping_cart',
-            'color' => 'warning'
-        ]);
-    }
-}
+        // ===== 1.5. جلب مشتريات الموردين (من purchases) =====
+        if (Schema::hasTable('purchases')) {
+            $purchasesQuery = Purchase::whereBetween('created_at', [$today, $tomorrow])
+                ->with(['supplier', 'createdBy', 'items'])
+                ->orderBy('created_at', 'desc');
+            if ($mineOnly && $authUser && Schema::hasColumn('purchases', 'created_by')) {
+                $purchasesQuery->where('created_by', $authUser->id);
+            }
+            $purchases = $purchasesQuery->get();
+
+            foreach ($purchases as $purchase) {
+                $totalAmount = (float) ($purchase->total_amount ?? 0);
+                $paidAmount = (float) ($purchase->paid_amount ?? 0);
+                $remainingAmount = (float) ($purchase->remaining_amount ?? max(0, $totalAmount - $paidAmount));
+                $transactions->push([
+                    'id' => 'purchase_' . $purchase->id,
+                    'transaction_id' => $purchase->id,
+                    'type' => 'purchase',
+                    'type_label' => 'فاتورة شراء',
+                    'reference_number' => $purchase->invoice_number ?? ('PO-' . $purchase->id),
+                    'customer_id' => $purchase->supplier_id,
+                    'customer_name' => $purchase->supplier?->name ?? 'مورد',
+                    'payment_method' => $purchase->payment_method ?? 'cash',
+                    'total_amount' => -abs($totalAmount), // سالب لأنه صرف/التزام شراء
+                    'paid_amount' => $paidAmount,
+                    'due_amount' => max(0, $remainingAmount),
+                    'cashier_name' => $purchase->createdBy?->username ?? '—',
+                    'status' => $purchase->status ?? 'completed',
+                    'items_count' => $purchase->items->count(),
+                    'occurred_at' => optional($purchase->created_at)->toISOString(),
+                    'icon' => 'local_shipping',
+                    'color' => 'warning'
+                ]);
+            }
+        }
 
 // ===== 4. جلب حركات الخزنة النقدية (Treasury transactions) =====
 if (Schema::hasTable('treasury_transactions')) {

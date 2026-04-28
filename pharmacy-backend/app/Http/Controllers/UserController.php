@@ -198,6 +198,13 @@ class UserController extends Controller
             }
 
             $updateData = $request->only(['username', 'role', 'avatar_url', 'approval_status', 'is_active']);
+            $beforeState = [
+                'username' => $user->username,
+                'role' => $user->role,
+                'avatar_url' => $user->avatar_url,
+                'approval_status' => $user->approval_status,
+                'is_active' => (bool) ($user->is_active ?? true),
+            ];
             
             // إذا كان هناك كلمة مرور جديدة
             if ($request->has('password') && $request->filled('password')) {
@@ -210,12 +217,46 @@ class UserController extends Controller
                 $user->tokens()->delete();
             }
 
+            $afterState = [
+                'username' => $user->username,
+                'role' => $user->role,
+                'avatar_url' => $user->avatar_url,
+                'approval_status' => $user->approval_status,
+                'is_active' => (bool) ($user->is_active ?? true),
+            ];
+            $changes = [];
+            foreach ($beforeState as $field => $beforeValue) {
+                if (!array_key_exists($field, $updateData)) {
+                    continue;
+                }
+                $afterValue = $afterState[$field] ?? null;
+                if ($beforeValue !== $afterValue) {
+                    $changes[$field] = [
+                        'before' => $beforeValue,
+                        'after' => $afterValue,
+                    ];
+                }
+            }
+            if (array_key_exists('password', $updateData)) {
+                $changes['password'] = [
+                    'before' => '********',
+                    'after' => 'تم التحديث',
+                ];
+            }
+
             ActivityLogger::log($request, [
                 'action_type' => 'user_update',
                 'entity_type' => 'user',
                 'entity_id' => $user->id,
                 'description' => "تحديث بيانات المستخدم @{$user->username}",
-                'meta' => ['updated_fields' => array_keys($updateData)],
+                'meta' => [
+                    'updated_fields' => array_keys($updateData),
+                    'changes' => $changes,
+                    'target_user' => [
+                        'id' => $user->id,
+                        'username' => $user->username,
+                    ],
+                ],
             ]);
             
             return response()->json([

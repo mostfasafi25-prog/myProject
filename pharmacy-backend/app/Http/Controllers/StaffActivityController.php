@@ -7,6 +7,7 @@ use App\Models\Order;
 use App\Models\Purchase;
 use App\Models\Supplier;
 use App\Models\User;
+use App\Models\TreasuryTransaction;
 use App\Models\Product;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Schema;
@@ -139,6 +140,8 @@ private function generateDescriptionFromMeta($data)
             'filters' => [
                 'action_types' => StaffActivity::query()->select('action_type')->distinct()->orderBy('action_type')->pluck('action_type')->values(),
                 'entity_types' => StaffActivity::query()->select('entity_type')->whereNotNull('entity_type')->distinct()->orderBy('entity_type')->pluck('entity_type')->values(),
+                'action_type_labels' => $this->buildActionTypeLabels(),
+                'entity_type_labels' => $this->buildEntityTypeLabels(),
             ],
             'pagination' => [
                 'total' => $rows->total(),
@@ -238,21 +241,36 @@ private function generateDescriptionFromMeta($data)
         $action = (string) ($activity->action_type ?? '');
         $map = [
             'sale_create' => ['title' => 'عملية بيع', 'icon' => 'shopping_cart', 'color' => 'success', 'kind_key' => 'sale', 'kind_ar' => 'بيع'],
+            'cashier_sale' => ['title' => 'عملية بيع', 'icon' => 'shopping_cart', 'color' => 'success', 'kind_key' => 'sale', 'kind_ar' => 'بيع'],
             'purchase_create' => ['title' => 'عملية شراء', 'icon' => 'local_shipping', 'color' => 'info', 'kind_key' => 'purchase', 'kind_ar' => 'شراء'],
+            'purchase_created' => ['title' => 'عملية شراء', 'icon' => 'local_shipping', 'color' => 'info', 'kind_key' => 'purchase', 'kind_ar' => 'شراء'],
             'supplier_debt_payment' => ['title' => 'تسديد دين مورد', 'icon' => 'payments', 'color' => 'warning', 'kind_key' => 'debt_payment', 'kind_ar' => 'تسديد دين'],
+            'debt_customer_payment' => ['title' => 'تسديد دين زبون', 'icon' => 'payments', 'color' => 'warning', 'kind_key' => 'debt_payment', 'kind_ar' => 'تسديد دين'],
             'product_create' => ['title' => 'إضافة صنف', 'icon' => 'add_circle', 'color' => 'success', 'kind_key' => 'product_create', 'kind_ar' => 'إضافة صنف'],
+            'product_created' => ['title' => 'إضافة صنف', 'icon' => 'add_circle', 'color' => 'success', 'kind_key' => 'product_create', 'kind_ar' => 'إضافة صنف'],
             'product_update' => ['title' => 'تعديل صنف', 'icon' => 'edit', 'color' => 'primary', 'kind_key' => 'product_update', 'kind_ar' => 'تعديل صنف'],
+            'product_updated' => ['title' => 'تعديل صنف', 'icon' => 'edit', 'color' => 'primary', 'kind_key' => 'product_update', 'kind_ar' => 'تعديل صنف'],
             'product_delete' => ['title' => 'حذف صنف', 'icon' => 'delete', 'color' => 'error', 'kind_key' => 'product_delete', 'kind_ar' => 'حذف صنف'],
+            'product_deleted' => ['title' => 'حذف صنف', 'icon' => 'delete', 'color' => 'error', 'kind_key' => 'product_delete', 'kind_ar' => 'حذف صنف'],
             'category_create' => ['title' => 'إضافة قسم', 'icon' => 'add_circle', 'color' => 'success', 'kind_key' => 'category_create', 'kind_ar' => 'إضافة قسم'],
+            'category_created' => ['title' => 'إضافة قسم', 'icon' => 'add_circle', 'color' => 'success', 'kind_key' => 'category_create', 'kind_ar' => 'إضافة قسم'],
             'category_update' => ['title' => 'تعديل قسم', 'icon' => 'edit', 'color' => 'primary', 'kind_key' => 'category_update', 'kind_ar' => 'تعديل قسم'],
+            'category_updated' => ['title' => 'تعديل قسم', 'icon' => 'edit', 'color' => 'primary', 'kind_key' => 'category_update', 'kind_ar' => 'تعديل قسم'],
             'category_delete' => ['title' => 'حذف قسم', 'icon' => 'delete', 'color' => 'error', 'kind_key' => 'category_delete', 'kind_ar' => 'حذف قسم'],
+            'category_deleted' => ['title' => 'حذف قسم', 'icon' => 'delete', 'color' => 'error', 'kind_key' => 'category_delete', 'kind_ar' => 'حذف قسم'],
             'user_create' => ['title' => 'إضافة مستخدم', 'icon' => 'person_add', 'color' => 'success', 'kind_key' => 'user_create', 'kind_ar' => 'إضافة مستخدم'],
+            'user_created' => ['title' => 'إضافة مستخدم', 'icon' => 'person_add', 'color' => 'success', 'kind_key' => 'user_create', 'kind_ar' => 'إضافة مستخدم'],
             'user_update' => ['title' => 'تعديل مستخدم', 'icon' => 'manage_accounts', 'color' => 'primary', 'kind_key' => 'user_update', 'kind_ar' => 'تعديل مستخدم'],
+            'user_updated' => ['title' => 'تعديل مستخدم', 'icon' => 'manage_accounts', 'color' => 'primary', 'kind_key' => 'user_update', 'kind_ar' => 'تعديل مستخدم'],
             'user_delete' => ['title' => 'حذف مستخدم', 'icon' => 'person_remove', 'color' => 'error', 'kind_key' => 'user_delete', 'kind_ar' => 'حذف مستخدم'],
+            'user_deleted' => ['title' => 'حذف مستخدم', 'icon' => 'person_remove', 'color' => 'error', 'kind_key' => 'user_delete', 'kind_ar' => 'حذف مستخدم'],
             'treasury_manual_deposit' => ['title' => 'إيداع يدوي خزنة', 'icon' => 'account_balance_wallet', 'color' => 'success', 'kind_key' => 'treasury_deposit', 'kind_ar' => 'إيداع خزنة'],
             'treasury_manual_withdraw' => ['title' => 'سحب يدوي خزنة', 'icon' => 'money_off', 'color' => 'warning', 'kind_key' => 'treasury_withdraw', 'kind_ar' => 'سحب خزنة'],
             'stocktake_adjustment' => ['title' => 'تعديل مخزون عبر الجرد', 'icon' => 'fact_check', 'color' => 'warning', 'kind_key' => 'stocktake', 'kind_ar' => 'جرد مخزون'],
             'stocktake_apply' => ['title' => 'تطبيق جرد المخزون', 'icon' => 'fact_check', 'color' => 'warning', 'kind_key' => 'stocktake', 'kind_ar' => 'جرد مخزون'],
+            'cashier_hold_save' => ['title' => 'حفظ سلة مؤقتة', 'icon' => 'save', 'color' => 'default', 'kind_key' => 'hold', 'kind_ar' => 'سلة معلّقة'],
+            'cashier_hold_delete' => ['title' => 'حذف سلة مؤقتة', 'icon' => 'delete', 'color' => 'error', 'kind_key' => 'hold', 'kind_ar' => 'سلة معلّقة'],
+            'cashier_shift_end' => ['title' => 'إنهاء دوام', 'icon' => 'schedule', 'color' => 'secondary', 'kind_key' => 'shift_end', 'kind_ar' => 'إنهاء دوام'],
         ];
 
         if (isset($map[$action])) {
@@ -266,6 +284,55 @@ private function generateDescriptionFromMeta($data)
             'kind_key' => 'other',
             'kind_ar' => 'أخرى',
         ];
+    }
+
+    private function buildActionTypeLabels(): array
+    {
+        $types = StaffActivity::query()
+            ->select('action_type')
+            ->distinct()
+            ->orderBy('action_type')
+            ->pluck('action_type')
+            ->values()
+            ->toArray();
+        $labels = [];
+        foreach ($types as $type) {
+            $fake = (object) ['action_type' => $type, 'entity_type' => null];
+            $labels[$type] = $this->getDisplayMeta($fake)['kind_ar'] ?? (string) $type;
+        }
+        return $labels;
+    }
+
+    private function buildEntityTypeLabels(): array
+    {
+        $map = [
+            'order' => 'فاتورة بيع',
+            'purchase' => 'فاتورة شراء',
+            'product' => 'صنف',
+            'supplier' => 'مورد',
+            'credit_customer' => 'زبون آجل',
+            'user' => 'مستخدم',
+            'category' => 'قسم',
+            'shift' => 'إنهاء دوام',
+            'stocktake' => 'جرد مخزون',
+            'debt_payment' => 'تسديد ديون',
+            'treasury' => 'الخزنة',
+            'draft' => 'سلة معلّقة',
+            'system' => 'نظام',
+        ];
+        $types = StaffActivity::query()
+            ->select('entity_type')
+            ->whereNotNull('entity_type')
+            ->distinct()
+            ->orderBy('entity_type')
+            ->pluck('entity_type')
+            ->values()
+            ->toArray();
+        $labels = [];
+        foreach ($types as $type) {
+            $labels[$type] = $map[$type] ?? $type;
+        }
+        return $labels;
     }
 
     /**
@@ -317,11 +384,21 @@ private function generateDescriptionFromMeta($data)
                 'items_count' => $order->items->count(),
                 'total_quantity' => (float) $order->items->sum('quantity'),
                 'items' => $order->items->map(function($item) {
+                    $qty = (float) ($item->quantity ?? 0);
+                    $unitPrice = (float) ($item->unit_price ?? 0);
+                    $unitCost = (float) ($item->unit_cost ?? 0);
+                    $lineTotal = (float) ($item->total_price ?? ($qty * $unitPrice));
+                    $lineProfit = (float) ($item->item_profit ?? ($lineTotal - ($qty * $unitCost)));
+                    $unitProfit = $qty > 0 ? ($lineProfit / $qty) : (float) ($item->unit_profit ?? 0);
                     return [
                         'product_name' => $item->item_name ?? $item->name ?? ('#' . $item->id),
-                        'quantity' => (float) $item->quantity,
-                        'unit_price' => (float) $item->unit_price,
-                        'total_price' => (float) $item->total_price
+                        'quantity' => $qty,
+                        'unit_price' => $unitPrice,
+                        'unit_cost' => $unitCost,
+                        'unit_profit' => $unitProfit,
+                        'item_profit' => $lineProfit,
+                        'sale_type' => $item->sale_type ?? null,
+                        'total_price' => $lineTotal,
                     ];
                 })->values()->toArray(),
                 'created_at' => $order->created_at ? $order->created_at->toISOString() : null,
@@ -342,6 +419,28 @@ private function generateDescriptionFromMeta($data)
         try {
             $purchase = Purchase::with(['items', 'supplier'])->find($purchaseId);
             if (!$purchase) return null;
+            $otherExpenses = TreasuryTransaction::query()
+                ->where('purchase_id', $purchase->id)
+                ->where('type', 'expense')
+                ->where('category', 'other_expense')
+                ->orderBy('id')
+                ->get(['description', 'amount', 'payment_method', 'transaction_date'])
+                ->map(function ($tx) {
+                    $desc = (string) ($tx->description ?? '');
+                    $title = $desc;
+                    if (str_contains($desc, ':')) {
+                        $parts = explode(':', $desc, 2);
+                        $title = trim((string) ($parts[1] ?? $desc));
+                    }
+                    return [
+                        'title' => $title ?: 'مصروف إضافي',
+                        'amount' => (float) ($tx->amount ?? 0),
+                        'payment_method' => $tx->payment_method ?: 'cash',
+                        'date' => $tx->transaction_date,
+                    ];
+                })
+                ->values()
+                ->toArray();
             
             return [
                 'type' => 'purchase',
@@ -356,14 +455,21 @@ private function generateDescriptionFromMeta($data)
                 'total_quantity' => (float) $purchase->items->sum('quantity'),
                 'items' => $purchase->items->map(function($item) {
                     return [
+                        'product_id' => $item->product_id,
                         'product_name' => $item->product_name,
                         'quantity' => (float) $item->quantity,
                         'unit_price' => (float) $item->unit_price,
-                        'total_price' => (float) $item->total_price
+                        'sale_price' => (float) ($item->sale_price ?? 0),
+                        'purchase_unit' => $item->purchase_unit ?? null,
+                        'remaining_quantity' => (float) ($item->remaining_quantity ?? $item->quantity ?? 0),
+                        'returned_quantity' => (float) ($item->returned_quantity ?? 0),
+                        'total_price' => (float) $item->total_price,
                     ];
                 })->values()->toArray(),
                 'payment_method' => $purchase->payment_method,
-                'status' => $purchase->status
+                'status' => $purchase->status,
+                'other_expenses_total' => round(collect($otherExpenses)->sum('amount'), 2),
+                'other_expenses' => $otherExpenses,
             ];
         } catch (\Exception $e) {
             return null;
