@@ -12,6 +12,7 @@ use App\Models\Product;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\DB;
+use Carbon\Carbon;
 
 class StaffActivityController extends Controller
 {
@@ -190,6 +191,9 @@ private function generateDescriptionFromMeta($data)
             $enriched['profit'] = null;
             $enriched['quantity'] = null;
             if (is_array($details)) {
+                if ((string) ($activity->action_type ?? '') === 'cashier_shift_end') {
+                    $details = $this->appendShiftActionRowsFromBackend($activity, $details);
+                }
                 $enriched['amount'] = $details['total_amount'] ?? $details['total'] ?? $details['amount_paid'] ?? $details['amount'] ?? null;
                 $enriched['profit'] = $details['total_profit'] ?? $details['profit'] ?? null;
                 if (array_key_exists('total_quantity', $details)) {
@@ -201,6 +205,69 @@ private function generateDescriptionFromMeta($data)
 
             return $enriched;
         }, $activities);
+    }
+
+    private function appendShiftActionRowsFromBackend($activity, array $details): array
+    {
+        try {
+            $username = (string) ($activity->username ?? '');
+            if ($username === '') {
+                return $details;
+            }
+
+            $start = null;
+            $end = null;
+            if (!empty($details['shift_started_at'])) {
+                $start = Carbon::parse((string) $details['shift_started_at']);
+            }
+            if (!empty($details['shift_ended_at'])) {
+                $end = Carbon::parse((string) $details['shift_ended_at']);
+            }
+            if (!$end) {
+                $end = Carbon::parse((string) ($activity->created_at ?? Carbon::now()->toIso8601String()));
+            }
+            if (!$start) {
+                $start = (clone $end)->startOfDay();
+            }
+
+            $requiredActions = [
+                'cashier_sale',
+                'purchase_created',
+                'product_created',
+                'product_updated',
+                'debt_customer_payment',
+                'supplier_debt_payment',
+                'category_created',
+                'stocktake_apply',
+                'stocktake_adjustment',
+            ];
+
+            $rows = StaffActivity::query()
+                ->whereRaw('LOWER(username) = ?', [strtolower($username)])
+                ->whereIn('action_type', $requiredActions)
+                ->where('id', '!=', (int) ($activity->id ?? 0))
+                ->whereBetween('created_at', [$start->toDateTimeString(), $end->toDateTimeString()])
+                ->orderBy('created_at')
+                ->get();
+
+            $details['shift_action_rows'] = $rows->map(function ($row) {
+                $meta = is_array($row->meta) ? $row->meta : [];
+                $display = $this->getDisplayMeta($row);
+                return [
+                    'action_type' => (string) ($row->action_type ?? ''),
+                    'action_label' => $display['kind_ar'] ?? $display['title'] ?? ((string) ($row->action_type ?? '')),
+                    'created_at' => $row->created_at ? $row->created_at->toIso8601String() : null,
+                    'amount' => (float) ($meta['total'] ?? $meta['total_amount'] ?? $meta['amount'] ?? 0),
+                    'reference' => $meta['invoice_number'] ?? $meta['order_number'] ?? $meta['invoiceId'] ?? $meta['id'] ?? null,
+                    'details' => $meta,
+                ];
+            })->values()->toArray();
+            $details['shift_actions_count'] = count($details['shift_action_rows']);
+        } catch (\Exception $e) {
+            // keep original details if query fails
+        }
+
+        return $details;
     }
 
     private function buildSummary($activities): array

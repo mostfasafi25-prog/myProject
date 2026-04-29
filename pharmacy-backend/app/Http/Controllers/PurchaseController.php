@@ -659,7 +659,7 @@ if ($product->allow_split_sales && $product->price > 0) {
                         "\nالمتبقي: " . number_format((float) $purchase->remaining_amount, 2),
                     'from_management' => true,
                     'management_label' => 'إدارة النظام',
-                    'recipients_type' => 'admin_only',
+                    'recipients_type' => 'all',
                     'created_by' => auth()->id() ?: null,
                 ]);
             }

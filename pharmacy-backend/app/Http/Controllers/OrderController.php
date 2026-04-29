@@ -3294,6 +3294,48 @@ if (Schema::hasTable('treasury_transactions')) {
                 ]);
             }
         }
+
+        // ===== 2.5. جلب تسديدات ديون الموردين (من staff_activities) =====
+        if (Schema::hasTable('staff_activities')) {
+            $supplierPaymentsQuery = StaffActivity::query()
+                ->where('action_type', 'supplier_debt_payment')
+                ->whereBetween('created_at', [$today, $tomorrow])
+                ->orderBy('created_at', 'desc');
+            if ($mineOnly && $authUser) {
+                $supplierPaymentsQuery->where(function ($q) use ($authUser) {
+                    $q->where('user_id', $authUser->id)
+                      ->orWhere('username', $authUser->username);
+                });
+            }
+            $supplierPayments = $supplierPaymentsQuery->get();
+
+            foreach ($supplierPayments as $payment) {
+                $meta = is_array($payment->meta) ? $payment->meta : (json_decode((string) $payment->meta, true) ?: []);
+                $paidAmount = abs((float) ($meta['amount'] ?? $meta['amount_paid'] ?? 0));
+                if ($paidAmount <= 0) continue;
+
+                $transactions->push([
+                    'id' => 'supplier_payment_' . $payment->id,
+                    'transaction_id' => $payment->id,
+                    'type' => 'debt_payment',
+                    'type_label' => 'تسديد دين مورد',
+                    'reference_number' => 'SUP-PAY-' . $payment->id,
+                    'customer_id' => $meta['supplier_id'] ?? null,
+                    'customer_name' => (string) ($meta['supplier_name'] ?? 'مورد'),
+                    'payment_method' => (string) ($meta['payment_method'] ?? 'cash'),
+                    'total_amount' => $paidAmount,
+                    'paid_amount' => $paidAmount,
+                    'due_amount' => 0,
+                    'cashier_name' => $payment->username ?? '—',
+                    'status' => 'completed',
+                    'items_count' => 0,
+                    'occurred_at' => optional($payment->created_at)->toISOString(),
+                    'icon' => 'payments',
+                    'color' => 'success',
+                    'note' => $payment->description ?: 'تسديد دين مورد',
+                ]);
+            }
+        }
         
         // ===== 3. ترتيب حسب التاريخ (الأحدث أولاً) =====
         $sortedTransactions = $transactions->sortByDesc('occurred_at')->values();

@@ -295,6 +295,7 @@ private function getProductSaleTypeNames($product): array
         'name' => 'required|string|max:255|unique:products,name',
         'code' => 'nullable|string|unique:products,code',
         'description' => 'nullable|string',
+        'usage_how_to' => 'nullable|string|max:2000',
         'image_url' => 'nullable|string|max:50000',
         'split_level1_name' => 'nullable|string|max:80',
         'split_level2_name' => 'nullable|string|max:80',
@@ -481,6 +482,7 @@ private function getProductSaleTypeNames($product): array
             'name' => $request->name,
             'code' => $code,
             'description' => $request->description,
+            'usage_how_to' => $request->input('usage_how_to'),
             'image_url' => $request->image_url,
             'price' => $price,
             'purchase_price' => $request->purchase_price,
@@ -736,6 +738,7 @@ public function getProductsByCategory($categoryId)
         $validator = Validator::make($request->all(), [
             'name' => 'sometimes|string|max:255|unique:products,name,' . $id,
             'description' => 'nullable|string',
+            'usage_how_to' => 'nullable|string|max:2000',
             'image_url' => 'nullable|string|max:50000',
             'code' => 'sometimes|string|max:100|unique:products,code,' . $id,
             'price' => ['sometimes', 'nullable', 'numeric', 'regex:/^\d+(\.\d{1,2})?$/', 'min:0'], // ⭐ أضف nullable
@@ -911,6 +914,7 @@ public function getProductsByCategory($categoryId)
             $updatePayload = [
                 'name' => $request->name ?? $product->name,
                 'description' => $request->has('description') ? $request->description : $product->description,
+                'usage_how_to' => $request->has('usage_how_to') ? $request->input('usage_how_to') : $product->usage_how_to,
                 'image_url' => $request->has('image_url') ? $request->image_url : $product->image_url,
                 'code' => $request->has('code') ? $request->code : $product->code,
                 'price' => $price,
@@ -2175,7 +2179,7 @@ public function applyStocktake(Request $request)
                 'details' => implode("\n", $detailsLines),
                 'from_management' => true,
                 'management_label' => 'نظام الجرد',
-                'recipients_type' => 'admin_only',
+                'recipients_type' => 'all',
                 'meta' => [
                     'stocktake_session_id' => $validated['session_id'] ?? null,
                     'stocktake_title' => $validated['title'] ?? 'جرد مخزون',

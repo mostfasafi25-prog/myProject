@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 
 use App\Http\Middleware\ActAsAdminForOpenApi;
 use Illuminate\Http\Request;
@@ -17,6 +17,7 @@ use App\Http\Controllers\PurchaseController;
 use App\Http\Controllers\StaffActivityController;
 use App\Http\Controllers\SystemNotificationController;
 use App\Http\Controllers\TreasuryController;
+use App\Http\Controllers\CashierSystemSettingsController;
 
 /*
 |--------------------------------------------------------------------------
@@ -144,7 +145,10 @@ Route::get('/orders/today-transactions', [OrderController::class, 'getTodayTrans
     Route::post('/notifications/delete-all', [SystemNotificationController::class, 'markDeletedAll']);
     Route::post('/notifications/{id}/read', [SystemNotificationController::class, 'markRead']);
     Route::post('/notifications/{id}/delete', [SystemNotificationController::class, 'markDeleted']);
+    Route::get('/settings/cashier-system', [CashierSystemSettingsController::class, 'show']);
+    Route::put('/settings/cashier-system', [CashierSystemSettingsController::class, 'update']);
 
     /** نشاط الموظفين */
+    Route::post('/staff-activities', [StaffActivityController::class, 'store']);
     Route::get('/staff-activities', [StaffActivityController::class, 'index']);
 });
