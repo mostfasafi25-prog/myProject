@@ -96,6 +96,7 @@ Route::middleware($apiAuthMiddleware)->group(function () {
     Route::get('/orders/stats/summary', [OrderController::class, 'stats']);
     Route::get('/orders/credit-customers', [OrderController::class, 'creditCustomersSummary']);
     Route::post('/orders/credit-customers', [OrderController::class, 'createCreditCustomer']);
+    Route::put('/orders/credit-customers/{customerId}', [OrderController::class, 'updateCreditCustomer']);
 // حركات اليوم (فواتير + تسديدات)
 Route::get('/orders/today-transactions', [OrderController::class, 'getTodayTransactions']);
     Route::get('/orders/credit-customers/{customerId}/movements', [OrderController::class, 'getCreditCustomerMovements']);

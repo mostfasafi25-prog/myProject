@@ -2666,6 +2666,51 @@ public function updateCreditLimit(Request $request, $customerId)
         }
     }
 
+    public function updateCreditCustomer(Request $request, $customerId)
+    {
+        $validator = Validator::make($request->all(), [
+            'name' => 'required|string|max:120',
+            'phone' => 'nullable|string|max:30',
+        ]);
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'بيانات غير صالحة',
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        try {
+            $customer = Customer::find((int) $customerId);
+            if (!$customer) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'الزبون غير موجود',
+                ], 404);
+            }
+
+            $customer->name = trim((string) $request->input('name'));
+            $customer->phone = trim((string) $request->input('phone', '')) ?: '—';
+            $customer->save();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'تم تحديث بيانات زبون الآجل',
+                'data' => [
+                    'id' => $customer->id,
+                    'name' => $customer->name,
+                    'phone' => $customer->phone,
+                ],
+            ]);
+        } catch (\Throwable $e) {
+            Log::error('updateCreditCustomer error: ' . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'تعذر تحديث بيانات الزبون',
+            ], 500);
+        }
+    }
+
     public function applyCreditPayment(Request $request, $customerId)
     {
         $validator = Validator::make($request->all(), [
@@ -2873,6 +2918,54 @@ public function getCreditCustomerMovements($customerId)
                     'icon' => 'payments',
                     'color' => 'success',
                     'note' => $payment->description ?: 'تسديد دين مورد',
+                ]);
+            }
+        }
+
+        // ===== 2.6. جلب عمليات الجرد المنفذة من الكاشير (من staff_activities) =====
+        if (Schema::hasTable('staff_activities')) {
+            $stocktakeQuery = StaffActivity::query()
+                ->where('action_type', 'stocktake_apply')
+                ->whereBetween('created_at', [$today, $tomorrow])
+                ->orderBy('created_at', 'desc');
+            $stocktakeRows = $stocktakeQuery->get();
+
+            foreach ($stocktakeRows as $row) {
+                $meta = is_array($row->meta) ? $row->meta : (json_decode((string) $row->meta, true) ?: []);
+                if ($mineOnly && $authUser) {
+                    $rowUserId = (int) ($row->user_id ?? 0);
+                    $rowUsername = trim((string) ($row->username ?? ''));
+                    $metaUserId = (int) ($meta['cashier_user_id'] ?? 0);
+                    $metaUsername = trim((string) ($meta['cashier_username'] ?? ''));
+                    $sameActor =
+                        ($rowUserId > 0 && $rowUserId === (int) $authUser->id) ||
+                        ($metaUserId > 0 && $metaUserId === (int) $authUser->id) ||
+                        ($rowUsername !== '' && strcasecmp($rowUsername, (string) $authUser->username) === 0) ||
+                        ($metaUsername !== '' && strcasecmp($metaUsername, (string) $authUser->username) === 0);
+                    if (!$sameActor) {
+                        continue;
+                    }
+                }
+                $itemsCount = (int) ($meta['items_count'] ?? (is_array($meta['items'] ?? null) ? count($meta['items']) : 0));
+                $transactions->push([
+                    'id' => 'stocktake_' . $row->id,
+                    'transaction_id' => $row->id,
+                    'type' => 'stocktake',
+                    'type_label' => 'جرد مخزون',
+                    'reference_number' => 'STK-' . $row->id,
+                    'customer_id' => null,
+                    'customer_name' => (string) ($meta['stocktake_title'] ?? 'جرد مخزون'),
+                    'payment_method' => null,
+                    'total_amount' => 0,
+                    'paid_amount' => 0,
+                    'due_amount' => 0,
+                    'cashier_name' => $row->username ?? '—',
+                    'status' => 'completed',
+                    'items_count' => $itemsCount,
+                    'occurred_at' => optional($row->created_at)->toISOString(),
+                    'icon' => 'fact_check',
+                    'color' => 'warning',
+                    'note' => $row->description ?: 'تطبيق جرد مخزون',
                 ]);
             }
         }
@@ -3149,232 +3242,344 @@ public function getCreditCustomerMovements($customerId)
 
 
 
-
-public function getTodayTransactions(Request $request)
-{
-    try {
-        $today = now()->startOfDay();
-        $tomorrow = now()->endOfDay();
-        $mineOnly = $request->boolean('mine');
-        $authUser = $request->user();
+ public function getTodayTransactions(Request $request)
+ {
+     try {
+         $today = now()->startOfDay();
+         $tomorrow = now()->endOfDay();
+         $mineOnly = $request->boolean('mine');
+         $authUser = $request->user();
+         
+         $transactions = collect();
+         
+         // ===== 1. جلب فواتير البيع (من orders) =====
+         $ordersQuery = Order::whereBetween('created_at', [$today, $tomorrow])
+             ->with(['customer', 'createdBy'])
+             ->orderBy('created_at', 'desc');
+         if ($mineOnly && $authUser) {
+             $ordersQuery->where('created_by', $authUser->id);
+         }
+         $orders = $ordersQuery->get();
+         
+         foreach ($orders as $order) {
+             $transactions->push([
+                 'id' => 'order_' . $order->id,
+                 'transaction_id' => $order->id,
+                 'type' => 'sale',
+                 'type_label' => 'فاتورة بيع',
+                 'reference_number' => $order->order_number,
+                 'customer_id' => $order->customer_id,
+                 'customer_name' => $order->customer?->name ?? $this->extractMetaFromNotes($order->notes)['customer_name'] ?? 'زبون عابر',
+                 'payment_method' => $order->payment_method,
+                 'total_amount' => (float) $order->total,
+                 'paid_amount' => (float) $order->paid_amount,
+                 'due_amount' => (float) $order->due_amount,
+                 'cashier_name' => $order->createdBy?->username ?? $this->extractMetaFromNotes($order->notes)['cashier_name'] ?? '—',
+                 'status' => $order->status,
+                 'items_count' => $order->items->count(),
+                 'occurred_at' => $order->created_at->toISOString(),
+                 'icon' => 'receipt',
+                 'color' => 'primary'
+             ]);
+         }
+         
+         // ===== 1.5. جلب مشتريات الموردين (من purchases) =====
+         if (Schema::hasTable('purchases')) {
+             $purchasesQuery = Purchase::whereBetween('created_at', [$today, $tomorrow])
+                 ->with(['supplier', 'createdBy', 'items'])
+                 ->orderBy('created_at', 'desc');
+             if ($mineOnly && $authUser && Schema::hasColumn('purchases', 'created_by')) {
+                 $purchasesQuery->where('created_by', $authUser->id);
+             }
+             $purchases = $purchasesQuery->get();
+ 
+             foreach ($purchases as $purchase) {
+                 $totalAmount = (float) ($purchase->total_amount ?? 0);
+                 $paidAmount = (float) ($purchase->paid_amount ?? 0);
+                 $remainingAmount = (float) ($purchase->remaining_amount ?? max(0, $totalAmount - $paidAmount));
+                 $transactions->push([
+                     'id' => 'purchase_' . $purchase->id,
+                     'transaction_id' => $purchase->id,
+                     'type' => 'purchase',
+                     'type_label' => 'فاتورة شراء',
+                     'reference_number' => $purchase->invoice_number ?? ('PO-' . $purchase->id),
+                     'customer_id' => $purchase->supplier_id,
+                     'customer_name' => $purchase->supplier?->name ?? 'مورد',
+                     'payment_method' => $purchase->payment_method ?? 'cash',
+                     'total_amount' => -abs($totalAmount),
+                     'paid_amount' => $paidAmount,
+                     'due_amount' => max(0, $remainingAmount),
+                     'cashier_name' => $purchase->createdBy?->username ?? '—',
+                     'status' => $purchase->status ?? 'completed',
+                     'items_count' => $purchase->items->count(),
+                     'occurred_at' => optional($purchase->created_at)->toISOString(),
+                     'icon' => 'local_shipping',
+                     'color' => 'warning'
+                 ]);
+             }
+         }
+ 
         
-        $transactions = collect();
-        
-        // ===== 1. جلب فواتير البيع (من orders) =====
-        $ordersQuery = Order::whereBetween('created_at', [$today, $tomorrow])
-            ->with(['customer', 'createdBy'])
-            ->orderBy('created_at', 'desc');
-        if ($mineOnly && $authUser) {
-            $ordersQuery->where('created_by', $authUser->id);
-        }
-        $orders = $ordersQuery->get();
-        
-        foreach ($orders as $order) {
-            $transactions->push([
-                'id' => 'order_' . $order->id,
-                'transaction_id' => $order->id,
-                'type' => 'sale',
-                'type_label' => 'فاتورة بيع',
-                'reference_number' => $order->order_number,
-                'customer_id' => $order->customer_id,
-                'customer_name' => $order->customer?->name ?? $this->extractMetaFromNotes($order->notes)['customer_name'] ?? 'زبون عابر',
-                'payment_method' => $order->payment_method,
-                'total_amount' => (float) $order->total,
-                'paid_amount' => (float) $order->paid_amount,
-                'due_amount' => (float) $order->due_amount,
-                'cashier_name' => $order->createdBy?->username ?? $this->extractMetaFromNotes($order->notes)['cashier_name'] ?? '—',
-                'status' => $order->status,
-                'items_count' => $order->items->count(),
-                'occurred_at' => $order->created_at->toISOString(),
-                'icon' => 'receipt',
-                'color' => 'primary'
-            ]);
-        }
-        // ===== 1.5. جلب مشتريات الموردين (من purchases) =====
-        if (Schema::hasTable('purchases')) {
-            $purchasesQuery = Purchase::whereBetween('created_at', [$today, $tomorrow])
-                ->with(['supplier', 'createdBy', 'items'])
-                ->orderBy('created_at', 'desc');
-            if ($mineOnly && $authUser && Schema::hasColumn('purchases', 'created_by')) {
-                $purchasesQuery->where('created_by', $authUser->id);
-            }
-            $purchases = $purchasesQuery->get();
-
-            foreach ($purchases as $purchase) {
-                $totalAmount = (float) ($purchase->total_amount ?? 0);
-                $paidAmount = (float) ($purchase->paid_amount ?? 0);
-                $remainingAmount = (float) ($purchase->remaining_amount ?? max(0, $totalAmount - $paidAmount));
-                $transactions->push([
-                    'id' => 'purchase_' . $purchase->id,
-                    'transaction_id' => $purchase->id,
-                    'type' => 'purchase',
-                    'type_label' => 'فاتورة شراء',
-                    'reference_number' => $purchase->invoice_number ?? ('PO-' . $purchase->id),
-                    'customer_id' => $purchase->supplier_id,
-                    'customer_name' => $purchase->supplier?->name ?? 'مورد',
-                    'payment_method' => $purchase->payment_method ?? 'cash',
-                    'total_amount' => -abs($totalAmount), // سالب لأنه صرف/التزام شراء
-                    'paid_amount' => $paidAmount,
-                    'due_amount' => max(0, $remainingAmount),
-                    'cashier_name' => $purchase->createdBy?->username ?? '—',
-                    'status' => $purchase->status ?? 'completed',
-                    'items_count' => $purchase->items->count(),
-                    'occurred_at' => optional($purchase->created_at)->toISOString(),
-                    'icon' => 'local_shipping',
-                    'color' => 'warning'
-                ]);
-            }
-        }
-
-// ===== 4. جلب حركات الخزنة النقدية (Treasury transactions) =====
-if (Schema::hasTable('treasury_transactions')) {
-    $treasuryTransQuery = TreasuryTransaction::whereBetween('transaction_date', [$today, $tomorrow])
-        ->whereIn('type', ['expense', 'income'])
-        ->whereNotIn('category', ['sales_income', 'meal_income'])
-        ->orderBy('transaction_date', 'desc');
-    if ($mineOnly && $authUser && Schema::hasColumn('treasury_transactions', 'created_by')) {
-        $treasuryTransQuery->where('created_by', $authUser->id);
-    }
-    $treasuryTrans = $treasuryTransQuery->get();
+         // ===== 2. جلب حركات الجرد (من staff_activities) =====
+if (Schema::hasTable('staff_activities')) {
+    $stocktakeQuery = StaffActivity::query()
+        ->where('action_type', 'stocktake_apply')
+        ->whereBetween('created_at', [$today, $tomorrow])
+        ->orderBy('created_at', 'desc');
     
-    foreach ($treasuryTrans as $tt) {
-        $transactions->push([
-            'id' => 'treasury_' . $tt->id,
-            'type' => $tt->type === 'expense' ? 'expense' : 'income',
-            'type_label' => $tt->type === 'expense' ? 'صرف نقدي' : 'إيداع نقدي',
-            'reference_number' => 'حركة #' . $tt->id,
-            'customer_name' => '—',
-            'payment_method' => $tt->payment_method ?? 'cash',
-            'total_amount' => $tt->type === 'expense' ? -(float) $tt->amount : (float) $tt->amount,
-            'paid_amount' => (float) $tt->amount,
-            'due_amount' => 0,
-            'cashier_name' => optional($tt->createdBy)->username ?? '—',
-            'status' => 'completed',
-            'items_count' => 0,
-            'occurred_at' => $tt->transaction_date->toISOString(),
-            'icon' => $tt->type === 'expense' ? 'money_off' : 'attach_money',
-            'color' => $tt->type === 'expense' ? 'error' : 'success',
-            'note' => $tt->description
-        ]);
+    if ($mineOnly && $authUser) {
+        $stocktakeQuery->where(function ($q) use ($authUser) {
+            $q->where('user_id', $authUser->id)
+              ->orWhere('username', $authUser->username);
+        });
     }
-}
-        // ===== 2. جلب حركات تسديد الديون (من customer_credit_movements) =====
-        if (Schema::hasTable('customer_credit_movements')) {
-            $paymentsQuery = CustomerCreditMovement::whereBetween('occurred_at', [$today, $tomorrow])
-                ->where('movement_type', 'debt_payment')
-                ->orderBy('occurred_at', 'desc');
-            if ($mineOnly && $authUser) {
-                $paymentsQuery->where('cashier_name', $authUser->username);
-            }
-            $payments = $paymentsQuery->get();
+    
+    $stocktakes = $stocktakeQuery->get();
+    
+    foreach ($stocktakes as $stocktake) {
+        $meta = is_array($stocktake->meta) ? $stocktake->meta : (json_decode((string) $stocktake->meta, true) ?: []);
+        $items = $meta['items'] ?? [];
+        $itemsCount = count($items);
+        
+        // حساب الفرق الإجمالي للجرد
+        $totalDifference = 0;
+        $detailedItems = [];
+        
+        foreach ($items as $item) {
+            $diff = (float) ($item['difference'] ?? 0);
+            $totalDifference += $diff;
             
-            foreach ($payments as $payment) {
-                // delta_amount سالب = دفع دين (رصيد دائن)
-                $paidAmount = abs((float) $payment->delta_amount);
-                
-                $transactions->push([
-                    'id' => 'payment_' . $payment->id,
-                    'transaction_id' => $payment->id,
-                    'type' => 'debt_payment',
-                    'type_label' => 'تسديد دين',
-                    'reference_number' => 'تسديد #' . $payment->id,
-                    'customer_id' => $payment->customer_id,
-                    'customer_name' => $payment->customer_name ?? 'زبون آجل',
-                    'payment_method' => $payment->payment_method ?? 'cash',
-                    'total_amount' => $paidAmount,
-                    'paid_amount' => $paidAmount,
-                    'due_amount' => 0,
-                    'cashier_name' => $payment->cashier_name ?? '—',
-                    'status' => 'completed',
-                    'items_count' => 0,
-                    'occurred_at' => $payment->occurred_at->toISOString(),
-                    'icon' => 'payments',
-                    'color' => 'success',
-                    'note' => $payment->note
-                ]);
-            }
-        }
-
-        // ===== 2.5. جلب تسديدات ديون الموردين (من staff_activities) =====
-        if (Schema::hasTable('staff_activities')) {
-            $supplierPaymentsQuery = StaffActivity::query()
-                ->where('action_type', 'supplier_debt_payment')
-                ->whereBetween('created_at', [$today, $tomorrow])
-                ->orderBy('created_at', 'desc');
-            if ($mineOnly && $authUser) {
-                $supplierPaymentsQuery->where(function ($q) use ($authUser) {
-                    $q->where('user_id', $authUser->id)
-                      ->orWhere('username', $authUser->username);
-                });
-            }
-            $supplierPayments = $supplierPaymentsQuery->get();
-
-            foreach ($supplierPayments as $payment) {
-                $meta = is_array($payment->meta) ? $payment->meta : (json_decode((string) $payment->meta, true) ?: []);
-                $paidAmount = abs((float) ($meta['amount'] ?? $meta['amount_paid'] ?? 0));
-                if ($paidAmount <= 0) continue;
-
-                $transactions->push([
-                    'id' => 'supplier_payment_' . $payment->id,
-                    'transaction_id' => $payment->id,
-                    'type' => 'debt_payment',
-                    'type_label' => 'تسديد دين مورد',
-                    'reference_number' => 'SUP-PAY-' . $payment->id,
-                    'customer_id' => $meta['supplier_id'] ?? null,
-                    'customer_name' => (string) ($meta['supplier_name'] ?? 'مورد'),
-                    'payment_method' => (string) ($meta['payment_method'] ?? 'cash'),
-                    'total_amount' => $paidAmount,
-                    'paid_amount' => $paidAmount,
-                    'due_amount' => 0,
-                    'cashier_name' => $payment->username ?? '—',
-                    'status' => 'completed',
-                    'items_count' => 0,
-                    'occurred_at' => optional($payment->created_at)->toISOString(),
-                    'icon' => 'payments',
-                    'color' => 'success',
-                    'note' => $payment->description ?: 'تسديد دين مورد',
-                ]);
-            }
+            // ✅ تجهيز تفاصيل كل صنف للعرض
+            $detailedItems[] = [
+                'product_id' => $item['product_id'] ?? null,
+                'product_name' => $item['product_name'] ?? 'منتج غير معروف',
+                'before_qty' => (float) ($item['before_qty'] ?? 0),
+                'after_qty' => (float) ($item['after_qty'] ?? 0),
+                'difference' => $diff,
+                'difference_display' => ($diff >= 0 ? '+' : '') . number_format($diff, 2),
+                'barcode' => $item['barcode'] ?? null,
+            ];
         }
         
-        // ===== 3. ترتيب حسب التاريخ (الأحدث أولاً) =====
-        $sortedTransactions = $transactions->sortByDesc('occurred_at')->values();
-        
-        // ===== 4. إحصائيات اليوم =====
-        $stats = [
-            'total_sales' => $orders->sum('total'),
-            'total_paid' => $orders->sum('paid_amount'),
-            'total_debt_paid' => $transactions->where('type', 'debt_payment')->sum('total_amount'),
-            'total_purchases' => abs($transactions->where('type', 'purchase')->sum('total_amount')),
-            'total_expenses' => abs($transactions->where('type', 'expense')->sum('total_amount')),
-            'total_income' => $transactions->where('type', 'income')->sum('total_amount'),
-            'total_orders' => $orders->count(),
-            'total_payments' => $transactions->where('type', 'debt_payment')->count(),
-            'net_cash_flow' => $orders->sum('total') - abs($transactions->where('type', 'purchase')->sum('total_amount')),
-        ];
-        
-        return response()->json([
-            'success' => true,
-            'data' => [
-                'transactions' => $sortedTransactions,
-                'stats' => $stats,
-                'date' => now()->toDateString()
-            ],
-            'message' => 'تم جلب حركات اليوم بنجاح'
+        $transactions->push([
+            'id' => 'stocktake_' . $stocktake->id,
+            'transaction_id' => $stocktake->id,
+            'type' => 'stocktake',
+            'type_label' => 'جرد مخزون',
+            'reference_number' => 'STK-' . $stocktake->id,
+            'customer_id' => null,
+            'customer_name' => (string) ($meta['stocktake_title'] ?? 'جرد مخزون'),
+            'payment_method' => null,
+            'total_amount' => $totalDifference,
+            'paid_amount' => 0,
+            'due_amount' => 0,
+            'cashier_name' => $stocktake->username ?? '—',
+            'status' => 'completed',
+            'items_count' => $itemsCount,
+            'occurred_at' => optional($stocktake->created_at)->toISOString(),
+            'icon' => 'inventory',
+            'color' => 'warning',
+            'note' => $stocktake->description ?: 'تطبيق جرد مخزون',
+            // ✅ إضافة التفاصيل الكاملة هنا
+            'detailed_data' => [
+                'items' => $detailedItems,
+                'items_count' => $itemsCount,
+                'total_difference' => $totalDifference,
+                'total_difference_display' => ($totalDifference >= 0 ? '+' : '') . number_format($totalDifference, 2),
+                'stocktake_title' => $meta['stocktake_title'] ?? 'جرد مخزون',
+                'stocktake_session_id' => $meta['stocktake_session_id'] ?? null,
+                'description' => $stocktake->description,
+            ]
         ]);
-        
-    } catch (\Exception $e) {
-        Log::error('getTodayTransactions error: ' . $e->getMessage());
-        
-        return response()->json([
-            'success' => false,
-            'message' => 'حدث خطأ في جلب حركات اليوم',
-            'error' => env('APP_DEBUG') ? $e->getMessage() : null
-        ], 500);
     }
 }
-
-
+ 
+         // ===== 3. جلب حركات الخزنة النقدية (Treasury transactions) =====
+         if (Schema::hasTable('treasury_transactions')) {
+             $treasuryTransQuery = TreasuryTransaction::whereBetween('transaction_date', [$today, $tomorrow])
+                 ->whereIn('type', ['expense', 'income'])
+                 ->whereNotIn('category', ['sales_income', 'meal_income', 'purchases', 'purchase_expense'])
+                 ->orderBy('transaction_date', 'desc');
+             if ($mineOnly && $authUser && Schema::hasColumn('treasury_transactions', 'created_by')) {
+                 $treasuryTransQuery->where('created_by', $authUser->id);
+             }
+             $treasuryTrans = $treasuryTransQuery->get();
+             
+             foreach ($treasuryTrans as $tt) {
+                 $transactions->push([
+                     'id' => 'treasury_' . $tt->id,
+                     'type' => $tt->type === 'expense' ? 'expense' : 'income',
+                     'type_label' => $tt->type === 'expense' ? 'صرف نقدي' : 'إيداع نقدي',
+                     'reference_number' => 'حركة #' . $tt->id,
+                     'customer_name' => '—',
+                     'payment_method' => $tt->payment_method ?? 'cash',
+                     'total_amount' => $tt->type === 'expense' ? -(float) $tt->amount : (float) $tt->amount,
+                     'paid_amount' => (float) $tt->amount,
+                     'due_amount' => 0,
+                     'cashier_name' => optional($tt->createdBy)->username ?? '—',
+                     'status' => 'completed',
+                     'items_count' => 0,
+                     'occurred_at' => $tt->transaction_date->toISOString(),
+                     'icon' => $tt->type === 'expense' ? 'money_off' : 'attach_money',
+                     'color' => $tt->type === 'expense' ? 'error' : 'success',
+                     'note' => $tt->description
+                 ]);
+             }
+         }
+ 
+         // ===== 4. جلب حركات تسديد الديون (من customer_credit_movements) =====
+         if (Schema::hasTable('customer_credit_movements')) {
+             $paymentsQuery = CustomerCreditMovement::whereBetween('occurred_at', [$today, $tomorrow])
+                 ->where('movement_type', 'debt_payment')
+                 ->where(function ($q) {
+                     $q->whereNull('note')->orWhere('note', 'not like', '%مورد%');
+                 })
+                 ->where(function ($q) {
+                     $q->whereNull('customer_name')->orWhere('customer_name', 'not like', '%مورد%');
+                 })
+                 ->orderBy('occurred_at', 'desc');
+             if ($mineOnly && $authUser) {
+                 $paymentsQuery->where('cashier_name', $authUser->username);
+             }
+             $payments = $paymentsQuery->get();
+             
+             foreach ($payments as $payment) {
+                 $paidAmount = abs((float) $payment->delta_amount);
+                 
+                 $transactions->push([
+                     'id' => 'payment_' . $payment->id,
+                     'transaction_id' => $payment->id,
+                     'type' => 'debt_payment',
+                     'type_label' => 'تسديد دين',
+                     'reference_number' => 'تسديد #' . $payment->id,
+                     'customer_id' => $payment->customer_id,
+                     'customer_name' => $payment->customer_name ?? 'زبون آجل',
+                     'payment_method' => $payment->payment_method ?? 'cash',
+                     'total_amount' => $paidAmount,
+                     'paid_amount' => $paidAmount,
+                     'due_amount' => 0,
+                     'cashier_name' => $payment->cashier_name ?? '—',
+                     'status' => 'completed',
+                     'items_count' => 0,
+                     'occurred_at' => $payment->occurred_at->toISOString(),
+                     'icon' => 'payments',
+                     'color' => 'success',
+                     'note' => $payment->note
+                 ]);
+             }
+         }
+ 
+         // ===== 5. جلب تسديدات ديون الموردين (من staff_activities) =====
+         if (Schema::hasTable('staff_activities')) {
+             $supplierPaymentsQuery = StaffActivity::query()
+                 ->where('action_type', 'supplier_debt_payment')
+                 ->whereBetween('created_at', [$today, $tomorrow])
+                 ->orderBy('created_at', 'desc');
+             if ($mineOnly && $authUser) {
+                 $supplierPaymentsQuery->where(function ($q) use ($authUser) {
+                     $q->where('user_id', $authUser->id)
+                       ->orWhere('username', $authUser->username);
+                 });
+             }
+             $supplierPayments = $supplierPaymentsQuery->get();
+ 
+             foreach ($supplierPayments as $payment) {
+                 $meta = is_array($payment->meta) ? $payment->meta : (json_decode((string) $payment->meta, true) ?: []);
+                 $paidAmount = abs((float) ($meta['amount'] ?? $meta['amount_paid'] ?? 0));
+                 if ($paidAmount <= 0) continue;
+ 
+                 $transactions->push([
+                     'id' => 'supplier_payment_' . $payment->id,
+                     'transaction_id' => $payment->id,
+                     'type' => 'debt_payment',
+                     'type_label' => 'تسديد دين مورد',
+                     'reference_number' => 'SUP-PAY-' . $payment->id,
+                     'customer_id' => $meta['supplier_id'] ?? null,
+                     'customer_name' => (string) ($meta['supplier_name'] ?? 'مورد'),
+                     'payment_method' => (string) ($meta['payment_method'] ?? 'cash'),
+                     'total_amount' => $paidAmount,
+                     'paid_amount' => $paidAmount,
+                     'due_amount' => 0,
+                     'cashier_name' => $payment->username ?? '—',
+                     'status' => 'completed',
+                     'items_count' => 0,
+                     'occurred_at' => optional($payment->created_at)->toISOString(),
+                     'icon' => 'payments',
+                     'color' => 'success',
+                     'note' => $payment->description ?: 'تسديد دين مورد',
+                 ]);
+             }
+         }
+ 
+         // ===== 6. إزالة تكرار تسديد الدين بين المصادر المختلفة =====
+         $dedupedTransactions = collect();
+         $seenPaymentKeys = [];
+         foreach ($transactions as $tx) {
+             $type = strtolower((string) ($tx['type'] ?? ''));
+             if ($type !== 'debt_payment') {
+                 $dedupedTransactions->push($tx);
+                 continue;
+             }
+ 
+             $occurredAt = (string) ($tx['occurred_at'] ?? '');
+             $minuteBucket = $occurredAt !== '' ? substr($occurredAt, 0, 16) : '';
+             $amount = round((float) ($tx['total_amount'] ?? 0), 2);
+             $cashier = strtolower(trim((string) ($tx['cashier_name'] ?? '')));
+             $method = strtolower(trim((string) ($tx['payment_method'] ?? '')));
+             $key = implode('|', [$amount, $minuteBucket, $cashier, $method]);
+ 
+             if (!array_key_exists($key, $seenPaymentKeys)) {
+                 $seenPaymentKeys[$key] = $dedupedTransactions->count();
+                 $dedupedTransactions->push($tx);
+                 continue;
+             }
+ 
+             $existingIndex = $seenPaymentKeys[$key];
+             $existing = $dedupedTransactions->get($existingIndex);
+             $isCurrentSupplier = str_contains((string) ($tx['type_label'] ?? ''), 'مورد');
+             $isExistingSupplier = str_contains((string) ($existing['type_label'] ?? ''), 'مورد');
+             if ($isCurrentSupplier && !$isExistingSupplier) {
+                 $dedupedTransactions->put($existingIndex, $tx);
+             }
+         }
+ 
+         // ===== 7. ترتيب حسب التاريخ (الأحدث أولاً) =====
+         $sortedTransactions = $dedupedTransactions->sortByDesc('occurred_at')->values();
+         
+         // ===== 8. إحصائيات اليوم =====
+         $stats = [
+             'total_sales' => $orders->sum('total'),
+             'total_paid' => $orders->sum('paid_amount'),
+             'total_debt_paid' => $sortedTransactions->where('type', 'debt_payment')->sum('total_amount'),
+             'total_purchases' => abs($sortedTransactions->where('type', 'purchase')->sum('total_amount')),
+             'total_expenses' => abs($sortedTransactions->where('type', 'expense')->sum('total_amount')),
+             'total_income' => $sortedTransactions->where('type', 'income')->sum('total_amount'),
+             'total_orders' => $orders->count(),
+             'total_payments' => $sortedTransactions->where('type', 'debt_payment')->count(),
+             'total_stocktakes' => $sortedTransactions->where('type', 'stocktake')->count(),
+             'net_cash_flow' => $orders->sum('total') - abs($sortedTransactions->where('type', 'purchase')->sum('total_amount')),
+         ];
+         
+         return response()->json([
+             'success' => true,
+             'data' => [
+                 'transactions' => $sortedTransactions,
+                 'stats' => $stats,
+                 'date' => now()->toDateString()
+             ],
+             'message' => 'تم جلب حركات اليوم بنجاح'
+         ]);
+         
+     } catch (\Exception $e) {
+         Log::error('getTodayTransactions error: ' . $e->getMessage());
+         
+         return response()->json([
+             'success' => false,
+             'message' => 'حدث خطأ في جلب حركات اليوم',
+             'error' => env('APP_DEBUG') ? $e->getMessage() : null
+         ], 500);
+     }
+ }
 
     /**
      * إرجاع الطلب بالكامل (مرتجع كامل - مناسب لطلبات الوجبات)

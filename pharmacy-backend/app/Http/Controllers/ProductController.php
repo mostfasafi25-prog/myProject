@@ -2151,6 +2151,7 @@ public function applyStocktake(Request $request)
         }
 
         if ($totalChanged > 0) {
+            $actorUser = $request->user();
             ActivityLogger::log($request, [
                 'action_type' => 'stocktake_apply',
                 'entity_type' => 'stocktake',
@@ -2161,6 +2162,9 @@ public function applyStocktake(Request $request)
                     'stocktake_title' => $validated['title'] ?? 'جرد مخزون',
                     'items_count' => $totalChanged,
                     'items' => $applied,
+                    // مهم لربط الجرد بحركات "دوامي" حتى عند أي اختلاف في user_id
+                    'cashier_user_id' => $actorUser?->id,
+                    'cashier_username' => $actorUser?->username,
                 ],
             ]);
         }
