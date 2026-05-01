@@ -3188,7 +3188,8 @@ public function getCreditCustomerMovements($customerId)
                 $orderItem = OrderItem::find($item['order_item_id']);
                 
                 if ($orderItem && $orderItem->order_id == $order->id) {
-                    $product = Product::find($orderItem->product_id);
+                    $productId = $orderItem->product_id ?? $orderItem->item_id;
+                    $product = Product::find($productId);
                     if ($product) {
                         $product->stock += $item['quantity'];
                         $product->save();
@@ -3253,8 +3254,9 @@ public function getCreditCustomerMovements($customerId)
          $transactions = collect();
          
          // ===== 1. جلب فواتير البيع (من orders) =====
-         $ordersQuery = Order::whereBetween('created_at', [$today, $tomorrow])
-             ->with(['customer', 'createdBy'])
+        $ordersQuery = Order::whereBetween('created_at', [$today, $tomorrow])
+            ->with(['customer', 'createdBy'])
+            ->withCount('items')
              ->orderBy('created_at', 'desc');
          if ($mineOnly && $authUser) {
              $ordersQuery->where('created_by', $authUser->id);
@@ -3262,11 +3264,13 @@ public function getCreditCustomerMovements($customerId)
          $orders = $ordersQuery->get();
          
          foreach ($orders as $order) {
+            $statusKey = strtolower((string) ($order->status ?? ''));
+            $isReturnedSale = in_array($statusKey, ['cancelled', 'returned'], true);
              $transactions->push([
                  'id' => 'order_' . $order->id,
                  'transaction_id' => $order->id,
                  'type' => 'sale',
-                 'type_label' => 'فاتورة بيع',
+                'type_label' => $isReturnedSale ? 'مرجع مبيعات' : 'فاتورة بيع',
                  'reference_number' => $order->order_number,
                  'customer_id' => $order->customer_id,
                  'customer_name' => $order->customer?->name ?? $this->extractMetaFromNotes($order->notes)['customer_name'] ?? 'زبون عابر',
@@ -3276,17 +3280,19 @@ public function getCreditCustomerMovements($customerId)
                  'due_amount' => (float) $order->due_amount,
                  'cashier_name' => $order->createdBy?->username ?? $this->extractMetaFromNotes($order->notes)['cashier_name'] ?? '—',
                  'status' => $order->status,
-                 'items_count' => $order->items->count(),
+                'items_count' => (int) ($order->items_count ?? 0),
                  'occurred_at' => $order->created_at->toISOString(),
                  'icon' => 'receipt',
-                 'color' => 'primary'
+                'color' => $isReturnedSale ? 'error' : 'primary',
+                'note' => $order->notes ?? null,
              ]);
          }
          
          // ===== 1.5. جلب مشتريات الموردين (من purchases) =====
          if (Schema::hasTable('purchases')) {
-             $purchasesQuery = Purchase::whereBetween('created_at', [$today, $tomorrow])
-                 ->with(['supplier', 'createdBy', 'items'])
+            $purchasesQuery = Purchase::whereBetween('created_at', [$today, $tomorrow])
+                ->with(['supplier', 'createdBy'])
+                ->withCount('items')
                  ->orderBy('created_at', 'desc');
              if ($mineOnly && $authUser && Schema::hasColumn('purchases', 'created_by')) {
                  $purchasesQuery->where('created_by', $authUser->id);
@@ -3297,11 +3303,13 @@ public function getCreditCustomerMovements($customerId)
                  $totalAmount = (float) ($purchase->total_amount ?? 0);
                  $paidAmount = (float) ($purchase->paid_amount ?? 0);
                  $remainingAmount = (float) ($purchase->remaining_amount ?? max(0, $totalAmount - $paidAmount));
+                $statusKey = strtolower((string) ($purchase->status ?? ''));
+                $isReturnedPurchase = $statusKey === 'returned';
                  $transactions->push([
                      'id' => 'purchase_' . $purchase->id,
                      'transaction_id' => $purchase->id,
                      'type' => 'purchase',
-                     'type_label' => 'فاتورة شراء',
+                    'type_label' => $isReturnedPurchase ? 'مرجع مشتريات' : 'فاتورة شراء',
                      'reference_number' => $purchase->invoice_number ?? ('PO-' . $purchase->id),
                      'customer_id' => $purchase->supplier_id,
                      'customer_name' => $purchase->supplier?->name ?? 'مورد',
@@ -3311,10 +3319,10 @@ public function getCreditCustomerMovements($customerId)
                      'due_amount' => max(0, $remainingAmount),
                      'cashier_name' => $purchase->createdBy?->username ?? '—',
                      'status' => $purchase->status ?? 'completed',
-                     'items_count' => $purchase->items->count(),
+                    'items_count' => (int) ($purchase->items_count ?? 0),
                      'occurred_at' => optional($purchase->created_at)->toISOString(),
                      'icon' => 'local_shipping',
-                     'color' => 'warning'
+                    'color' => $isReturnedPurchase ? 'error' : 'warning'
                  ]);
              }
          }
@@ -3629,6 +3637,23 @@ if (Schema::hasTable('staff_activities')) {
                     'message' => 'تم إلغاء الطلب (لا يوجد مبلغ مسترد)',
                     'data' => $order
                 ]);
+            }
+
+            // إعادة الكميات للمخزون عند الإرجاع الكامل.
+            // ملاحظة: order_items يعتمد غالبًا item_id (polymorphic) وليس product_id.
+            $order->loadMissing('items');
+            foreach ($order->items as $item) {
+                $productId = $item->product_id ?? $item->item_id;
+                $product = Product::find($productId);
+                if (!$product) {
+                    continue;
+                }
+                $returnQty = max(0.0, (float) ($item->quantity ?? 0));
+                if ($returnQty <= 0.00001) {
+                    continue;
+                }
+                $product->stock = (float) $product->stock + $returnQty;
+                $product->save();
             }
     
             $treasury = Treasury::first();

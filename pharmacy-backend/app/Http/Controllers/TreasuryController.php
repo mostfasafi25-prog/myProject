@@ -176,12 +176,17 @@ class TreasuryController extends Controller
                 ]);
             }
             
+            $cash = (float) ($treasury->balance_cash ?? $treasury->balance ?? 0);
+            $app = (float) ($treasury->balance_app ?? 0);
+            $computedBalance = round($cash + $app, 2);
+
             return response()->json([
                 'success' => true,
                 'data' => [
-                    'balance' => $treasury->balance,
-                    'balance_cash' => $treasury->balance_cash ?? $treasury->balance,
-                    'balance_app' => $treasury->balance_app ?? 0,
+                    // Always return total as cash + app to avoid stale balance column mismatches.
+                    'balance' => $computedBalance,
+                    'balance_cash' => $cash,
+                    'balance_app' => $app,
                     'total_income' => $treasury->total_income,
                     'total_expenses' => $treasury->total_expenses,
                     'exists' => true,
@@ -906,69 +911,96 @@ public function resetEverything(Request $request)
             'purchases_count' => \App\Models\Purchase::count(),
             'treasury_balance' => Treasury::sum('balance') ?? 0,
             'suppliers_count' => \App\Models\Supplier::count(),
+            'customers_count' => \App\Models\Customer::count(),
+            'users_count' => \App\Models\User::count(),
         ];
 
         DB::beginTransaction();
 
-        // 1. حذف عناصر الطلبات أولاً
-        \App\Models\OrderItem::query()->delete();
-        
-        // 2. حذف الطلبات
-        \App\Models\Order::query()->delete();
-        
-        // 3. حذف عناصر المشتريات
-        \App\Models\PurchaseItem::query()->delete();
-        
-        // 4. حذف المشتريات
-        \App\Models\Purchase::query()->delete();
-        
-        // 5. حذف معاملات الخزنة
-        TreasuryTransaction::query()->delete();
-
-        // 6. تصفير الخزنة
-        $treasury = Treasury::first();
-        if ($treasury) {
-            $treasury->balance_cash = 0;
-            $treasury->balance_app = 0;
-            $treasury->balance = 0;
-            $treasury->total_income = 0;
-            $treasury->total_expenses = 0;
-            $treasury->save();
-        }
-
-        // 7. حذف ربط الأقسام بالأصناف
-        if (\Schema::hasTable('category_product')) {
-            DB::table('category_product')->delete();
-        }
-
-        // 8. حذف الأصناف والأقسام بالكامل
-        \App\Models\Product::query()->delete();
-        \App\Models\Category::query()->delete();
-
-        // 9. تصفير الموردين بالكامل
-        \App\Models\Supplier::query()->delete();
-
-        // 10. تنظيف جداول مساندة (إن كانت موجودة)
-        if (\Schema::hasTable('staff_activities')) {
-            \App\Models\StaffActivity::query()->delete();
-        }
-        if (\Schema::hasTable('system_notifications')) {
-            \App\Models\SystemNotification::query()->delete();
-        }
-
-        // 11. إبقاء حسابات الإدارة فقط (admin / super_admin)
+        // حفظ مستخدم الأدمن الذي سنُبقيه للدخول بعد التصفير
+        $adminToKeep = null;
         if (\Schema::hasTable('users')) {
-            DB::table('users')
-                ->whereNotIn('role', ['admin', 'super_admin'])
-                ->whereRaw('LOWER(COALESCE(username, "")) <> ?', ['admin'])
-                ->delete();
+            $authUserId = (int) ($request->user()?->id ?? 0);
+            if ($authUserId > 0) {
+                $adminToKeep = DB::table('users')
+                    ->where('id', $authUserId)
+                    ->whereIn('role', ['admin', 'super_admin'])
+                    ->first();
+            }
+            if (!$adminToKeep) {
+                $adminToKeep = DB::table('users')
+                    ->whereRaw('LOWER(COALESCE(username, "")) = ?', ['admin'])
+                    ->first();
+            }
+            if (!$adminToKeep) {
+                $adminToKeep = DB::table('users')
+                    ->whereIn('role', ['admin', 'super_admin'])
+                    ->orderBy('id')
+                    ->first();
+            }
+        }
+
+        // حذف الجداول التابعة أولاً لضمان عدم تعارض المفاتيح الأجنبية
+        if (\Schema::hasTable('meal_order_item_options')) DB::table('meal_order_item_options')->delete();
+        if (\Schema::hasTable('order_item_options')) DB::table('order_item_options')->delete();
+        if (\Schema::hasTable('meal_order_items')) DB::table('meal_order_items')->delete();
+        if (\Schema::hasTable('purchase_returns')) DB::table('purchase_returns')->delete();
+        if (\Schema::hasTable('customer_credit_movements')) DB::table('customer_credit_movements')->delete();
+        if (\Schema::hasTable('cashier_shift_closes')) DB::table('cashier_shift_closes')->delete();
+        if (\Schema::hasTable('salary_payments')) DB::table('salary_payments')->delete();
+        if (\Schema::hasTable('staff_activities')) DB::table('staff_activities')->delete();
+        if (\Schema::hasTable('system_notifications')) DB::table('system_notifications')->delete();
+        if (\Schema::hasTable('inventory_logs')) DB::table('inventory_logs')->delete();
+        if (\Schema::hasTable('system_settings')) DB::table('system_settings')->delete();
+
+        if (\Schema::hasTable('order_items')) DB::table('order_items')->delete();
+        if (\Schema::hasTable('orders')) DB::table('orders')->delete();
+        if (\Schema::hasTable('purchase_items')) DB::table('purchase_items')->delete();
+        if (\Schema::hasTable('purchases')) DB::table('purchases')->delete();
+        if (\Schema::hasTable('treasury_transactions')) DB::table('treasury_transactions')->delete();
+
+        if (\Schema::hasTable('category_product')) DB::table('category_product')->delete();
+        if (\Schema::hasTable('products')) DB::table('products')->delete();
+        if (\Schema::hasTable('categories')) DB::table('categories')->delete();
+
+        // المطلوب من المستخدم: تصفير الموردين والزبائن الآجل بالكامل
+        if (\Schema::hasTable('suppliers')) DB::table('suppliers')->delete();
+        if (\Schema::hasTable('customers')) DB::table('customers')->delete();
+
+        // تصفير/إعادة إنشاء الخزنة
+        if (\Schema::hasTable('treasury')) {
+            DB::table('treasury')->delete();
+            DB::table('treasury')->insert([
+                'name' => 'الخزنة الرئيسية',
+                'balance' => 0,
+                'balance_cash' => 0,
+                'balance_app' => 0,
+                'total_income' => 0,
+                'total_expenses' => 0,
+                'is_active' => true,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+
+        // الإبقاء فقط على حساب الأدمن (الاسم/كلمة السر كما هي) وحذف كل بقية المستخدمين
+        if (\Schema::hasTable('users')) {
+            if ($adminToKeep) {
+                DB::table('users')->where('id', '!=', $adminToKeep->id)->delete();
+            } else {
+                // fallback آمن: لا نحذف المستخدمين إذا لم نحدد حساب أدمن للحفاظ على إمكانية الدخول
+                Log::warning('resetEverything: skipped users cleanup because no admin user was resolved.');
+            }
+        }
+        if (\Schema::hasTable('personal_access_tokens')) {
+            DB::table('personal_access_tokens')->delete();
         }
 
         DB::commit();
 
         return response()->json([
             'success' => true,
-            'message' => '✅ تم تصفير النظام بالكامل',
+            'message' => '✅ تم تصفير النظام بالكامل مع الإبقاء على حساب الأدمن فقط',
             'stats_before_reset' => $stats,
             'current_status' => [
                 'الطلبات' => 0,
@@ -978,6 +1010,7 @@ public function resetEverything(Request $request)
                 'الأصناف' => 0,
                 'الأقسام' => 0,
                 'الموردين' => 0,
+                'الزبائن_الآجل' => 0,
             ]
         ]);
 
@@ -1016,10 +1049,223 @@ public function resetSuppliers(Request $request)
     }
 }
 
+/**
+ * تصفير قاعدة البيانات بالكامل (مثل migrate:fresh) مع الاحتفاظ بالسوبر أدمن فقط
+ */
+public function resetDatabaseFresh(Request $request)
+{
+    try {
+        // التحقق من صلاحيات السوبر أدمن
+        if (!in_array($request->user()?->role, ['super_admin'], true)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'غير مصرح: فقط السوبر أدمن يمكنه تنفيذ هذه العملية'
+            ], 403);
+        }
 
+        // تسجيل الإحصائيات قبل التصفير
+        $stats = [
+            'orders_count' => \App\Models\Order::count(),
+            'products_count' => \App\Models\Product::count(),
+            'categories_count' => \App\Models\Category::count(),
+            'suppliers_count' => \App\Models\Supplier::count(),
+            'customers_count' => \App\Models\Customer::count(),
+            'purchases_count' => \App\Models\Purchase::count(),
+            'transactions_count' => TreasuryTransaction::count(),
+            'treasury_balance' => Treasury::sum('balance') ?? 0,
+            'users_count' => \App\Models\User::count(),
+        ];
 
+        DB::beginTransaction();
 
+        // حفظ بيانات السوبر أدمن
+        $superAdmins = \App\Models\User::where('role', 'super_admin')->get()->toArray();
 
+        // 1. حذف عناصر الوجبات (إذا وجدت)
+        if (\Schema::hasTable('meal_order_item_options')) {
+            DB::table('meal_order_item_options')->delete();
+        }
+        if (\Schema::hasTable('order_item_options')) {
+            DB::table('order_item_options')->delete();
+        }
+        if (\Schema::hasTable('meal_options')) {
+            DB::table('meal_options')->delete();
+        }
+        if (\Schema::hasTable('meal_order_items')) {
+            DB::table('meal_order_items')->delete();
+        }
+        if (\Schema::hasTable('meal_ingredients')) {
+            DB::table('meal_ingredients')->delete();
+        }
+        if (\Schema::hasTable('meal_product_ingredients')) {
+            DB::table('meal_product_ingredients')->delete();
+        }
+        if (\Schema::hasTable('saved_meals')) {
+            DB::table('saved_meals')->delete();
+        }
+        if (\Schema::hasTable('meals')) {
+            DB::table('meals')->delete();
+        }
+        if (\Schema::hasTable('meal_preparations')) {
+            DB::table('meal_preparations')->delete();
+        }
+        if (\Schema::hasTable('quick_meals')) {
+            DB::table('quick_meals')->delete();
+        }
+        if (\Schema::hasTable('recipes')) {
+            DB::table('recipes')->delete();
+        }
+        if (\Schema::hasTable('recipe_ingredients')) {
+            DB::table('recipe_ingredients')->delete();
+        }
+        if (\Schema::hasTable('prepared_meals')) {
+            DB::table('prepared_meals')->delete();
+        }
+
+        // 2. حذف مرتجعات المشتريات
+        if (\Schema::hasTable('purchase_returns')) {
+            DB::table('purchase_returns')->delete();
+        }
+
+        // 3. حذف حركات ائتمان الزبائن
+        if (\Schema::hasTable('customer_credit_movements')) {
+            DB::table('customer_credit_movements')->delete();
+        }
+
+        // 4. حذف إقفال الورديات
+        if (\Schema::hasTable('cashier_shift_closes')) {
+            DB::table('cashier_shift_closes')->delete();
+        }
+
+        // 5. حذف سجل النشاطات
+        if (\Schema::hasTable('staff_activities')) {
+            DB::table('staff_activities')->delete();
+        }
+
+        // 6. حذف الإشعارات
+        if (\Schema::hasTable('system_notifications')) {
+            DB::table('system_notifications')->delete();
+        }
+
+        // 7. حذف إعدادات النظام
+        if (\Schema::hasTable('system_settings')) {
+            DB::table('system_settings')->delete();
+        }
+
+        // 8. حذف عناصر الطلبات
+        \App\Models\OrderItem::query()->delete();
+        
+        // 9. حذف الطلبات
+        \App\Models\Order::query()->delete();
+        
+        // 10. حذف عناصر المشتريات
+        \App\Models\PurchaseItem::query()->delete();
+        
+        // 11. حذف المشتريات
+        \App\Models\Purchase::query()->delete();
+        
+        // 12. حذف معاملات الخزنة
+        TreasuryTransaction::query()->delete();
+
+        // 13. حذف سجل الجرد
+        if (\Schema::hasTable('inventory_logs')) {
+            DB::table('inventory_logs')->delete();
+        }
+
+        // 14. تصفير الخزنة
+        Treasury::query()->delete();
+
+        // 15. حذف ربط الأقسام بالأصناف
+        if (\Schema::hasTable('category_product')) {
+            DB::table('category_product')->delete();
+        }
+
+        // 16. حذف الأصناف والأقسام
+        \App\Models\Product::query()->delete();
+        \App\Models\Category::query()->delete();
+
+        // 17. حذف الزبائن
+        \App\Models\Customer::query()->delete();
+
+        // 18. حذف الموردين
+        \App\Models\Supplier::query()->delete();
+
+        // 19. حذف الموظفين والمرتبات
+        if (\Schema::hasTable('salary_payments')) {
+            DB::table('salary_payments')->delete();
+        }
+        if (\Schema::hasTable('employees')) {
+            DB::table('employees')->delete();
+        }
+
+        // 20. حذف جميع المستخدمين ماعدا السوبر أدمن
+        \App\Models\User::where('role', '!=', 'super_admin')->delete();
+
+        // 21. إعادة تعيين auto increment للجداول
+        $tables = [
+            'orders', 'order_items', 'products', 'categories', 'suppliers',
+            'customers', 'purchases', 'purchase_items', 'treasury',
+            'treasury_transactions', 'users'
+        ];
+        foreach ($tables as $table) {
+            if (\Schema::hasTable($table)) {
+                DB::statement("ALTER TABLE {$table} AUTO_INCREMENT = 1");
+            }
+        }
+
+        // 22. إنشاء خزنة جديدة فارغة
+        Treasury::create([
+            'name' => 'الخزنة الرئيسية',
+            'balance' => 0,
+            'balance_cash' => 0,
+            'balance_app' => 0,
+            'total_income' => 0,
+            'total_expenses' => 0,
+            'is_active' => true
+        ]);
+
+        DB::commit();
+
+        ActivityLogger::log($request, [
+            'action_type' => 'database_reset_fresh',
+            'entity_type' => 'system',
+            'description' => 'تصفير كامل لقاعدة البيانات (migrate:fresh) مع الاحتفاظ بالسوبر أدمن',
+            'meta' => [
+                'stats_before_reset' => $stats,
+                'super_admins_preserved' => count($superAdmins),
+            ],
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => '✅ تم تصفير قاعدة البيانات بالكامل بنجاح',
+            'stats_before_reset' => $stats,
+            'current_status' => [
+                'الطلبات' => 0,
+                'المنتجات' => 0,
+                'الأقسام' => 0,
+                'الموردين' => 0,
+                'الزبائن' => 0,
+                'المشتريات' => 0,
+                'المعاملات' => 0,
+                'رصيد_الخزنة' => 0,
+                'المستخدمين' => count($superAdmins),
+            ],
+            'note' => 'تم الاحتفاظ بحسابات السوبر أدمن فقط'
+        ]);
+
+    } catch (\Exception $e) {
+        DB::rollBack();
+        \Log::error('Error in resetDatabaseFresh', [
+            'message' => $e->getMessage(),
+            'trace' => $e->getTraceAsString()
+        ]);
+        return response()->json([
+            'success' => false,
+            'message' => '❌ فشل تصفير قاعدة البيانات: ' . $e->getMessage(),
+        ], 500);
+    }
+}
 
 /**
  * إضافة مبلغ إلى الخزنة (سحب/إيداع بسيط)

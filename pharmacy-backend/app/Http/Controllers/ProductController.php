@@ -27,11 +27,13 @@ class ProductController extends Controller
             $categoryId = $request->get('category_id');
             $stockStatus = $request->get('stock_status');
             
-            \Log::info('📦 Products API Called', [
-                'category_id' => $categoryId,
-                'search' => $search,
-                'stock_status' => $stockStatus
-            ]);
+            if (config('app.debug')) {
+                \Log::info('📦 Products API Called', [
+                    'category_id' => $categoryId,
+                    'search' => $search,
+                    'stock_status' => $stockStatus
+                ]);
+            }
             
             // ⭐⭐ التعديل: استبدل category بـ categories
             $query = Product::query()
@@ -122,11 +124,13 @@ class ProductController extends Controller
                     return $productArray;
                 });
                 
-                \Log::info('📊 Products for POS', [
-                    'total' => $products->total(),
-                    'split_part' => $splitPart,
-                    'for_pos' => true
-                ]);
+                if (config('app.debug')) {
+                    \Log::info('📊 Products for POS', [
+                        'total' => $products->total(),
+                        'split_part' => $splitPart,
+                        'for_pos' => true
+                    ]);
+                }
                 
                 return response()->json([
                     'success' => true,
@@ -143,11 +147,13 @@ class ProductController extends Controller
             }
             
             // الوضع العادي (للوحة الإدارة والمشتريات)
-            \Log::info('📊 Products Query Result', [
-                'total' => $products->total(),
-                'category_filter' => $categoryId,
-                'first_product_categories' => $products->first()?->categories ?? []
-            ]);
+            if (config('app.debug')) {
+                \Log::info('📊 Products Query Result', [
+                    'total' => $products->total(),
+                    'category_filter' => $categoryId,
+                    'first_product_categories' => $products->first()?->categories ?? []
+                ]);
+            }
             
             return response()->json([
                 'success' => true,

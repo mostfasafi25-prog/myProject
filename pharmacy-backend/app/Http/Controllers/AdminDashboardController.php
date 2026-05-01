@@ -21,8 +21,19 @@ class AdminDashboardController extends Controller
 
         $today = Carbon::today()->toDateString();
         $monthStart = Carbon::now()->startOfMonth()->toDateString();
+        $monthEnd = Carbon::now()->endOfMonth()->toDateString();
         $daysInMonth = Carbon::now()->daysInMonth; // عدد أيام الشهر الحالي
         $monthlyDays = [];
+        $dailyAgg = Order::query()
+            ->whereBetween('created_at', [$monthStart . ' 00:00:00', $monthEnd . ' 23:59:59'])
+            ->selectRaw('DATE(created_at) as day, COUNT(*) as cnt, COALESCE(SUM(total), 0) as sales')
+            ->groupBy('day')
+            ->pluck('sales', 'day');
+        $dailyCount = Order::query()
+            ->whereBetween('created_at', [$monthStart . ' 00:00:00', $monthEnd . ' 23:59:59'])
+            ->selectRaw('DATE(created_at) as day, COUNT(*) as cnt')
+            ->groupBy('day')
+            ->pluck('cnt', 'day');
         
         for ($d = 1; $d <= $daysInMonth; $d++) {
             $day = Carbon::now()->startOfMonth()->addDays($d - 1);
@@ -30,8 +41,8 @@ class AdminDashboardController extends Controller
             $monthlyDays[] = [
                 'date' => $ds,
                 'label' => $day->format('j'),
-                'sales' => (float) Order::whereDate('created_at', $ds)->sum('total'),
-                'count' => Order::whereDate('created_at', $ds)->count(),
+                'sales' => (float) ($dailyAgg[$ds] ?? 0),
+                'count' => (int) ($dailyCount[$ds] ?? 0),
             ];
         }
       

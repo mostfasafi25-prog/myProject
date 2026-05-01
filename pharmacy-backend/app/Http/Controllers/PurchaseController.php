@@ -201,17 +201,20 @@ class PurchaseController extends Controller
                 $query->where('category_id', $request->category_id);
             }
             $purchases = $query->orderBy('purchase_date', 'desc')->get();
+            $expenseTotalsByPurchase = TreasuryTransaction::query()
+                ->whereIn('purchase_id', $purchases->pluck('id')->filter()->values())
+                ->where('type', 'expense')
+                ->where('category', 'other_expense')
+                ->selectRaw('purchase_id, SUM(amount) as total_amount')
+                ->groupBy('purchase_id')
+                ->pluck('total_amount', 'purchase_id');
 
             $totalAmount = $purchases->sum('total_amount');
             $totalItems = $purchases->sum(fn ($p) => $p->items->sum('quantity'));
             $days = $startDate->diffInDays($endDate) + 1;
 
-            $purchasesData = $purchases->map(function ($purchase) {
-                $otherExpensesTotal = (float) TreasuryTransaction::query()
-                    ->where('purchase_id', $purchase->id)
-                    ->where('type', 'expense')
-                    ->where('category', 'other_expense')
-                    ->sum('amount');
+            $purchasesData = $purchases->map(function ($purchase) use ($expenseTotalsByPurchase) {
+                $otherExpensesTotal = (float) ($expenseTotalsByPurchase[$purchase->id] ?? 0);
                 $items = $purchase->items->map(function ($item) {
                     return [
                         'category_id' => null,
@@ -1453,10 +1456,14 @@ private function getPurchasesByDay($period = 'month')
     public function returnItems(Request $request, Purchase $purchase)
     {
         try {
-            if (!Schema::hasTable('purchase_returns') || !Schema::hasColumn('purchase_items', 'returned_quantity')) {
+            if (
+                !Schema::hasTable('purchase_returns')
+                || !Schema::hasColumn('purchase_items', 'returned_quantity')
+                || !Schema::hasColumn('purchase_items', 'remaining_quantity')
+            ) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'ميزة الإرجاع غير مفعلة بعد. يرجى تشغيل ترحيلات قاعدة البيانات (migrations) الخاصة بالإرجاع.'
+                    'message' => 'ميزة الإرجاع غير مكتملة. يرجى تشغيل ترحيلات قاعدة البيانات (migrations) الخاصة بالإرجاع والمخزون المتبقي.'
                 ], 422);
             }
     
@@ -1492,12 +1499,14 @@ private function getPurchasesByDay($period = 'month')
                     continue;
                 }
     
-                // Check if return quantity is valid
-                $availableQty = $purchaseItem->quantity - ($purchaseItem->returned_quantity ?? 0);
+                // Check if return quantity is valid.
+                // Return is allowed only from unsold quantity (remaining layer),
+                // not from original purchased quantity.
+                $availableQty = max(0.0, (float) ($purchaseItem->remaining_quantity ?? 0));
                 if ($item['quantity'] > $availableQty) {
                     return response()->json([
                         'success' => false,
-                        'message' => "الكمية المطلوب إرجاعها للصنف {$purchaseItem->product_name} أكبر من المتاح"
+                        'message' => "الكمية المطلوب إرجاعها للصنف {$purchaseItem->product_name} أكبر من الكمية المتاحة غير المباعة"
                     ], 422);
                 }
     
@@ -1677,10 +1686,14 @@ private function getPurchasesByDay($period = 'month')
     public function fullReturn(Request $request, Purchase $purchase)
     {
         try {
-            if (!Schema::hasTable('purchase_returns') || !Schema::hasColumn('purchase_items', 'returned_quantity')) {
+            if (
+                !Schema::hasTable('purchase_returns')
+                || !Schema::hasColumn('purchase_items', 'returned_quantity')
+                || !Schema::hasColumn('purchase_items', 'remaining_quantity')
+            ) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'ميزة الإرجاع غير مفعلة بعد. يرجى تشغيل ترحيلات قاعدة البيانات (migrations) الخاصة بالإرجاع.'
+                    'message' => 'ميزة الإرجاع غير مكتملة. يرجى تشغيل ترحيلات قاعدة البيانات (migrations) الخاصة بالإرجاع والمخزون المتبقي.'
                 ], 422);
             }
 
@@ -1711,8 +1724,8 @@ private function getPurchasesByDay($period = 'month')
 
             // Process all items
             foreach ($purchase->items as $item) {
-                // Get remaining quantity to return
-                $remainingQty = $item->quantity - ($item->returned_quantity ?? 0);
+                // Get remaining quantity to return (unsold only).
+                $remainingQty = max(0.0, (float) ($item->remaining_quantity ?? 0));
                 
                 if ($remainingQty > 0) {
                     // Update product stock
@@ -1739,6 +1752,18 @@ private function getPurchasesByDay($period = 'month')
             }
 
             if (count($returnedItems) === 0) {
+                DB::rollBack();
+                return response()->json([
+                    'success' => false,
+                    'message' => 'لا توجد كميات متاحة لإرجاع هذه الفاتورة'
+                ], 422);
+            }
+
+            // Full return is applied only to currently available unsold quantities.
+            $returnedTotal = array_reduce($returnedItems, function ($sum, $row) {
+                return $sum + (float) ($row['total'] ?? 0);
+            }, 0.0);
+            if ($returnedTotal <= 0.00001) {
                 DB::rollBack();
                 return response()->json([
                     'success' => false,

@@ -90,7 +90,6 @@ Route::middleware($apiAuthMiddleware)->group(function () {
     Route::apiResource('products', ProductController::class);
     Route::post('/products/stocktake/apply', [ProductController::class, 'applyStocktake']);
     Route::get('/products/stats', [ProductController::class, 'stats']);
-    Route::post('/products/reset-all', [ProductController::class, 'resetAllProducts']);
     /** أقسام المبيعات/المشتريات للكاشير والواجهات — بيانات حقيقية من الجدول */
     Route::get('/categories/main', [CategoryController::class, 'getMainCategoriesSimple']);
     Route::get('/orders/stats/summary', [OrderController::class, 'stats']);
@@ -131,7 +130,6 @@ Route::get('/orders/today-transactions', [OrderController::class, 'getTodayTrans
     Route::get('/treasury-balance', [TreasuryController::class, 'getSimpleBalance']);
     Route::post('/treasury-init', [TreasuryController::class, 'initTreasury']);
     Route::post('/system/reset-all', [TreasuryController::class, 'resetEverything']);
-    Route::post('/system/reset-suppliers', [TreasuryController::class, 'resetSuppliers']);
       // ✅ أضف هاتين السطرين هنا
       Route::post('/treasury/manual-deposit', [TreasuryController::class, 'manualDeposit']);
       Route::post('/treasury/manual-withdraw', [TreasuryController::class, 'manualWithdraw']);
