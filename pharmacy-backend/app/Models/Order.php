@@ -21,6 +21,7 @@ protected $guarded = [];
         'tax' => 'decimal:2',
         'total' => 'decimal:2',
         'paid_amount' => 'decimal:2',
+        'refunded_amount' => 'decimal:2',
         'due_amount' => 'decimal:2',
         'total_profit' => 'decimal:2',  // ✅ أضف هذا السطر
         'total_cost' => 'decimal:2',  // ✅ أضف هذا السطر

@@ -4,13 +4,10 @@ namespace App\Http\Controllers;
 
 use App\Models\Order;
 use App\Models\OrderItem;
-use App\Models\MealOrderItem;
 use App\Models\Product;
 use App\Models\Purchase;
 use App\Models\PurchaseItem;
 use App\Models\Customer;
-use App\Models\SavedMeal;
-use App\Models\Meal;
 use App\Models\Category;
 use App\Models\User;
 use App\Models\Treasury;
@@ -21,10 +18,9 @@ use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Carbon\Carbon;
-use App\Models\MealIngredient;
-use App\Models\MealProductIngredient;
 use App\Models\CustomerCreditMovement;
 use App\Models\SystemNotification;
+use App\Models\SystemSetting;
 use App\Models\StaffActivity;
 use App\Support\ActivityLogger;
 
@@ -69,6 +65,51 @@ class OrderController extends Controller
             ], 422);
         }
 
+        // ——— التحقق من الحسابات: مجموع الأسطر = المجموع الفرعي، والإجمالي = بعد الخصم (بدون ضريبة) ———
+        $computedSubtotal = 0.0;
+        foreach ($request->items as $item) {
+            $computedSubtotal += (float) ($item['quantity'] ?? 0) * (float) ($item['price'] ?? 0);
+        }
+        $computedSubtotal = round($computedSubtotal, 2);
+        $clientSubtotal = round((float) $request->subtotal, 2);
+        if (abs($computedSubtotal - $clientSubtotal) > 0.05) {
+            return response()->json([
+                'success' => false,
+                'message' => 'المجموع الفرعي لا يطابق بنود الفاتورة. أعد تحميل الصفحة وحاول مجدداً.',
+                'error_code' => 'SUBTOTAL_MISMATCH',
+                'data' => [
+                    'computed_subtotal' => $computedSubtotal,
+                    'client_subtotal' => $clientSubtotal,
+                ],
+            ], 422);
+        }
+
+        $discountVal = round((float) ($request->discount ?? 0), 2);
+        $preTaxTotal = round($computedSubtotal - $discountVal, 2);
+        if ($preTaxTotal < -0.02) {
+            return response()->json([
+                'success' => false,
+                'message' => 'قيمة الخصم أكبر من مجموع البنود.',
+            ], 422);
+        }
+
+        $taxVal = 0.0;
+        $computedTotal = round($preTaxTotal, 2);
+        $clientTotal = round((float) $request->total, 2);
+        if (abs($computedTotal - $clientTotal) > 0.05) {
+            return response()->json([
+                'success' => false,
+                'message' => 'إجمالي الفاتورة غير متسق مع المجموع الفرعي بعد الخصم.',
+                'error_code' => 'TOTAL_MISMATCH',
+                'data' => [
+                    'computed_total' => $computedTotal,
+                    'client_total' => $clientTotal,
+                ],
+            ], 422);
+        }
+
+        $totalAmount = $computedTotal;
+
         $paymentValidation = $this->validateAndNormalizeSalePaymentBreakdown(
             strtolower((string) ($request->payment_method ?? 'cash')),
             (float) ($request->paid_amount ?? 0),
@@ -86,6 +127,14 @@ class OrderController extends Controller
             'cash_amount' => $paymentValidation['cash_amount'],
             'app_amount' => $paymentValidation['app_amount'],
         ]);
+
+        $pmNorm = strtolower((string) ($request->payment_method ?? 'cash'));
+        if ($pmNorm !== 'credit' && (float) $request->paid_amount > $totalAmount + 0.02) {
+            return response()->json([
+                'success' => false,
+                'message' => 'المبلغ المدفوع أكبر من إجمالي الفاتورة.',
+            ], 422);
+        }
 
         try {
             DB::beginTransaction();
@@ -153,6 +202,7 @@ class OrderController extends Controller
                 // تكلفة السطر من طبقات الشراء (FIFO) حتى لا تختلط الكميات القديمة مع الأسعار الجديدة.
                 $fifoCost = $this->consumePurchaseLayersForSale($product, $stockDeductQty);
                 $lineTotalCost = (float) ($fifoCost['total_cost'] ?? 0);
+                $fifoLayersSnapshot = $fifoCost['layers'] ?? [];
                 $unitCost = $requestedQty > 0 ? ($lineTotalCost / $requestedQty) : 0.0;
                 if ($unitCost <= 0.00001) {
                     $unitCost = $product->unitCostForSaleType($saleType);
@@ -175,35 +225,39 @@ class OrderController extends Controller
                     'unit_cost' => $unitCost,
                     'line_total_cost' => $lineTotalCost,
                     'item_profit' => $itemProfit,
-                    'unit_profit' => $unitProfit
+                    'unit_profit' => $unitProfit,
+                    'fifo_layers' => $fifoLayersSnapshot,
                 ];
             }
+
+            // تعديل الربح الإجمالي ليعكس خصم الفاتورة (قبل الضريبة) — متوافق مع واجهة الكاشير
+            $profitScale = $computedSubtotal > 0.00001
+                ? max(0.0, min(1.0, $preTaxTotal / $computedSubtotal))
+                : 1.0;
+            $totalProfit = round($totalProfit * $profitScale, 2);
 
             // 2. إنشاء رقم الطلب
             $orderCount = Order::whereDate('created_at', today())->count();
             $orderNumber = 'ORD-' . date('Ymd') . '-' . str_pad($orderCount + 1, 4, '0', STR_PAD_LEFT);
 
-            // 3. حساب المبلغ المستحق والحالة
-          // 3. حساب المبلغ المستحق والحالة
-$totalAmount = $request->total;
+            // 3. حساب المبلغ المستحق والحالة ($totalAmount مُتحقَّق مسبقاً من بنود الفاتورة)
+            // ✅ معالجة خاصة للبيع الآجل
+            if ($request->payment_method === 'credit') {
+                $paidAmount = 0;
+                $dueAmount = $totalAmount;
+                $status = 'pending';
+            } else {
+                $paidAmount = (float) $request->paid_amount;
+                $dueAmount = max(0, round($totalAmount - $paidAmount, 2));
 
-// ✅ معالجة خاصة للبيع الآجل
-if ($request->payment_method === 'credit') {
-    $paidAmount = 0;
-    $dueAmount = $totalAmount;
-    $status = 'pending';
-} else {
-    $paidAmount = $request->paid_amount;
-    $dueAmount = max(0, $totalAmount - $paidAmount);
-    
-    $status = 'pending';
-    if ($paidAmount >= $totalAmount) {
-        $status = 'paid';
-    } elseif ($paidAmount > 0) {
-        $status = 'partially_paid';
-    }
-}
-$status = $this->normalizeOrderStatusForStorage($status);
+                $status = 'pending';
+                if ($paidAmount + 0.005 >= $totalAmount) {
+                    $status = 'paid';
+                } elseif ($paidAmount > 0) {
+                    $status = 'partially_paid';
+                }
+            }
+            $status = $this->normalizeOrderStatusForStorage($status);
 
             // 4. إنشاء الطلب
             $resolvedCreatedBy = auth()->id();
@@ -232,16 +286,17 @@ $status = $this->normalizeOrderStatusForStorage($status);
             $order = Order::create([
                 'order_number' => $orderNumber,
                 'customer_id' => $request->customer_id,
-                'subtotal' => $request->subtotal,
-                'discount' => $request->discount ?? 0,
+                'subtotal' => $computedSubtotal,
+                'discount' => $discountVal,
+                'tax' => $taxVal,
                 'total' => $totalAmount,
                 'paid_amount' => $paidAmount,
                 'due_amount' => $dueAmount,
-'payment_method' => $this->normalizePaymentMethod($request->payment_method),
+                'payment_method' => $this->normalizePaymentMethod($request->payment_method),
                 'status' => $status,
                 'notes' => $orderNotes,
                 'created_by' => $resolvedCreatedBy,
-                'total_profit' => $totalProfit, 
+                'total_profit' => $totalProfit,
             ]);
             $this->recordCreditSaleMovement($order, $dueAmount, $request->input('customer_name'));
 
@@ -251,9 +306,11 @@ $status = $this->normalizeOrderStatusForStorage($status);
                 $quantity = (float) ($productInfo['quantity'] ?? 0);
                 $stockDeductQuantity = (float) ($productInfo['stock_deduct_quantity'] ?? $quantity);
                 $unitPrice = (float) ($productInfo['unit_price'] ?? 0);
-                
+                $scaledItemProfit = round((float) ($productInfo['item_profit'] ?? 0) * $profitScale, 2);
+                $scaledUnitProfit = $quantity > 0.00001 ? round($scaledItemProfit / $quantity, 4) : 0.0;
+
                 // إنشاء عنصر الطلب
-                OrderItem::create([
+                $orderItemPayload = [
                     'order_id' => $order->id,
                     'item_id' => $product->id,
                     'item_type' => Product::class,
@@ -261,11 +318,21 @@ $status = $this->normalizeOrderStatusForStorage($status);
                     'quantity' => $quantity,
                     'unit_price' => $unitPrice,
                     'unit_cost' => $productInfo['unit_cost'],
-                    'unit_profit' => $productInfo['unit_profit'],
-                    'item_profit' => $productInfo['item_profit'],
+                    'unit_profit' => $scaledUnitProfit,
+                    'item_profit' => $scaledItemProfit,
                     'discount' => 0,
                     'total_price' => $quantity * $unitPrice,
-                ]);
+                ];
+                if (Schema::hasColumn('order_items', 'fifo_cost_layers')) {
+                    $orderItemPayload['fifo_cost_layers'] = $productInfo['fifo_layers'] ?? [];
+                }
+                if (Schema::hasColumn('order_items', 'inventory_pieces_sold')) {
+                    $orderItemPayload['inventory_pieces_sold'] = $stockDeductQty;
+                }
+                if (Schema::hasColumn('order_items', 'sale_quantity_returned')) {
+                    $orderItemPayload['sale_quantity_returned'] = 0;
+                }
+                OrderItem::create($orderItemPayload);
 
                 // خصم من المخزون
                 $product->stock -= $stockDeductQuantity;
@@ -286,7 +353,11 @@ $status = $this->normalizeOrderStatusForStorage($status);
             }
 
             try {
-                if (Schema::hasTable('system_notifications')) {
+                $saleActor = $request->user();
+                $isCashierActor = $saleActor && in_array((string) ($saleActor->role ?? ''), ['cashier', 'super_cashier'], true);
+                $allowCashierSaleNotify = $this->adminPrefCashierSaleNotificationsEnabled();
+                $shouldNotifySale = (!$isCashierActor || $allowCashierSaleNotify) && Schema::hasTable('system_notifications');
+                if ($shouldNotifySale) {
                     SystemNotification::create([
                         'type' => 'sale',
                         'pref_category' => 'sale',
@@ -383,1596 +454,10 @@ private function normalizePaymentMethod($method)
 /**
  * تقرير تفصيلي للوجبات المباعة
  */
-public function mealSalesReport(Request $request)
-{
-    try {
-        $validator = Validator::make($request->all(), [
-            'start_date' => 'nullable|date',
-            'end_date' => 'nullable|date|after_or_equal:start_date',
-            'meal_id' => 'nullable|exists:meals,id',
-            'category_id' => 'nullable|exists:categories,id',
-            'type' => 'nullable|in:ready,ingredient_based,all',
-            'limit' => 'nullable|integer|min:1|max:500'
-        ]);
-
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'errors' => $validator->errors()
-            ], 422);
-        }
-
-        $startDate = $request->get('start_date', now()->startOfMonth());
-        $endDate = $request->get('end_date', now()->endOfMonth());
-        $type = $request->get('type', 'all');
-        $limit = $request->get('limit', 100);
-
-        // ===== 1. الوجبات الجاهزة (READY-) =====
-        $readyMealsQuery = MealOrderItem::whereHas('order', function ($query) use ($startDate, $endDate) {
-            $query->where('order_number', 'LIKE', 'READY-%')
-                  ->whereBetween('orders.created_at', [$startDate, $endDate]);
-        })->with(['meal.category']);
-
-        // ===== 2. الوجبات بالمكونات (MEAL-) =====
-        $ingredientMealsQuery = MealOrderItem::whereHas('order', function ($query) use ($startDate, $endDate) {
-            $query->where('order_number', 'LIKE', 'MEAL-%')
-                  ->whereBetween('orders.created_at', [$startDate, $endDate]);
-        })->with(['meal.category']);
-
-        // فلترة حسب الوجبة
-        if ($request->has('meal_id')) {
-            $readyMealsQuery->where('meal_id', $request->meal_id);
-            $ingredientMealsQuery->where('meal_id', $request->meal_id);
-        }
-
-        // فلترة حسب القسم
-        if ($request->has('category_id')) {
-            $readyMealsQuery->whereHas('meal', function ($q) use ($request) {
-                $q->where('category_id', $request->category_id);
-            });
-            $ingredientMealsQuery->whereHas('meal', function ($q) use ($request) {
-                $q->where('category_id', $request->category_id);
-            });
-        }
-
-        // جلب البيانات حسب النوع
-        $readyMeals = collect();
-        $ingredientMeals = collect();
-
-        if ($type === 'all' || $type === 'ready') {
-            $readyMeals = $readyMealsQuery->orderBy('created_at', 'desc')
-                                         ->limit($limit)
-                                         ->get()
-                                         ->map(function ($item) {
-                                            return [
-                                                'id' => $item->id,
-                                                'order_id' => $item->order_id,
-                                                'order_number' => $item->order->order_number ?? 'N/A',
-                                                'meal_id' => $item->meal_id,
-                                                'meal_name' => $item->meal_name,
-                                                'category' => $item->meal->category->name ?? 'غير محدد',
-                                                'quantity' => $item->quantity,
-                                                'unit_price' => $item->unit_price,
-                                                'unit_cost' => $item->unit_cost,
-                                                'unit_profit' => $item->unit_profit,
-                                                'total_price' => $item->total_price,
-                                                'total_profit' => $item->total_profit,
-                                                'sold_at' => $item->created_at->format('Y-m-d H:i'),
-                                                'type' => 'ready',
-                                            ];
-                                         });
-        }
-
-        if ($type === 'all' || $type === 'ingredient_based') {
-            $ingredientMeals = $ingredientMealsQuery->orderBy('created_at', 'desc')
-                                                   ->limit($limit)
-                                                   ->get()
-                                                   ->map(function ($item) {
-                                                      return [
-                                                          'id' => $item->id,
-                                                          'order_id' => $item->order_id,
-                                                          'order_number' => $item->order->order_number ?? 'N/A',
-                                                          'meal_id' => $item->meal_id,
-                                                          'meal_name' => $item->meal_name,
-                                                          'category' => $item->meal->category->name ?? 'غير محدد',
-                                                          'quantity' => $item->quantity,
-                                                          'unit_price' => $item->unit_price,
-                                                          'unit_cost' => $item->unit_cost,
-                                                          'unit_profit' => $item->unit_profit,
-                                                          'total_price' => $item->total_price,
-                                                          'total_profit' => $item->total_profit,
-                                                          'sold_at' => $item->created_at->format('Y-m-d H:i'),
-                                                          'type' => 'ingredient_based',
-                                                      ];
-                                                   });
-        }
-
-        // دمج النتائج
-        $allSales = $readyMeals->concat($ingredientMeals)->sortByDesc('sold_at')->values();
-
-        // ===== إحصائيات عامة =====
-        $totalReadyMeals = $readyMeals->sum('quantity');
-        $totalIngredientMeals = $ingredientMeals->sum('quantity');
-        
-        $totalReadyRevenue = $readyMeals->sum('total_price');
-        $totalIngredientRevenue = $ingredientMeals->sum('total_price');
-        
-        $totalReadyProfit = $readyMeals->sum('total_profit');
-        $totalIngredientProfit = $ingredientMeals->sum('total_profit');
-
-        // ===== أفضل الوجبات مبيعاً =====
-        $topSellingMeals = MealOrderItem::join('orders', 'meal_order_items.order_id', '=', 'orders.id')
-            ->whereBetween('orders.created_at', [$startDate, $endDate])
-            ->select([
-                'meal_order_items.meal_id',
-                'meal_order_items.meal_name',
-                DB::raw('SUM(meal_order_items.quantity) as total_quantity_sold'),
-                DB::raw('COUNT(DISTINCT meal_order_items.order_id) as total_orders'),
-                DB::raw('SUM(meal_order_items.total_price) as total_revenue'),
-                DB::raw('SUM(meal_order_items.total_profit) as total_profit'),
-                DB::raw('AVG(meal_order_items.unit_price) as avg_price'),
-                DB::raw('AVG(meal_order_items.unit_profit) as avg_profit')
-            ])
-            ->groupBy('meal_order_items.meal_id', 'meal_order_items.meal_name')
-            ->orderBy('total_quantity_sold', 'desc')
-            ->limit(10)
-            ->get();
-
-        // ===== المبيعات حسب اليوم =====
-        $dailySales = MealOrderItem::join('orders', 'meal_order_items.order_id', '=', 'orders.id')
-            ->whereBetween('orders.created_at', [$startDate, $endDate])
-            ->select([
-                DB::raw('DATE(orders.created_at) as date'),
-                DB::raw('SUM(CASE WHEN orders.order_number LIKE "READY-%" THEN meal_order_items.quantity ELSE 0 END) as ready_meals_count'),
-                DB::raw('SUM(CASE WHEN orders.order_number LIKE "MEAL-%" THEN meal_order_items.quantity ELSE 0 END) as ingredient_meals_count'),
-                DB::raw('SUM(CASE WHEN orders.order_number LIKE "READY-%" THEN meal_order_items.total_price ELSE 0 END) as ready_revenue'),
-                DB::raw('SUM(CASE WHEN orders.order_number LIKE "MEAL-%" THEN meal_order_items.total_price ELSE 0 END) as ingredient_revenue'),
-                DB::raw('SUM(meal_order_items.total_price) as total_revenue'),
-                DB::raw('SUM(meal_order_items.total_profit) as total_profit')
-            ])
-            ->groupBy('date')
-            ->orderBy('date', 'desc')
-            ->get();
-
-        // ===== إحصائيات حسب القسم =====
-        $categoryStats = MealOrderItem::join('orders', 'meal_order_items.order_id', '=', 'orders.id')
-            ->join('meals', 'meal_order_items.meal_id', '=', 'meals.id')
-            ->join('categories', 'meals.category_id', '=', 'categories.id')
-            ->whereBetween('orders.created_at', [$startDate, $endDate])
-            ->select([
-                'categories.id as category_id',
-                'categories.name as category_name',
-                DB::raw('COUNT(DISTINCT meal_order_items.meal_id) as meals_count'),
-                DB::raw('SUM(meal_order_items.quantity) as total_quantity_sold'),
-                DB::raw('SUM(meal_order_items.total_price) as total_revenue'),
-                DB::raw('SUM(meal_order_items.total_profit) as total_profit'),
-                DB::raw('AVG(meal_order_items.unit_profit) as avg_profit_per_meal')
-            ])
-            ->groupBy('categories.id', 'categories.name')
-            ->orderBy('total_quantity_sold', 'desc')
-            ->get();
-
-        return response()->json([
-            'success' => true,
-            'message' => 'تم جلب تقرير المبيعات بنجاح',
-            'data' => [
-                'period' => [
-                    'start_date' => $startDate,
-                    'end_date' => $endDate,
-                    'days' => now()->parse($startDate)->diffInDays(now()->parse($endDate)) + 1
-                ],
-                'summary' => [
-                    'total_meals_sold' => $totalReadyMeals + $totalIngredientMeals,
-                    'total_revenue' => $totalReadyRevenue + $totalIngredientRevenue,
-                    'total_profit' => $totalReadyProfit + $totalIngredientProfit,
-                    'profit_margin' => ($totalReadyRevenue + $totalIngredientRevenue) > 0 
-                        ? round((($totalReadyProfit + $totalIngredientProfit) / ($totalReadyRevenue + $totalIngredientRevenue)) * 100, 2) 
-                        : 0,
-                    
-                    'ready_meals' => [
-                        'count' => $totalReadyMeals,
-                        'revenue' => $totalReadyRevenue,
-                        'profit' => $totalReadyProfit,
-                        'percentage_of_total' => ($totalReadyMeals + $totalIngredientMeals) > 0 
-                            ? round(($totalReadyMeals / ($totalReadyMeals + $totalIngredientMeals)) * 100, 2) 
-                            : 0
-                    ],
-                    
-                    'ingredient_meals' => [
-                        'count' => $totalIngredientMeals,
-                        'revenue' => $totalIngredientRevenue,
-                        'profit' => $totalIngredientProfit,
-                        'percentage_of_total' => ($totalReadyMeals + $totalIngredientMeals) > 0 
-                            ? round(($totalIngredientMeals / ($totalReadyMeals + $totalIngredientMeals)) * 100, 2) 
-                            : 0
-                    ]
-                ],
-                'sales_details' => $allSales,
-                'top_selling_meals' => $topSellingMeals,
-                'daily_sales' => $dailySales,
-                'category_stats' => $categoryStats,
-                'filters_applied' => [
-                    'start_date' => $startDate,
-                    'end_date' => $endDate,
-                    'meal_id' => $request->get('meal_id'),
-                    'category_id' => $request->get('category_id'),
-                    'type' => $type
-                ]
-            ]
-        ]);
-
-    } catch (\Exception $e) {
-        Log::error('Meal sales report error: ' . $e->getMessage());
-        
-        return response()->json([
-            'success' => false,
-            'message' => 'حدث خطأ في جلب تقرير المبيعات',
-            'error' => env('APP_DEBUG') ? $e->getMessage() : null
-        ], 500);
-    }
-}
-
 
 /**
  * تقرير المبيعات المفصل (يومي، أسبوعي، شهري)
  */
-public function salesDetailedReport(Request $request)
-{
-    try {
-        $validator = Validator::make($request->all(), [
-            'period' => 'required|in:daily,weekly,monthly,custom',
-            'start_date' => 'required_if:period,custom|date',
-            'end_date' => 'required_if:period,custom|date|after_or_equal:start_date',
-            'type' => 'nullable|in:all,meal,product',
-            'category_id' => 'nullable|exists:categories,id',
-            'meal_id' => 'nullable|exists:meals,id',
-            'product_id' => 'nullable|exists:products,id',
-            'customer_id' => 'nullable|exists:customers,id',
-            'employee_id' => 'nullable|exists:customers,id',
-            'payment_method' => 'nullable|in:cash,app,card,bank_transfer,mixed',
-            'status' => 'nullable|in:paid,partially_paid,pending,cancelled,returned'
-        ]);
-
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'خطأ في البيانات المدخلة',
-                'errors' => $validator->errors()
-            ], 422);
-        }
-
-        // تحديد نطاق التاريخ حسب الفترة
-        $startDate = null;
-        $endDate = null;
-        $period = $request->period;
-
-        switch ($period) {
-            case 'daily':
-                $startDate = now()->startOfDay();
-                $endDate = now()->endOfDay();
-                break;
-            case 'weekly':
-                $startDate = now()->startOfWeek();
-                $endDate = now()->endOfWeek();
-                break;
-            case 'monthly':
-                $startDate = now()->startOfMonth();
-                $endDate = now()->endOfMonth();
-                break;
-            case 'custom':
-                $startDate = Carbon::parse($request->start_date)->startOfDay();
-                $endDate = Carbon::parse($request->end_date)->endOfDay();
-                break;
-        }
-
-        // بناء الاستعلام الأساسي للطلبات
-        $ordersQuery = Order::with([
-            'customer:id,name,phone',
-            'createdBy:id,username'
-        ])
-        ->whereBetween('created_at', [$startDate, $endDate]);
-
-        // تطبيق الفلاتر
-        if ($request->type && $request->type !== 'all') {
-            if ($request->type === 'meal') {
-                $ordersQuery->where('order_number', 'LIKE', 'MEAL-%');
-            } elseif ($request->type === 'product') {
-                $ordersQuery->where('order_number', 'LIKE', 'ORD-%');
-            }
-        }
-
-        if ($request->customer_id) {
-            $ordersQuery->where('customer_id', $request->customer_id);
-        }
-
-        if ($request->employee_id) {
-            $ordersQuery->where('created_by', $request->employee_id);
-        }
-
-        if ($request->payment_method) {
-            $ordersQuery->where('payment_method', $request->payment_method);
-        }
-
-        if ($request->status) {
-            $ordersQuery->where('status', $request->status);
-        }
-
-        // فلترة حسب المنتج/الوجبة (يتطلب join)
-        if ($request->meal_id || $request->product_id || $request->category_id) {
-            $ordersQuery->where(function($query) use ($request) {
-                if ($request->meal_id) {
-                    $query->whereHas('mealItems', function($q) use ($request) {
-                        $q->where('meal_id', $request->meal_id);
-                    });
-                }
-                
-                if ($request->product_id) {
-                    $query->whereHas('items', function($q) use ($request) {
-                        $q->where('product_id', $request->product_id);
-                    });
-                }
-                
-                if ($request->category_id) {
-                    $query->whereHas('mealItems.meal', function($q) use ($request) {
-                        $q->where('category_id', $request->category_id);
-                    })->orWhereHas('items.product', function($q) use ($request) {
-                        $q->where('category_id', $request->category_id);
-                    });
-                }
-            });
-        }
-
-        // جلب الطلبات
-        $orders = $ordersQuery->orderBy('created_at', 'desc')->get();
-
-        // تجهيز بيانات الطلبات التفصيلية
-        $ordersData = [];
-        $totalSales = 0;
-        $totalProfit = 0;
-        $totalCost = 0;
-        $totalOrders = $orders->count();
-
-        foreach ($orders as $order) {
-            $orderItems = [];
-            $orderTotal = $order->total;
-            $orderProfit = $order->total_profit ?? 0;
-            $orderCost = $orderTotal - $orderProfit; // سيُحدَّث لاحقاً من الأصناف إن وُجدت
-
-            $totalSales += $orderTotal;
-            $totalProfit += $orderProfit;
-
-            // جلب عناصر الوجبات إذا كانت موجودة
-            if (str_starts_with($order->order_number, 'MEAL-')) {
-                $mealItems = MealOrderItem::where('order_id', $order->id)
-                    ->with([
-                        'meal.category',
-                        'meal.productIngredients.product',
-                        'selectedOptions'
-                    ])
-                    ->get();
-
-                foreach ($mealItems as $item) {
-                    $meal = $item->meal;
-                    // مكونات من meal_ingredients (أقسام)
-                    $ingredients = MealIngredient::where('meal_id', $item->meal_id)
-                        ->with('category')
-                        ->get();
-
-                    $ingredientsList = [];
-                    foreach ($ingredients as $ing) {
-                        if ($ing->category) {
-                            // إذا كانت تكلفة المكون صفراً، استخدم تكلفة القسم (المخزون)
-                            $unitCost = (float) ($ing->unit_cost ?? 0);
-                            if ($unitCost <= 0 && ($ing->category->cost_price ?? 0) > 0) {
-                                $unitCost = (float) $ing->category->cost_price;
-                            }
-                            $qtyUsed = (float) $ing->quantity * $item->quantity;
-                            $ingTotalCost = $qtyUsed * $unitCost;
-                            $ingredientsList[] = [
-                                'name' => $ing->category->name,
-                                'quantity_used' => $qtyUsed,
-                                'unit' => $ing->unit ?? 'قطعة',
-                                'unit_cost' => $unitCost,
-                                'total_cost' => $ingTotalCost
-                            ];
-                        }
-                    }
-
-                    // مكونات من أصناف المشتريات (وجبات من إنشاء من منتجات)
-                    $productIngredients = $meal ? MealProductIngredient::where('meal_id', $meal->id)->with('product')->get() : collect();
-                    foreach ($productIngredients as $pi) {
-                        $qty = (float) $pi->quantity_used * $item->quantity;
-                        $product = $pi->product;
-                        $unitCost = $product ? (float) ($product->cost_price ?? $product->purchase_price ?? 0) : 0;
-                        $ingredientsList[] = [
-                            'name' => $product ? $product->name : 'صنف #' . $pi->product_id,
-                            'quantity_used' => $qty,
-                            'unit' => $product && $product->unit ? $product->unit : 'وحدة',
-                            'unit_cost' => $unitCost,
-                            'total_cost' => $qty * $unitCost
-                        ];
-                    }
-
-                    // جلب الخيارات المختارة
-                    $selectedOptions = [];
-                    if ($item->selectedOptions) {
-                        foreach ($item->selectedOptions as $option) {
-                            $selectedOptions[] = [
-                                'id' => $option->id,
-                                'name' => $option->name,
-                                'price' => $option->price,
-                                'additional_cost' => $option->additional_cost ?? 0,
-                                'group_name' => $option->group_name ?? 'أخرى'
-                            ];
-                        }
-                    }
-
-                    // كلف الصنف = مجموع تكلفة المكونات إن وُجد، وإلا من (البيع - الربح)
-                    $itemsCostFromIngredients = array_sum(array_column($ingredientsList, 'total_cost'));
-                    $itemTotalCost = $itemsCostFromIngredients > 0
-                        ? $itemsCostFromIngredients
-                        : ($item->total_price - $item->total_profit);
-
-                    $orderItems[] = [
-                        'type' => 'meal',
-                        'id' => $item->meal_id,
-                        'name' => $item->meal_name,
-                        'quantity' => $item->quantity,
-                        'unit_price' => $item->unit_price,
-                        'unit_cost' => $item->unit_cost,
-                        'unit_profit' => $item->unit_profit,
-                        'total_price' => $item->total_price,
-                        'total_profit' => $item->total_profit,
-                        'total_cost' => $itemTotalCost,
-                        'category' => $item->meal->category->name ?? 'غير محدد',
-                        'ingredients' => $ingredientsList,
-                        'ingredients_count' => count($ingredientsList),
-                        'options' => $selectedOptions, // ✅ إضافة الخيارات هنا
-                        'has_options' => count($selectedOptions) > 0 // ✅ مؤشر إذا كان هناك خيارات
-                    ];
-                }
-            } 
-            // جلب عناصر المنتجات
-            else {
-                $productItems = OrderItem::where('order_id', $order->id)
-                    ->with('product.category')
-                    ->get();
-
-                foreach ($productItems as $item) {
-                    $orderItems[] = [
-                        'type' => 'product',
-                        'id' => $item->product_id,
-                        'name' => $item->product_name,
-                        'quantity' => $item->quantity,
-                        'unit_price' => $item->unit_price,
-                        'unit_cost' => $item->unit_cost,
-                        'unit_profit' => $item->unit_profit,
-                        'total_price' => $item->total_price,
-                        'total_profit' => $item->item_profit,
-                        'total_cost' => $item->total_price - ($item->item_profit ?? 0),
-                        'category' => $item->product->category->name ?? 'غير محدد',
-                        'ingredients' => [],
-                        'options' => [], // المنتجات العادية ليس لها خيارات
-                        'has_options' => false
-                    ];
-                }
-            }
-
-            // إجمالي تكلفة الطلب = مجموع تكلفة الأصناف (ليتطابق مع كلف المكونات)
-            $orderCost = array_sum(array_column($orderItems, 'total_cost'));
-            $totalCost += $orderCost;
-
-            // التحقق من وجود أي عنصر في الطلب يحتوي على خيارات
-            $orderHasOptions = collect($orderItems)->contains(function($item) {
-                return count($item['options']) > 0;
-            });
-
-            $ordersData[] = [
-                'id' => $order->id,
-                'order_number' => $order->order_number,
-                'date' => $order->created_at->format('Y-m-d'),
-                'time' => $order->created_at->format('H:i:s'),
-                'datetime' => $order->created_at->format('Y-m-d H:i:s'),
-                'customer' => $order->customer ? $order->customer->name : 'زبون نقدي',
-                'customer_phone' => $order->customer ? $order->customer->phone : null,
-                'employee' => $order->createdBy ? $order->createdBy->name : 'غير معروف',
-                'subtotal' => $order->subtotal,
-                'discount' => $order->discount,
-                'total' => $order->total,
-                'paid' => $order->paid_amount,
-                'due' => $order->due_amount,
-                'payment_method' => $order->payment_method,
-                'status' => $order->status,
-                'total_cost' => $orderCost,
-                'total_profit' => $orderProfit,
-                'profit_margin' => $orderTotal > 0 ? round(($orderProfit / $orderTotal) * 100, 2) : 0,
-                'items_count' => count($orderItems),
-                'items' => $orderItems,
-                'has_options' => $orderHasOptions, // ✅ إضافة مؤشر على مستوى الطلب
-                'notes' => $order->notes
-            ];
-        }
-
-        // ===== إحصائيات المبيعات =====
-        $stats = [
-            'period' => [
-                'type' => $period,
-                'start_date' => $startDate->format('Y-m-d'),
-                'end_date' => $endDate->format('Y-m-d'),
-                'days' => $startDate->diffInDays($endDate) + 1
-            ],
-            'summary' => [
-                'total_orders' => $totalOrders,
-                'total_sales' => $totalSales,
-                'total_profit' => $totalProfit,
-                'total_cost' => $totalCost,
-                'average_order_value' => $totalOrders > 0 ? round($totalSales / $totalOrders, 2) : 0,
-                'average_profit_per_order' => $totalOrders > 0 ? round($totalProfit / $totalOrders, 2) : 0,
-                'profit_margin' => $totalSales > 0 ? round(($totalProfit / $totalSales) * 100, 2) : 0,
-                'collection_rate' => $totalSales > 0 ? round((array_sum(array_column($ordersData, 'paid')) / $totalSales) * 100, 2) : 0,
-                'pending_amount' => array_sum(array_column($ordersData, 'due'))
-            ]
-        ];
-
-        // ===== تحليل حسب طريقة الدفع =====
-        $paymentMethodStats = $orders->groupBy('payment_method')->map(function($group) {
-            return [
-                'count' => $group->count(),
-                'total' => $group->sum('total'),
-                'paid' => $group->sum('paid_amount'),
-                'due' => $group->sum('due_amount'),
-                'profit' => $group->sum('total_profit')
-            ];
-        });
-
-        if (!$orders instanceof \Illuminate\Support\Collection) {
-            $orders = collect($orders);
-        }
-        
-        // ===== تحليل حسب الحالة =====
-        $statusStats = $orders->groupBy('status')->map(function($group) {
-            return [
-                'count' => $group->count(),
-                'total' => $group->sum('total'),
-                'paid' => $group->sum('paid_amount'),
-                'due' => $group->sum('due_amount'),
-                'profit' => $group->sum('total_profit')
-            ];
-        });
-
-        // ===== أفضل العملاء =====
-        $topCustomers = $orders->groupBy('customer_id')
-            ->map(function($group) {
-                $customer = $group->first()->customer;
-                return [
-                    'customer_id' => $group->first()->customer_id,
-                    'customer_name' => $customer ? $customer->name : 'زبون نقدي',
-                    'orders_count' => $group->count(),
-                    'total_spent' => $group->sum('total'),
-                    'total_paid' => $group->sum('paid_amount'),
-                    'total_due' => $group->sum('due_amount'),
-                    'total_profit' => $group->sum('total_profit')
-                ];
-            })
-            ->sortByDesc('total_spent')
-            ->values()
-            ->take(10);
-
-        // ===== أفضل الموظفين =====
-        $topEmployees = $orders->groupBy('created_by')
-            ->map(function($group) {
-                $employee = $group->first()->createdBy;
-                return [
-                    'employee_id' => $group->first()->created_by,
-                    'employee_name' => $employee ? $employee->name : 'غير معروف',
-                    'orders_count' => $group->count(),
-                    'total_sales' => $group->sum('total'),
-                    'total_profit' => $group->sum('total_profit'),
-                    'average_sale' => round($group->sum('total') / $group->count(), 2)
-                ];
-            })
-            ->sortByDesc('total_sales')
-            ->values()
-            ->take(10);
-
-        // ===== أفضل المنتجات/الوجبات (مع الخيارات) =====
-        $topItems = collect();
-
-        // جمع الوجبات مع تضمين الخيارات
-        $mealItems = MealOrderItem::whereHas('order', function($q) use ($startDate, $endDate) {
-            $q->whereBetween('created_at', [$startDate, $endDate]);
-        })
-        ->with('selectedOptions') // ✅ جلب الخيارات
-        ->select([
-            'meal_id',
-            'meal_name',
-            DB::raw('SUM(quantity) as total_quantity'),
-            DB::raw('SUM(total_price) as total_revenue'),
-            DB::raw('SUM(total_profit) as total_profit'),
-            DB::raw('COUNT(DISTINCT order_id) as orders_count')
-        ])
-        ->groupBy('meal_id', 'meal_name')
-        ->get()
-        ->map(function($item) {
-            // ✅ التحقق مما إذا كان لهذه الوجبة خيارات في أي طلب
-            $hasOptions = $item->selectedOptions && $item->selectedOptions->count() > 0;
-            
-            return [
-                'type' => 'meal',
-                'id' => $item->meal_id,
-                'name' => $item->meal_name,
-                'total_quantity' => $item->total_quantity,
-                'total_revenue' => $item->total_revenue,
-                'total_profit' => $item->total_profit,
-                'orders_count' => $item->orders_count,
-                'has_options' => $hasOptions // ✅ إضافة مؤشر
-            ];
-        });
-
-        // جمع المنتجات
-        $productItems = OrderItem::whereHas('order', function($q) use ($startDate, $endDate) {
-            $q->whereBetween('created_at', [$startDate, $endDate]);
-        })
-        ->where('item_type', 'App\\Models\\Product')
-        ->select([
-            'item_id',
-            'item_name as product_name',
-            DB::raw('SUM(quantity) as total_quantity'),
-            DB::raw('SUM(total_price) as total_revenue'),
-            DB::raw('SUM(item_profit) as total_profit'),
-            DB::raw('COUNT(DISTINCT order_id) as orders_count')
-        ])
-        ->groupBy('item_id', 'item_name')
-        ->get()
-        ->map(function($item) {
-            return [
-                'type' => 'product',
-                'id' => $item->item_id,
-                'name' => $item->product_name,
-                'total_quantity' => $item->total_quantity,
-                'total_revenue' => $item->total_revenue,
-                'total_profit' => $item->total_profit,
-                'orders_count' => $item->orders_count,
-                'has_options' => false // المنتجات ليس لها خيارات
-            ];
-        });
-
-        $topItems = $mealItems->concat($productItems)
-            ->sortByDesc('total_revenue')
-            ->values()
-            ->take(20);
-
-        return response()->json([
-            'success' => true,
-            'message' => 'تم جلب تقرير المبيعات بنجاح',
-            'data' => [
-                'filters' => $request->all(),
-                'stats' => $stats,
-                'orders' => $ordersData,
-                'analysis' => [
-                    'by_payment_method' => $paymentMethodStats,
-                    'by_status' => $statusStats,
-                    'top_customers' => $topCustomers,
-                    'top_employees' => $topEmployees,
-                    'top_items' => $topItems
-                ],
-                'charts' => [
-                    'daily' => $this->getDailySalesChart($startDate, $endDate),
-                    'hourly' => $this->getHourlySalesChart($startDate, $endDate)
-                ]
-            ]
-        ]);
-
-    } catch (\Exception $e) {
-        Log::error('خطأ في تقرير المبيعات: ' . $e->getMessage(), [
-            'trace' => $e->getTraceAsString()
-        ]);
-
-        return response()->json([
-            'success' => false,
-            'message' => 'حدث خطأ في جلب تقرير المبيعات',
-            'error' => config('app.debug') ? $e->getMessage() : null
-        ], 500);
-    }
-}
-/**
- * دالة مساعدة: المبيعات اليومية
- */
-private function getDailySalesChart($startDate, $endDate)
-{
-    try {
-        $dailySales = Order::whereBetween('created_at', [$startDate, $endDate])
-            ->select([
-                DB::raw('DATE(created_at) as date'),
-                DB::raw('COUNT(*) as orders_count'),
-                DB::raw('SUM(total) as total_sales'),
-                DB::raw('SUM(total_profit) as total_profit')
-            ])
-            ->groupBy('date')
-            ->orderBy('date')
-            ->get();
-
-        // التحقق من أن النتيجة Collection
-        if (!$dailySales instanceof \Illuminate\Support\Collection) {
-            $dailySales = collect($dailySales);
-        }
-
-        return [
-            'labels' => $dailySales->pluck('date')->values()->toArray(),
-            'datasets' => [
-                [
-                    'label' => 'عدد الطلبات',
-                    'data' => $dailySales->pluck('orders_count')->values()->toArray()
-                ],
-                [
-                    'label' => 'المبيعات',
-                    'data' => $dailySales->pluck('total_sales')->values()->map(function($value) {
-                        return (float) $value;
-                    })->toArray()
-                ],
-                [
-                    'label' => 'الأرباح',
-                    'data' => $dailySales->pluck('total_profit')->values()->map(function($value) {
-                        return (float) $value;
-                    })->toArray()
-                ]
-            ]
-        ];
-    } catch (\Exception $e) {
-        \Log::error('خطأ في getDailySalesChart: ' . $e->getMessage());
-        
-        // إرجاع بيانات افتراضية في حالة الخطأ
-        return [
-            'labels' => [],
-            'datasets' => [
-                ['label' => 'عدد الطلبات', 'data' => []],
-                ['label' => 'المبيعات', 'data' => []],
-                ['label' => 'الأرباح', 'data' => []]
-            ]
-        ];
-    }
-}
-
-/**
- * دالة مساعدة: المبيعات حسب الساعة
- */
-private function getHourlySalesChart($startDate, $endDate)
-{
-    try {
-        $hourlySales = Order::whereBetween('created_at', [$startDate, $endDate])
-            ->select([
-                DB::raw('HOUR(created_at) as hour'),
-                DB::raw('COUNT(*) as orders_count'),
-                DB::raw('SUM(total) as total_sales')
-            ])
-            ->groupBy('hour')
-            ->orderBy('hour')
-            ->get();
-
-        // التحقق من أن النتيجة Collection
-        if (!$hourlySales instanceof \Illuminate\Support\Collection) {
-            $hourlySales = collect($hourlySales);
-        }
-
-        $hours = range(0, 23);
-        $salesData = array_fill(0, 24, 0);
-        $ordersData = array_fill(0, 24, 0);
-
-        foreach ($hourlySales as $sale) {
-            if (isset($sale->hour) && is_numeric($sale->hour) && $sale->hour >= 0 && $sale->hour <= 23) {
-                $salesData[(int)$sale->hour] = (float)($sale->total_sales ?? 0);
-                $ordersData[(int)$sale->hour] = (int)($sale->orders_count ?? 0);
-            }
-        }
-
-        return [
-            'labels' => $hours,
-            'datasets' => [
-                [
-                    'label' => 'المبيعات',
-                    'data' => $salesData
-                ],
-                [
-                    'label' => 'الطلبات',
-                    'data' => $ordersData
-                ]
-            ]
-        ];
-    } catch (\Exception $e) {
-        \Log::error('خطأ في getHourlySalesChart: ' . $e->getMessage());
-        
-        // إرجاع بيانات افتراضية في حالة الخطأ
-        return [
-            'labels' => range(0, 23),
-            'datasets' => [
-                ['label' => 'المبيعات', 'data' => array_fill(0, 24, 0)],
-                ['label' => 'الطلبات', 'data' => array_fill(0, 24, 0)]
-            ]
-        ];
-    }
-}
-/**
- * شراء أقسام فرعية (مشتريات)
- */
-public function purchaseCategories(Request $request)
-{
-    // ✅ الأهم: استقبال البيانات بشكل صحيح
-    $data = $request->json()->all();
-    
-    // إذا كانت البيانات فارغة، جرب request->all()
-    if (empty($data)) {
-        $data = $request->all();
-    }
-
-    // ✅ التحقق من البيانات
-    $validator = Validator::make($data, [
-        'items' => 'required|array|min:1',
-        'items.*.category_id' => 'required|exists:categories,id',
-        'items.*.quantity' => 'required|numeric|min:0.01',
-        'items.*.cost_price' => 'required|numeric|min:0',
-        'items.*.sale_price' => 'nullable|numeric|min:0',
-        'items.*.profit_margin' => 'nullable|numeric|min:0',
-        'payment_method' => 'required|in:cash,app,card,bank_transfer',
-        'paid_amount' => 'required|numeric|min:0',
-        'supplier_id' => 'nullable|exists:suppliers,id',
-        'invoice_number' => 'nullable|string|max:100',
-        'notes' => 'nullable|string|max:500',
-        'purchase_date' => 'nullable|date'
-    ]);
-
-    if ($validator->fails()) {
-        return response()->json([
-            'success' => false,
-            'message' => 'خطأ في البيانات المدخلة',
-            'errors' => $validator->errors(),
-            'received_data' => $data // 👈 هذا سيساعد في التشخيص
-        ], 422);
-    }
-
-    try {
-        DB::beginTransaction();
-
-        $totalAmount = 0;
-        $purchasedItems = [];
-        $purchaseDetails = [];
-
-        // 1. التحقق من البيانات وحساب الإجماليات
-        foreach ($data['items'] as $item) { // 👈 استخدم $data بدلاً من $request
-            $category = Category::find($item['category_id']);
-            
-            if (!$category) {
-                DB::rollBack();
-                return response()->json([
-                    'success' => false,
-                    'message' => 'القسم غير موجود: ' . $item['category_id']
-                ], 404);
-            }
-
-            // التأكد أن القسم فرعي (لديه parent)
-            if (!$category->parent_id) {
-                DB::rollBack();
-                return response()->json([
-                    'success' => false,
-                    'message' => 'لا يمكن شراء قسم رئيسي، يرجى اختيار قسم فرعي: ' . $category->name
-                ], 400);
-            }
-
-            $itemTotal = $item['cost_price'] * $item['quantity'];
-            $totalAmount += $itemTotal;
-
-            // حفظ بيانات قديمة للتقرير
-            $oldQuantity = $category->quantity;
-            $oldCostPrice = $category->cost_price;
-            $oldSalePrice = $category->sale_price;
-
-            $purchasedItems[] = [
-                'category' => $category,
-                'old_quantity' => $oldQuantity,
-                'old_cost_price' => $oldCostPrice,
-                'old_sale_price' => $oldSalePrice,
-                'quantity' => $item['quantity'],
-                'cost_price' => $item['cost_price'],
-                'sale_price' => $item['sale_price'] ?? null,
-                'profit_margin' => $item['profit_margin'] ?? null,
-                'item_total' => $itemTotal
-            ];
-        }
-
-        // 2. التحقق من رصيد الخزنة
-        $treasury = Treasury::first();
-        if (!$treasury) {
-            $treasury = Treasury::create([
-                'balance' => 0,
-                'balance_cash' => 0,
-                'balance_app' => 0,
-                'total_income' => 0,
-                'total_expenses' => 0,
-                'total_profit' => 0,
-            ]);
-        }
-
-        $paidAmount = $data['paid_amount']; // 👈 استخدم $data
-        // السماح بخصم الخزنة حتى لو أصبح الرصيد سالباً (يُسجَّل في المعاملات)
-
-        // 3. إنشاء رقم فاتورة الشراء
-        $purchaseCount = DB::table('category_purchases')->count() + 1;
-        $purchaseNumber = 'PUR-' . date('Ymd') . '-' . str_pad($purchaseCount, 4, '0', STR_PAD_LEFT);
-
-        // 4. تحديث الأقسام (إضافة الكمية وتحديث الأسعار)
-        foreach ($purchasedItems as $item) {
-            $category = $item['category'];
-            
-            // إضافة الكمية (زيادة)
-            $category->quantity += $item['quantity'];
-            
-            // تحديث سعر التكلفة (المتوسط المرجح)
-            $totalCost = ($category->cost_price * ($category->quantity - $item['quantity'])) + ($item['cost_price'] * $item['quantity']);
-            $category->cost_price = $totalCost / $category->quantity;
-            
-            // تحديث سعر البيع إذا تم توفيره
-            if ($item['sale_price'] !== null) {
-                $category->sale_price = $item['sale_price'];
-                $category->auto_calculate = false;
-            }
-            
-            // تحديث هامش الربح إذا تم توفيره
-            if ($item['profit_margin'] !== null) {
-                $category->profit_margin = $item['profit_margin'];
-            }
-            
-            // إعادة حساب القيم
-            $category->recalculateTotals();
-            $category->save();
-            
-            // تجهيز تفاصيل الشراء
-            $purchaseDetails[] = [
-                'category_id' => $category->id,
-                'category_name' => $category->name,
-                'old_quantity' => $item['old_quantity'],
-                'new_quantity' => $category->quantity,
-                'quantity_added' => $item['quantity'],
-                'old_cost_price' => $item['old_cost_price'],
-                'new_cost_price' => $category->cost_price,
-                'cost_price_paid' => $item['cost_price'],
-                'old_sale_price' => $item['old_sale_price'],
-                'new_sale_price' => $category->sale_price,
-                'subtotal' => $item['item_total']
-            ];
-        }
-
-        // 5. خصم المبلغ من الخزنة (كاش / تطبيق)
-        $pmCat = strtolower((string) ($data['payment_method'] ?? 'cash'));
-        $tCashCat = 0.0;
-        $tAppCat = 0.0;
-        if ($paidAmount > 0.00001) {
-            if ($pmCat === 'app') {
-                $tAppCat = round($paidAmount, 2);
-            } elseif (in_array($pmCat, ['cash', 'card', 'bank_transfer'], true)) {
-                $tCashCat = round($paidAmount, 2);
-            } else {
-                $tCashCat = round($paidAmount, 2);
-            }
-        }
-        $treasury->applyLiquidityDelta(-$tCashCat, -$tAppCat);
-        $treasury->total_expenses += $paidAmount;
-        $treasury->save();
-
-        // 6. تسجيل معاملة الخزنة
-        TreasuryTransaction::create([
-            'treasury_id' => $treasury->id,
-            'type' => 'expense',
-            'amount' => $paidAmount,
-            'description' => 'شراء مخزون للأقسام - فاتورة: ' . $purchaseNumber,
-            'category' => 'inventory_purchase',
-            'payment_method' => $data['payment_method'], // 👈 استخدم $data
-            'reference_id' => null,
-            'reference_type' => 'CategoryPurchase',
-            'transaction_date' => $data['purchase_date'] ?? now()->toDateString(),
-            'created_by' => auth()->id() ?? 1,
-            'notes' => $data['notes'] ?? null
-        ]);
-
-        DB::commit();
-
-        return response()->json([
-            'success' => true,
-            'message' => 'تم شراء الأقسام بنجاح',
-            'data' => [
-                'purchase_number' => $purchaseNumber,
-                'total_amount' => $totalAmount,
-                'paid_amount' => $paidAmount,
-                'due_amount' => $totalAmount - $paidAmount,
-                'payment_method' => $data['payment_method'],
-                'purchase_date' => $data['purchase_date'] ?? now()->format('Y-m-d'),
-                'items_count' => count($purchasedItems),
-                'treasury' => [
-                    'new_balance' => $treasury->balance,
-                    'amount_deducted' => $paidAmount
-                ],
-                'items' => $purchaseDetails
-            ]
-        ], 201);
-
-    } catch (\Exception $e) {
-        DB::rollBack();
-        Log::error('Purchase categories error: ' . $e->getMessage(), [
-            'request' => $data,
-            'trace' => $e->getTraceAsString()
-        ]);
-        
-        return response()->json([
-            'success' => false,
-            'message' => 'حدث خطأ أثناء شراء الأقسام',
-            'error' => env('APP_DEBUG') ? $e->getMessage() : null
-        ], 500);
-    }
-}
-
-
-    public function categoryPurchasesReport(Request $request)
-    {
-        try {
-            $validator = Validator::make($request->all(), [
-                'start_date' => 'nullable|date',
-                'end_date' => 'nullable|date|after_or_equal:start_date',
-                'category_id' => 'nullable|exists:categories,id'
-            ]);
-
-            if ($validator->fails()) {
-                return response()->json([
-                    'success' => false,
-                    'errors' => $validator->errors()
-                ], 422);
-            }
-
-            $startDate = $request->get('start_date', now()->startOfMonth());
-            $endDate = $request->get('end_date', now()->endOfMonth());
-
-            // هنا يمكنك جلب تقرير المشتريات من جدول category_purchases إذا كان موجوداً
-            // أو يمكنك تحليل حركات الخزنة
-
-            $treasuryTransactions = TreasuryTransaction::where('type', 'expense')
-                ->where('category', 'inventory_purchase')
-                ->whereBetween('transaction_date', [$startDate, $endDate])
-                ->when($request->category_id, function ($query) use ($request) {
-                    return $query->where('reference_id', $request->category_id)
-                                 ->where('reference_type', 'App\\Models\\Category');
-                })
-                ->orderBy('transaction_date', 'desc')
-                ->get();
-
-            $totalPurchases = $treasuryTransactions->sum('amount');
-            $totalTransactions = $treasuryTransactions->count();
-
-            return response()->json([
-                'success' => true,
-                'message' => 'تم جلب تقرير المشتريات بنجاح',
-                'data' => [
-                    'period' => [
-                        'start_date' => $startDate,
-                        'end_date' => $endDate
-                    ],
-                    'summary' => [
-                        'total_purchases' => $totalPurchases,
-                        'total_transactions' => $totalTransactions,
-                        'average_purchase' => $totalTransactions > 0 ? $totalPurchases / $totalTransactions : 0
-                    ],
-                    'transactions' => $treasuryTransactions,
-                    'filtered_by' => [
-                        'category_id' => $request->category_id
-                    ]
-                ]
-            ]);
-
-        } catch (\Exception $e) {
-            Log::error('Category purchases report error: ' . $e->getMessage());
-            
-            return response()->json([
-                'success' => false,
-                'message' => 'حدث خطأ في جلب تقرير المشتريات',
-                'error' => env('APP_DEBUG') ? $e->getMessage() : null
-            ], 500);
-        }
-    }
-
-
-
-
-
-
-public function sellReadyMeal(Request $request)
-{
-    $validator = Validator::make($request->json()->all(), [
-        'items' => 'required|array|min:1',
-        'items.*.meal_id' => 'required|exists:meals,id',
-        'items.*.quantity' => 'required|numeric|min:0.01',
-        'items.*.price' => 'nullable|numeric|min:0',
-        'items.*.options' => 'nullable|array', // ✅ إضافة التحقق من الخيارات
-        'items.*.options.*.id' => 'nullable|exists:meal_options,id',
-        'items.*.options.*.name' => 'nullable|string',
-        'items.*.options.*.price' => 'nullable|numeric|min:0',
-        'paid_amount' => 'nullable|numeric|min:0',
-        'customer_id' => 'nullable|exists:customers,id',
-        'payment_method' => 'nullable|in:cash,app,card,bank_transfer,mixed',
-        'cash_amount' => 'nullable|numeric|min:0',
-        'app_amount' => 'nullable|numeric|min:0',
-        'notes' => 'nullable|string'
-    ]);
-
-    if ($validator->fails()) {
-        return response()->json([
-            'success' => false,
-            'errors' => $validator->errors()
-        ], 422);
-    }
-
-    try {
-        DB::beginTransaction();
-
-        $totalAmount = 0;
-        $totalProfit = 0;
-        $totalCost = 0;
-        $orderItems = [];
-        $soldItemsCount = 0;
-
-        foreach ($request->json('items') as $item) {
-            $meal = Meal::find($item['meal_id']);
-            
-            if (!$meal) {
-                continue;
-            }
-            
-            // ✅ حساب سعر الوجبة مع الخيارات
-            $basePrice = $meal->sale_price;
-            $optionsTotal = 0;
-            $selectedOptions = [];
-            
-            if (!empty($item['options'])) {
-                foreach ($item['options'] as $optionData) {
-                    $optionsTotal += $optionData['price'] ?? 0;
-                    $selectedOptions[] = $optionData;
-                }
-            }
-            
-            // السعر النهائي = سعر الوجبة + مجموع أسعار الخيارات
-            $finalUnitPrice = $basePrice + $optionsTotal;
-            $price = $item['price'] ?? $finalUnitPrice; // استخدام السعر المرسل أو المحسوب
-            
-            $cost = $meal->cost_price ?? 0;
-            
-            $itemTotal = $price * $item['quantity'];
-            $itemCost = $cost * $item['quantity'];
-            $itemProfit = ($price - $cost) * $item['quantity'];
-            
-            $totalAmount += $itemTotal;
-            $totalCost += $itemCost;
-            $totalProfit += $itemProfit;
-            $soldItemsCount += $item['quantity'];
-            
-            // تخزين بيانات كاملة للعنصر مع الخيارات
-            $orderItems[] = [
-                'meal_id' => $meal->id,
-                'meal_name' => $meal->name,
-                'meal_code' => $meal->code,
-                'quantity' => $item['quantity'],
-                'unit_price' => $price,
-                'unit_cost' => $cost,
-                'unit_profit' => $price - $cost,
-                'total' => $itemTotal,
-                'profit' => $itemProfit,
-                'options' => $selectedOptions // ✅ حفظ الخيارات
-            ];
-        }
-
-        if (empty($orderItems)) {
-            DB::rollBack();
-            return response()->json([
-                'success' => false,
-                'message' => 'لا توجد وجبات صالحة للبيع'
-            ], 400);
-        }
-
-        // إنشاء رقم الطلب
-        $orderCount = \App\Models\Order::whereDate('created_at', today())->count();
-        $orderNumber = 'MEAL-' . date('Ymd') . '-' . str_pad($orderCount + 1, 4, '0', STR_PAD_LEFT);
-
-        // إنشاء الطلب
-        $order = \App\Models\Order::create([
-            'order_number' => $orderNumber,
-            'customer_id' => $request->json('customer_id'),
-            'subtotal' => $totalAmount,
-            'total' => $totalAmount,
-            'paid_amount' => $request->json('paid_amount') ?? $totalAmount,
-            'due_amount' => max(0, $totalAmount - ($request->json('paid_amount') ?? $totalAmount)),
-            'payment_method' => $request->json('payment_method') ?? 'cash',
-            'status' => 'paid',
-            'total_profit' => $totalProfit,
-            'notes' => $request->json('notes') ?? 'بيع وجبات جاهزة',
-            'created_by' => auth()->id() ?? 1
-        ]);
-
-        // ✅ إضافة عناصر الطلب مع الخيارات
-        foreach ($orderItems as $item) {
-            // إنشاء عنصر الوجبة
-            $mealOrderItem = \App\Models\MealOrderItem::create([
-                'order_id' => $order->id,
-                'meal_id' => $item['meal_id'],
-                'meal_name' => $item['meal_name'],
-                'quantity' => $item['quantity'],
-                'unit_price' => $item['unit_price'],
-                'unit_cost' => $item['unit_cost'],
-                'unit_profit' => $item['unit_profit'],
-                'total_price' => $item['total'],
-                'total_profit' => $item['profit'],
-            ]);
-            
-            // ✅ حفظ الخيارات المختارة في جدول meal_order_item_options
-            if (!empty($item['options'])) {
-                foreach ($item['options'] as $optionData) {
-                    \App\Models\MealOrderItemOption::create([
-                        'meal_order_item_id' => $mealOrderItem->id,
-                        'meal_option_id' => $optionData['id'] ?? null,
-                        'name' => $optionData['name'],
-                        'price' => $optionData['price'] ?? 0,
-                        'additional_cost' => $optionData['price'] ?? 0,
-                        'group_name' => $optionData['group_name'] ?? 'أخرى'
-                    ]);
-                }
-            }
-        }
-
-        $paidAmount = $request->json('paid_amount') ?? $totalAmount;
-        $treasury = null;
-
-        if ($paidAmount > 0) {
-            $treasury = $this->updateTreasury(
-                $order,
-                $paidAmount,
-                $totalProfit,
-                $order->payment_method ?? 'cash',
-                'meal',
-                $request->json('cash_amount'),
-                $request->json('app_amount')
-            );
-        }
-
-        DB::commit();
-
-        return response()->json([
-            'success' => true,
-            'message' => '✅ تم بيع ' . $soldItemsCount . ' وجبة بقيمة ' . number_format($totalAmount, 2) . ' شيكل',
-            'data' => [
-                'order' => [
-                    'id' => $order->id,
-                    'order_number' => $order->order_number,
-                    'date' => $order->created_at->format('Y-m-d H:i'),
-                ],
-                'sales_summary' => [
-                    'total_amount' => $totalAmount,
-                    'total_paid' => $paidAmount,
-                    'total_profit' => $totalProfit,
-                    'total_cost' => $totalCost,
-                    'items_sold' => $soldItemsCount,
-                    'profit_margin' => $totalAmount > 0 ? round(($totalProfit / $totalAmount) * 100, 2) : 0
-                ],
-                'items' => $orderItems,
-                'treasury_update' => [
-                    'balance_added' => $paidAmount,
-                    'profit_added' => $totalProfit,
-                    'current_balance' => $treasury ? (float) $treasury->balance : (float) (Treasury::first()->balance ?? 0),
-                ]
-            ]
-        ]);
-
-    } catch (\Exception $e) {
-        DB::rollBack();
-        Log::error('Sell ready meal error: ' . $e->getMessage(), [
-            'request' => $request->all(),
-            'trace' => $e->getTraceAsString()
-        ]);
-        
-        return response()->json([
-            'success' => false,
-            'message' => 'حدث خطأ أثناء عملية البيع',
-            'error' => config('app.debug') ? $e->getMessage() : null
-        ], 500);
-    }
-}
-
-    /**
-     * ✅ بيع الوجبات (المحدث بالكامل)
-     */
-    public function sellMeal(Request $request)
-    {
-        try {
-            $validator = Validator::make($request->all(), [
-                'items' => 'required|array|min:1',
-                'items.*.meal_id' => 'required|exists:meals,id',
-                'items.*.quantity' => 'required|numeric|min:0.01',
-                'items.*.price' => 'nullable|numeric|min:0',
-                'items.*.options' => 'nullable|array',
-                'items.*.options.*.id' => 'nullable|exists:meal_options,id',
-                'items.*.options.*.name' => 'nullable|string',
-                'items.*.options.*.price' => 'nullable|numeric|min:0',
-                'items.*.options.*.group_name' => 'nullable|string',
-                'payment_method' => 'required|in:cash,app,card,bank_transfer,mixed',
-                'paid_amount' => 'required|numeric|min:0',
-                'cash_amount' => 'nullable|numeric|min:0',
-                'app_amount' => 'nullable|numeric|min:0',
-                'customer_id' => 'nullable|exists:customers,id',
-                'notes' => 'nullable|string|max:500',
-            ]);
-
-            if ($validator->fails()) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'خطأ في البيانات المدخلة',
-                    'errors' => $validator->errors()
-                ], 422);
-            }
-
-            DB::beginTransaction();
-
-            // حساب الإجماليات والتحقق من المخزون
-            $total = 0;
-            $totalProfit = 0;
-            $itemsData = [];
-            $stockDeductions = [];
-            
-            foreach ($request->items as $item) {
-                // ⭐ جلب الوجبة مع المكونات
-                $meal = Meal::with('ingredients.category')->find($item['meal_id']);
-                
-                if (!$meal) {
-                    DB::rollBack();
-                    return response()->json([
-                        'success' => false,
-                        'message' => 'الوجبة غير موجودة: ' . $item['meal_id']
-                    ], 404);
-                }
-
-                // التحقق من وجود مكونات للوجبة
-                if ($meal->ingredients->isEmpty()) {
-                    DB::rollBack();
-                    return response()->json([
-                        'success' => false,
-                        'message' => 'الوجبة ' . $meal->name . ' لا تحتوي على مكونات'
-                    ], 422);
-                }
-
-                // التحقق من توفر جميع المكونات بالمخزون
-                $ingredientsCheck = $this->checkMealIngredients($meal, $item['quantity']);
-                if (!$ingredientsCheck['available']) {
-                    DB::rollBack();
-                    return response()->json([
-                        'success' => false,
-                        'message' => 'مخزون غير كافي للوجبة: ' . $meal->name,
-                        'ingredients' => $ingredientsCheck['unavailable']
-                    ], 400);
-                }
-
-                // ⭐ سعر البيع: من الطلب أو الوجبة + مجموع أسعار الخيارات
-                $optionsTotal = 0;
-                if (!empty($item['options'])) {
-                    foreach ($item['options'] as $opt) {
-                        $optionsTotal += $opt['price'] ?? 0;
-                    }
-                }
-                $price = $item['price'] ?? ($meal->sale_price + $optionsTotal);
-                $itemTotal = $price * $item['quantity'];
-                $total += $itemTotal;
-                
-                // ⭐ حساب ربح الوجبة
-                $profitPerMeal = $price - $meal->cost_price;
-                $itemProfit = $profitPerMeal * $item['quantity'];
-                $totalProfit += $itemProfit;
-                
-                // تخزين بيانات العنصر
-                $itemsData[] = [
-                    'meal' => $meal,
-                    'quantity' => $item['quantity'],
-                    'price' => $price,
-                    'item_total' => $itemTotal,
-                    'item_profit' => $itemProfit,
-                    'profit_per_meal' => $profitPerMeal,
-                    'options' => $item['options'] ?? [],
-                ];
-                
-                // تسجيل المكونات التي سيتم خصمها
-                $stockDeductions[] = [
-                    'meal_name' => $meal->name,
-                    'meal_id' => $meal->id,
-                    'quantity' => $item['quantity'],
-                    'ingredients' => $meal->ingredients->map(function($ingredient) use ($item) {
-                        return [
-                            'category_id' => $ingredient->category_id,
-                            'category_name' => $ingredient->category->name ?? 'غير معروف',
-                            'quantity_needed' => $ingredient->quantity * $item['quantity'],
-                            'unit' => $ingredient->unit
-                        ];
-                    })
-                ];
-            }
-
-            // إنشاء رقم الطلب
-            $orderCount = Order::whereDate('created_at', today())->count();
-            $orderNumber = 'MEAL-' . date('Ymd') . '-' . str_pad($orderCount + 1, 4, '0', STR_PAD_LEFT);
-
-            // حساب المبلغ المستحق
-            $paidAmount = $request->paid_amount;
-            $dueAmount = max(0, $total - $paidAmount);
-            $status = $paidAmount >= $total ? 'paid' : ($paidAmount > 0 ? 'partially_paid' : 'pending');
-            $status = $this->normalizeOrderStatusForStorage($status);
-
-            // ⭐ إنشاء الطلب الرئيسي
-            $order = Order::create([
-                'order_number' => $orderNumber,
-                'customer_id' => $request->customer_id,
-                'subtotal' => $total,
-                'discount' => 0,
-                'total' => $total,
-                'paid_amount' => $paidAmount,
-                'due_amount' => $dueAmount,
-                'payment_method' => $request->payment_method,
-                'status' => $status,
-                'notes' => $request->notes ?? 'بيع وجبات',
-                'created_by' => auth()->id() ?? 1,
-                'total_profit' => $totalProfit, // ⭐ تخزين إجمالي الربح
-            ]);
-            $this->recordCreditSaleMovement($order, $dueAmount, null);
-
-            // ⭐ خصم المكونات من المخزون (categories)
-            $this->deductMealIngredients($itemsData, $order->id);
-
-            // ⭐ إضافة عناصر الوجبات إلى جدول meal_order_items مع الخيارات
-            foreach ($itemsData as $itemData) {
-                $meal = $itemData['meal'];
-
-                $mealOrderItem = MealOrderItem::create([
-                    'order_id' => $order->id,
-                    'meal_id' => $meal->id,
-                    'meal_name' => $meal->name,
-                    'quantity' => $itemData['quantity'],
-                    'unit_price' => $itemData['price'],
-                    'unit_cost' => $meal->cost_price,
-                    'unit_profit' => $itemData['profit_per_meal'],
-                    'total_price' => $itemData['item_total'],
-                    'total_profit' => $itemData['item_profit'],
-                ]);
-
-                if (!empty($itemData['options'])) {
-                    foreach ($itemData['options'] as $opt) {
-                        \App\Models\MealOrderItemOption::create([
-                            'meal_order_item_id' => $mealOrderItem->id,
-                            'meal_option_id' => $opt['id'] ?? null,
-                            'name' => $opt['name'] ?? '',
-                            'price' => $opt['price'] ?? 0,
-                            'additional_cost' => $opt['price'] ?? 0,
-                            'group_name' => $opt['group_name'] ?? 'أخرى',
-                        ]);
-                    }
-                }
-
-                $meal->increment('used_count', $itemData['quantity']);
-            }
-
-            // ⭐ تحديث الخزنة
-            if ($paidAmount > 0) {
-                $this->updateTreasury(
-                    $order,
-                    $paidAmount,
-                    $totalProfit,
-                    $request->payment_method,
-                    'meal',
-                    $request->input('cash_amount'),
-                    $request->input('app_amount')
-                );
-            }
-
-            DB::commit();
-
-            return response()->json([
-                'success' => true,
-                'message' => 'تم بيع الوجبات بنجاح',
-                'data' => [
-                    'order_id' => $order->id,
-                    'order_number' => $order->order_number,
-                    'total' => $total,
-                    'paid' => $paidAmount,
-                    'due' => $dueAmount,
-                    'status' => $status,
-                    'items_count' => count($itemsData),
-                    'total_profit' => $totalProfit,
-                    'profit_percentage' => $total > 0 ? round(($totalProfit / $total) * 100, 2) : 0,
-                    'stock_deductions' => $stockDeductions,
-                ]
-            ]);
-
-        } catch (\Exception $e) {
-            DB::rollBack();
-            Log::error('Sell meal error: ' . $e->getMessage());
-            
-            return response()->json([
-                'success' => false,
-                'message' => 'حدث خطأ أثناء بيع الوجبات',
-                'error' => env('APP_DEBUG') ? $e->getMessage() : null
-            ], 500);
-        }
-    }
-
-    /**
-     * ✅ دالة مساعدة: التحقق من توفر مكونات الوجبة
-     */
-    private function checkMealIngredients($meal, $quantity)
-    {
-        $available = true;
-        $unavailable = [];
-        
-        foreach ($meal->ingredients as $ingredient) {
-            $category = $ingredient->category;
-            
-            if (!$category) {
-                $unavailable[] = [
-                    'ingredient' => 'مكون غير معروف',
-                    'required' => $ingredient->quantity * $quantity,
-                    'available' => 0
-                ];
-                $available = false;
-                continue;
-            }
-            
-            $requiredQuantity = $ingredient->quantity * $quantity;
-            
-            if ($category->quantity < $requiredQuantity) {
-                $available = false;
-                $unavailable[] = [
-                    'ingredient' => $category->name,
-                    'required' => $requiredQuantity,
-                    'available' => $category->quantity,
-                    'unit' => $ingredient->unit
-                ];
-            }
-        }
-        
-        return [
-            'available' => $available,
-            'unavailable' => $unavailable
-        ];
-    }
-
-    /**
-     * ✅ دالة مساعدة: خصم مكونات الوجبات من المخزون
-     */
-    private function deductMealIngredients($itemsData, $orderId)
-    {
-        foreach ($itemsData as $itemData) {
-            $meal = $itemData['meal'];
-            $quantity = $itemData['quantity'];
-            
-            foreach ($meal->ingredients as $ingredient) {
-                $category = $ingredient->category;
-                
-                if (!$category) continue;
-                
-                $quantityToDeduct = $ingredient->quantity * $quantity;
-                
-                // خصم الكمية
-                $oldQuantity = $category->quantity;
-                $category->quantity = max(0, $category->quantity - $quantityToDeduct);
-                $category->save();
-                
-                // تسجيل عملية الخصم (اختياري)
-                Log::info('Ingredient deducted for order #' . $orderId, [
-                    'category' => $category->name,
-                    'deducted' => $quantityToDeduct,
-                    'old_quantity' => $oldQuantity,
-                    'new_quantity' => $category->quantity,
-                    'meal' => $meal->name,
-                    'order_id' => $orderId
-                ]);
-            }
-        }
-    }
 
     /**
      * ✅ تحديث الخزنة: الكاش والتطبيق (والمختلط) يزيدان الرصيد ويُسجَّلان بـ payment_method المناسب.
@@ -2087,114 +572,6 @@ public function sellReadyMeal(Request $request)
         return $treasury;
     }
 
-    /**
-     * ✅ تقرير أرباح شامل (منتجات + وجبات)
-     */
-    public function profitReport(Request $request)
-    {
-        try {
-            $startDate = $request->get('start_date', now()->startOfMonth());
-            $endDate = $request->get('end_date', now()->endOfMonth());
-            
-            // إحصائيات عامة
-            $stats = Order::whereBetween('created_at', [$startDate, $endDate])
-                ->select([
-                    DB::raw('COUNT(*) as total_orders'),
-                    DB::raw('SUM(total) as total_sales'),
-                    DB::raw('SUM(total_profit) as total_profit'),
-                    DB::raw('AVG(total_profit) as avg_profit_per_order'),
-                    DB::raw('SUM(CASE WHEN order_number LIKE "MEAL-%" THEN total_profit ELSE 0 END) as meals_profit'),
-                    DB::raw('SUM(CASE WHEN order_number LIKE "ORD-%" THEN total_profit ELSE 0 END) as products_profit'),
-                ])->first();
-            
-            // أفضل المنتجات ربحية
-            $topProfitableProducts = OrderItem::whereHas('order', function ($query) use ($startDate, $endDate) {
-                    $query->whereBetween('created_at', [$startDate, $endDate]);
-                })
-                ->select([
-                    'product_id',
-                    'product_name',
-                    DB::raw('SUM(quantity) as total_quantity_sold'),
-                    DB::raw('SUM(item_profit) as total_profit'),
-                    DB::raw('COUNT(*) as order_count')
-                ])
-                ->groupBy('product_id', 'product_name')
-                ->orderBy('total_profit', 'desc')
-                ->limit(10)
-                ->get();
-            
-            // ⭐ أفضل الوجبات ربحية
-            $topProfitableMeals = MealOrderItem::whereHas('order', function ($query) use ($startDate, $endDate) {
-                    $query->whereBetween('created_at', [$startDate, $endDate]);
-                })
-                ->select([
-                    'meal_id',
-                    'meal_name',
-                    DB::raw('SUM(quantity) as total_quantity_sold'),
-                    DB::raw('SUM(total_profit) as total_profit'),
-                    DB::raw('AVG(unit_profit) as avg_profit_per_meal'),
-                    DB::raw('COUNT(*) as order_count')
-                ])
-                ->groupBy('meal_id', 'meal_name')
-                ->orderBy('total_profit', 'desc')
-                ->limit(10)
-                ->get();
-            
-            // أرباح يومية
-            $dailyProfits = Order::whereBetween('created_at', [$startDate, $endDate])
-                ->select([
-                    DB::raw('DATE(created_at) as date'),
-                    DB::raw('COUNT(*) as orders_count'),
-                    DB::raw('SUM(total) as daily_sales'),
-                    DB::raw('SUM(total_profit) as daily_profit'),
-                    DB::raw('SUM(CASE WHEN order_number LIKE "MEAL-%" THEN total ELSE 0 END) as meals_sales'),
-                    DB::raw('SUM(CASE WHEN order_number LIKE "ORD-%" THEN total ELSE 0 END) as products_sales'),
-                ])
-                ->groupBy('date')
-                ->orderBy('date')
-                ->get();
-            
-            return response()->json([
-                'success' => true,
-                'data' => [
-                    'period' => [
-                        'start_date' => $startDate,
-                        'end_date' => $endDate
-                    ],
-                    'profit_stats' => [
-                        'total_orders' => $stats->total_orders,
-                        'total_sales' => $stats->total_sales,
-                        'total_profit' => $stats->total_profit,
-                        'avg_profit_per_order' => round($stats->avg_profit_per_order ?? 0, 2),
-                        'meals_profit' => $stats->meals_profit ?? 0,
-                        'products_profit' => $stats->products_profit ?? 0,
-                        'meals_percentage' => $stats->total_profit > 0 ? 
-                            round(($stats->meals_profit / $stats->total_profit) * 100, 2) : 0,
-                        'products_percentage' => $stats->total_profit > 0 ? 
-                            round(($stats->products_profit / $stats->total_profit) * 100, 2) : 0,
-                    ],
-                    'top_products' => $topProfitableProducts,
-                    'top_meals' => $topProfitableMeals,
-                    'daily_profits' => $dailyProfits,
-                    'profit_margin' => [
-                        'gross_margin' => $stats->total_sales > 0 ? 
-                            round(($stats->total_profit / $stats->total_sales) * 100, 2) : 0,
-                        'avg_profit_per_order' => round($stats->avg_profit_per_order ?? 0, 2)
-                    ]
-                ],
-                'message' => 'تم جلب تقرير الأرباح بنجاح'
-            ]);
-            
-        } catch (\Exception $e) {
-            Log::error('Profit report error: ' . $e->getMessage());
-            
-            return response()->json([
-                'success' => false,
-                'message' => 'حدث خطأ في جلب تقرير الأرباح',
-                'error' => env('APP_DEBUG') ? $e->getMessage() : null
-            ], 500);
-        }
-    }
 
     /**
      * ✅ إحصائيات الطلبات
@@ -2716,6 +1093,9 @@ public function updateCreditLimit(Request $request, $customerId)
         $validator = Validator::make($request->all(), [
             'amount' => 'required|numeric|min:0.01',
             'note' => 'nullable|string|max:300',
+            'payment_method' => 'nullable|in:cash,app,mixed',
+            'cash_amount' => 'nullable|numeric|min:0',
+            'app_amount' => 'nullable|numeric|min:0',
         ]);
         
         if ($validator->fails()) {
@@ -2727,9 +1107,44 @@ public function updateCreditLimit(Request $request, $customerId)
         }
     
         try {
+            $amount = round((float) $request->amount, 2);
+            $pm = strtolower((string) $request->input('payment_method', 'cash'));
+            if (! in_array($pm, ['cash', 'app', 'mixed'], true)) {
+                $pm = 'cash';
+            }
+            $cashAmount = round((float) ($request->input('cash_amount') ?? 0), 2);
+            $appAmount = round((float) ($request->input('app_amount') ?? 0), 2);
+
+            if ($pm === 'cash') {
+                $cashAmount = $amount;
+                $appAmount = 0.0;
+            } elseif ($pm === 'app') {
+                $appAmount = $amount;
+                $cashAmount = 0.0;
+            } else {
+                if ($cashAmount <= 0.0001 || $appAmount <= 0.0001) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'في الدفع المختلط يجب إدخال مبلغ كاش ومبلغ تطبيق',
+                    ], 422);
+                }
+                if (abs($cashAmount + $appAmount - $amount) > 0.01) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'مجموع الكاش والتطبيق يجب أن يساوي مبلغ التسديد',
+                    ], 422);
+                }
+            }
+
+            if (abs(($cashAmount + $appAmount) - $amount) > 0.01) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'مبالغ الكاش/التطبيق لا تطابق المبلغ الإجمالي',
+                ], 422);
+            }
+
             DB::beginTransaction();
             
-            $amount = (float) $request->amount;
             $remaining = $amount;
             $affected = 0;
             
@@ -2747,7 +1162,7 @@ public function updateCreditLimit(Request $request, $customerId)
                 $due = (float) ($order->due_amount ?? 0);
                 if ($due <= 0.00001) continue;
                 
-                $pay = min($remaining, $due);
+                $pay = round(min($remaining, $due), 2);
                 $order->paid_amount = round(((float) $order->paid_amount) + $pay, 2);
                 $order->due_amount = round($due - $pay, 2);
                 
@@ -2760,40 +1175,83 @@ public function updateCreditLimit(Request $request, $customerId)
                 $remaining -= $pay;
                 $affected++;
             }
-            
-            // ✅ 3. إذا بقي مبلغ زائد (دفع زيادة عن الدين)، سجلها كرصيد دائن (Available Credit)
-            if ($remaining > 0.00001) {
-                // ✅ تسجيل حركة إيجابية (رصيد دائن) - تستخدم لاحقاً للشراء
+
+            $unappliedCredit = round(max(0, $remaining), 2);
+            $applied = round($amount - $unappliedCredit, 2);
+
+            // ✅ 3. حركة رصيد واحدة بمقدار المبلغ المستلم بالكامل (يغطي التسديد + أي رصيد دائن)
+            if ($this->canUseCreditMovementsTable() && $amount > 0.00001) {
                 CustomerCreditMovement::create([
                     'customer_id' => (int) $customerId,
                     'customer_name' => Customer::find($customerId)?->name,
                     'movement_type' => 'debt_payment',
-                    'delta_amount' => -$remaining,  // ✅ سالب = رصيد دائن
+                    'delta_amount' => -$amount,
                     'reference_order_id' => null,
-                    'payment_method' => $request->input('payment_method', 'cash'),
+                    'payment_method' => $pm === 'mixed' ? 'mixed' : $pm,
                     'cashier_id' => auth()->id() ?? 1,
                     'cashier_name' => auth()->user()?->username ?? auth()->user()?->name ?? 'system',
-                    'note' => $request->input('note', 'تسديد زيادة (رصيد دائن)'),
+                    'note' => $request->input('note', 'تسديد دين زبون'),
                     'occurred_at' => now(),
                 ]);
-                
-                $affectedOrdersMessage = " + {$remaining} ش رصيد دائن متبقي";
-            } else {
-                $affectedOrdersMessage = "";
             }
-            
+
+            // ✅ 4. إيداع المبلغ في الخزنة حسب الكاش/التطبيق
+            if ($amount > 0.00001) {
+                $treasury = Treasury::first();
+                if ($treasury) {
+                    $c = round($cashAmount, 2);
+                    $a = round($appAmount, 2);
+                    if (abs($c + $a - $amount) > 0.05) {
+                        DB::rollBack();
+                        return response()->json([
+                            'success' => false,
+                            'message' => 'تعارض في توزيع الكاش والتطبيق',
+                        ], 422);
+                    }
+                    $treasury->applyLiquidityDelta($c, $a);
+                    $treasury->total_income = round((float) ($treasury->total_income ?? 0) + $amount, 2);
+                    $treasury->save();
+
+                    $noteBase = $request->input('note', 'تسديد دين زبون');
+                    foreach (
+                        [
+                            ['amt' => $c, 'method' => 'cash', 'suffix' => ' — كاش'],
+                            ['amt' => $a, 'method' => 'app', 'suffix' => ' — تطبيق'],
+                        ] as $leg
+                    ) {
+                        if ($leg['amt'] > 0.00001 && class_exists(TreasuryTransaction::class)) {
+                            TreasuryTransaction::create([
+                                'treasury_id' => $treasury->id,
+                                'type' => 'income',
+                                'amount' => $leg['amt'],
+                                'description' => $noteBase . $leg['suffix'],
+                                'category' => 'other_income',
+                                'payment_method' => $leg['method'],
+                                'transaction_date' => now(),
+                                'created_by' => auth()->id() ?? 1,
+                            ]);
+                        }
+                    }
+                }
+            }
+
             DB::commit();
-            
-            $applied = round($amount - $remaining, 2);
+
+            $affectedOrdersMessage = $unappliedCredit > 0.00001
+                ? " — المتبقي {$unappliedCredit} شيكل سُجّل كرصيد دائن للزبون"
+                : '';
             
             return response()->json([
                 'success' => true,
                 'message' => 'تم تسجيل التسديد بنجاح' . $affectedOrdersMessage,
                 'data' => [
                     'paid_applied' => $applied,
-                    'unapplied' => round($remaining, 2),
+                    'unapplied' => $unappliedCredit,
                     'affected_orders' => $affected,
-                    'available_credit_remaining' => round($remaining, 2),
+                    'available_credit_remaining' => $unappliedCredit,
+                    'payment_method' => $pm,
+                    'cash_amount' => round($cashAmount, 2),
+                    'app_amount' => round($appAmount, 2),
                 ],
             ]);
             
@@ -3033,96 +1491,6 @@ public function getCreditCustomerMovements($customerId)
         ], 500);
     }
 }
-    public function creditCustomerMovements($customerId)
-    {
-        try {
-            $rowsAsc = collect();
-            if ($this->canUseCreditMovementsTable()) {
-                $query = CustomerCreditMovement::query();
-                if (is_numeric($customerId)) {
-                    $query->where('customer_id', (int) $customerId);
-                } else {
-                    $query->whereRaw('LOWER(customer_name) = ?', [mb_strtolower(trim((string) $customerId))]);
-                }
-
-                $rowsAsc = $query
-                    ->orderBy('occurred_at', 'asc')
-                    ->orderBy('id', 'asc')
-                    ->get();
-            }
-
-            // fallback: إذا لا توجد حركات مسجلة، اعرض حركات الشراء الآجل من الفواتير
-            if ($rowsAsc->isEmpty()) {
-                $ordersQuery = Order::query()
-                    ->with('createdBy:id,name,username')
-                    ->whereIn('payment_method', ['credit', 'mixed'])
-                    ->where('due_amount', '>', 0);
-                if (is_numeric($customerId)) {
-                    $ordersQuery->where('customer_id', (int) $customerId);
-                } else {
-                    $needle = mb_strtolower(trim((string) $customerId));
-                    $ordersQuery->where(function ($q) use ($needle) {
-                        $q->whereHas('customer', function ($sq) use ($needle) {
-                            $sq->whereRaw('LOWER(name) = ?', [$needle]);
-                        })->orWhereRaw('LOWER(notes) LIKE ?', ['%"customer_name":"' . $needle . '"%']);
-                    });
-                }
-                $orderRows = $ordersQuery
-                    ->orderBy('created_at', 'asc')
-                    ->orderBy('id', 'asc')
-                    ->get();
-                $rowsAsc = $orderRows->map(function ($o) {
-                    $cashier = $o->createdBy?->username ?: $o->createdBy?->name;
-                    return (object) [
-                        'id' => 'ord-' . $o->id,
-                        'customer_id' => $o->customer_id,
-                        'customer_name' => $o->customer_name,
-                        'movement_type' => 'credit_sale',
-                        'delta_amount' => (float) ($o->due_amount ?? 0),
-                        'reference_order_id' => $o->id,
-                        'payment_method' => $o->payment_method,
-                        'cashier_id' => $o->created_by,
-                        'cashier_name' => $cashier,
-                        'note' => 'فاتورة ' . ($o->order_number ?: ('#' . $o->id)),
-                        'occurred_at' => $o->created_at,
-                        'created_at' => $o->created_at,
-                    ];
-                });
-            }
-
-            $running = 0.0;
-            $withRunning = $rowsAsc->map(function ($m) use (&$running) {
-                $delta = (float) $m->delta_amount;
-                $running += $delta;
-                return [
-                    'id' => $m->id,
-                    'customer_id' => $m->customer_id,
-                    'customer_name' => $m->customer_name,
-                    'movement_type' => $m->movement_type,
-                    'delta_amount' => round($delta, 2),
-                    'balance_after' => round($running, 2),
-                    'reference_order_id' => $m->reference_order_id,
-                    'payment_method' => $m->payment_method,
-                    'cashier_id' => $m->cashier_id,
-                    'cashier_name' => $m->cashier_name,
-                    'note' => $m->note,
-                    'occurred_at' => optional($m->occurred_at)->toDateTimeString(),
-                    'created_at' => optional($m->created_at)->toDateTimeString(),
-                ];
-            });
-
-            return response()->json([
-                'success' => true,
-                'data' => $withRunning->sortByDesc('id')->values(),
-            ]);
-        } catch (\Throwable $e) {
-            Log::error('creditCustomerMovements error: ' . $e->getMessage());
-            return response()->json([
-                'success' => false,
-                'message' => 'تعذر جلب حركات زبون الآجل',
-            ], 500);
-        }
-    }
 
     private function buildOrderNotesWithMeta(?string $notes, $customerName, $cashierName): string
     {
@@ -3173,42 +1541,96 @@ public function getCreditCustomerMovements($customerId)
 
         try {
             DB::beginTransaction();
-            
-            $order = Order::find($id);
-            
+
+            $order = Order::with('items')->find($id);
+
             if (!$order) {
+                DB::rollBack();
                 return response()->json([
                     'success' => false,
                     'message' => 'الطلب غير موجود'
                 ], 404);
             }
 
-            // إرجاع المنتجات للمخزون
-            foreach ($request->items as $item) {
-                $orderItem = OrderItem::find($item['order_item_id']);
-                
-                if ($orderItem && $orderItem->order_id == $order->id) {
-                    $productId = $orderItem->product_id ?? $orderItem->item_id;
-                    $product = Product::find($productId);
-                    if ($product) {
-                        $product->stock += $item['quantity'];
-                        $product->save();
-                    }
+            if (in_array($order->status, ['cancelled', 'returned'], true)) {
+                DB::rollBack();
+                return response()->json([
+                    'success' => false,
+                    'message' => 'الطلب مُلغى أو مُرجع مسبقاً',
+                ], 422);
+            }
+
+            foreach ($request->items as $itemReq) {
+                $orderItem = OrderItem::whereKey($itemReq['order_item_id'])->lockForUpdate()->first();
+                if (!$orderItem || (int) $orderItem->order_id !== (int) $order->id) {
+                    DB::rollBack();
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'بند غير صالح في الطلب',
+                    ], 422);
+                }
+                $reqQty = (float) ($itemReq['quantity'] ?? 0);
+                $origQty = (float) ($orderItem->quantity ?? 0);
+                $alreadyReturned = Schema::hasColumn('order_items', 'sale_quantity_returned')
+                    ? (float) ($orderItem->sale_quantity_returned ?? 0)
+                    : 0.0;
+                $maxReturn = $origQty - $alreadyReturned;
+                if ($reqQty > $maxReturn + 0.0001) {
+                    DB::rollBack();
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'كمية الإرجاع أكبر من المتبقي للبند: ' . ($orderItem->item_name ?? ''),
+                    ], 422);
                 }
             }
 
-            // خصم المبلغ من الخزنة (كاش / تطبيق حسب أصل البيع)
-            if ($request->refund_amount > 0) {
-                $treasury = Treasury::first();
+            foreach ($request->items as $itemReq) {
+                $orderItem = OrderItem::whereKey($itemReq['order_item_id'])->lockForUpdate()->first();
+                $productId = $orderItem->product_id ?? $orderItem->item_id;
+                $product = Product::whereKey($productId)->lockForUpdate()->first();
+                if (!$product) {
+                    continue;
+                }
+                $this->applyOrderItemSaleReturn($orderItem, $product, (float) ($itemReq['quantity'] ?? 0));
+            }
+
+            $refundAmt = round((float) $request->refund_amount, 2);
+            if ($refundAmt > 0) {
+                $treasury = Treasury::lockForUpdate()->first();
                 if ($treasury) {
-                    [$rCash, $rApp] = $this->treasuryRefundChannelsForOrder($order, (float) $request->refund_amount);
+                    [$rCash, $rApp] = $this->treasuryRefundChannelsForOrder($order, $refundAmt);
                     $treasury->applyLiquidityDelta(-$rCash, -$rApp);
-                    $treasury->total_expenses += $request->refund_amount;
+                    $treasury->total_expenses += $refundAmt;
+                    $paid = (float) $order->paid_amount;
+                    if ($paid > 0.0001 && isset($treasury->total_profit, $order->total_profit)) {
+                        $treasury->total_profit = max(
+                            0,
+                            ((float) ($treasury->total_profit ?? 0)) - ((float) $order->total_profit * ($refundAmt / $paid))
+                        );
+                    }
                     $treasury->save();
                 }
             }
 
-            $order->status = 'cancelled';
+            if (Schema::hasColumn('orders', 'refunded_amount')) {
+                $order->refunded_amount = round(((float) ($order->refunded_amount ?? 0)) + $refundAmt, 2);
+            }
+
+            $order->refresh()->load('items');
+            $allReturned = true;
+            if (Schema::hasColumn('order_items', 'sale_quantity_returned')) {
+                foreach ($order->items as $oi) {
+                    $orig = (float) ($oi->quantity ?? 0);
+                    $ret = (float) ($oi->sale_quantity_returned ?? 0);
+                    if ($ret + 0.0001 < $orig) {
+                        $allReturned = false;
+                        break;
+                    }
+                }
+            }
+            if ($allReturned) {
+                $order->status = 'cancelled';
+            }
             $order->save();
 
             DB::commit();
@@ -3613,79 +2035,91 @@ if (Schema::hasTable('staff_activities')) {
             $order = Order::find($id);
     
             if (!$order) {
+                DB::rollBack();
                 return response()->json([
                     'success' => false,
                     'message' => 'الطلب غير موجود'
                 ], 404);
             }
-    
-            if (in_array($order->status, ['cancelled', 'returned'])) {
+
+            if (in_array($order->status, ['cancelled', 'returned'], true)) {
+                DB::rollBack();
                 return response()->json([
                     'success' => false,
                     'message' => 'الطلب مُلغى أو مُرجع مسبقاً'
                 ], 422);
             }
-    
-            $refundAmount = (float) $order->paid_amount;
-            if ($refundAmount <= 0) {
-                $order->status = 'cancelled';  // ✅ تعديل هنا
-                $order->notes = $this->appendReasonKeepMeta($order->notes, (string) ($request->reason ?? 'بدون سبب'));
-                $order->save();
-                DB::commit();
-                return response()->json([
-                    'success' => true,
-                    'message' => 'تم إلغاء الطلب (لا يوجد مبلغ مسترد)',
-                    'data' => $order
-                ]);
-            }
 
-            // إعادة الكميات للمخزون عند الإرجاع الكامل.
-            // ملاحظة: order_items يعتمد غالبًا item_id (polymorphic) وليس product_id.
             $order->loadMissing('items');
             foreach ($order->items as $item) {
                 $productId = $item->product_id ?? $item->item_id;
-                $product = Product::find($productId);
+                $product = Product::whereKey($productId)->lockForUpdate()->first();
                 if (!$product) {
                     continue;
                 }
-                $returnQty = max(0.0, (float) ($item->quantity ?? 0));
-                if ($returnQty <= 0.00001) {
+                $origQty = (float) ($item->quantity ?? 0);
+                $alreadyReturned = Schema::hasColumn('order_items', 'sale_quantity_returned')
+                    ? (float) ($item->sale_quantity_returned ?? 0)
+                    : 0.0;
+                $remainingSale = max(0.0, $origQty - $alreadyReturned);
+                if ($remainingSale <= 0.00001) {
                     continue;
                 }
-                $product->stock = (float) $product->stock + $returnQty;
-                $product->save();
+                $this->applyOrderItemSaleReturn($item, $product, $remainingSale);
             }
-    
-            $treasury = Treasury::first();
-            if (!$treasury) {
-                DB::rollBack();
-                return response()->json([
-                    'success' => false,
-                    'message' => 'لا توجد خزنة للخصم منها'
-                ], 400);
+
+            $previouslyRefunded = Schema::hasColumn('orders', 'refunded_amount')
+                ? (float) ($order->refunded_amount ?? 0)
+                : 0.0;
+            $paidOrder = (float) $order->paid_amount;
+            $refundAmount = max(0.0, round($paidOrder - $previouslyRefunded, 2));
+
+            $treasury = null;
+            if ($refundAmount > 0.00001) {
+                $treasury = Treasury::lockForUpdate()->first();
+                if (!$treasury) {
+                    DB::rollBack();
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'لا توجد خزنة للخصم منها'
+                    ], 400);
+                }
+
+                [$rCash, $rApp] = $this->treasuryRefundChannelsForOrder($order, $refundAmount);
+                $treasury->applyLiquidityDelta(-$rCash, -$rApp);
+                $treasury->total_expenses += $refundAmount;
+                if ($paidOrder > 0.0001 && isset($treasury->total_profit, $order->total_profit)) {
+                    $treasury->total_profit = max(
+                        0,
+                        ((float) ($treasury->total_profit ?? 0)) - ((float) $order->total_profit * ($refundAmount / $paidOrder))
+                    );
+                }
+                $treasury->save();
             }
-    
-            [$rCash, $rApp] = $this->treasuryRefundChannelsForOrder($order, $refundAmount);
-            $treasury->applyLiquidityDelta(-$rCash, -$rApp);
-            $treasury->total_expenses += $refundAmount;
-            if (isset($treasury->total_profit) && isset($order->total_profit) && $order->total_profit > 0) {
-                $treasury->total_profit = max(0, ($treasury->total_profit ?? 0) - $order->total_profit);
+
+            if (Schema::hasColumn('orders', 'refunded_amount')) {
+                $order->refunded_amount = round($previouslyRefunded + $refundAmount, 2);
             }
-            $treasury->save();
-    
-            $order->status = 'cancelled';  // ✅ تعديل هنا
+
+            $order->status = 'cancelled';
             $order->notes = $this->appendReasonKeepMeta($order->notes, (string) ($request->reason ?? 'بدون سبب'));
             $order->save();
     
             DB::commit();
-    
+
+            $treasuryBalance = $treasury
+                ? (float) ($treasury->balance ?? 0)
+                : (float) (Treasury::query()->value('balance') ?? 0);
+
             return response()->json([
                 'success' => true,
-                'message' => 'تم إرجاع الطلب واسترداد المبلغ بنجاح',
+                'message' => $refundAmount > 0.00001
+                    ? 'تم إرجاع الطلب واسترداد المبلغ بنجاح'
+                    : 'تم إرجاع الأصناف للمخزون (لا مبلغ مسترد للفاتورة)',
                 'data' => [
                     'order' => $order,
                     'refund_amount' => $refundAmount,
-                    'treasury_balance' => $treasury->balance,
+                    'treasury_balance' => $treasuryBalance,
                 ]
             ]);
     
@@ -3791,13 +2225,31 @@ if (Schema::hasTable('staff_activities')) {
      * سحب تكلفة البيع من طبقات الشراء (FIFO) بناءً على الكمية بالحبات.
      * هذا يضمن أن الكميات القديمة بسعر قديم لا تختلط مع المشتريات الجديدة.
      *
-     * @return array{total_cost: float, consumed_qty: float}
+     * @return array{total_cost: float, consumed_qty: float, layers: array<int, array<string, mixed>>}
      */
     private function consumePurchaseLayersForSale(Product $product, float $quantityInPieces): array
     {
         $required = max(0.0, (float) $quantityInPieces);
-        if ($required <= 0.00001 || !Schema::hasColumn('purchase_items', 'remaining_quantity')) {
-            return ['total_cost' => 0.0, 'consumed_qty' => 0.0];
+        $layerDetails = [];
+
+        if ($required <= 0.00001) {
+            return ['total_cost' => 0.0, 'consumed_qty' => 0.0, 'layers' => []];
+        }
+
+        if (!Schema::hasColumn('purchase_items', 'remaining_quantity')) {
+            $fallbackPerPiece = max(0.0, (float) $product->costPricePerInventoryPiece());
+            $layerDetails[] = [
+                'source' => 'fallback_no_fifo_column',
+                'quantity_pieces' => round($required, 4),
+                'unit_cost_per_piece' => round($fallbackPerPiece, 6),
+                'line_cost' => round($required * $fallbackPerPiece, 4),
+            ];
+
+            return [
+                'total_cost' => round($required * $fallbackPerPiece, 6),
+                'consumed_qty' => round($required, 6),
+                'layers' => $layerDetails,
+            ];
         }
 
         $layers = PurchaseItem::query()
@@ -3805,41 +2257,181 @@ if (Schema::hasTable('staff_activities')) {
             ->where('remaining_quantity', '>', 0)
             ->orderBy('id', 'asc')
             ->lockForUpdate()
+            ->with(['purchase' => function ($q) {
+                $q->select('id', 'invoice_number', 'purchase_date');
+            }])
             ->get();
 
-        $remaining = $required;
+        $remainingNeed = $required;
         $totalCost = 0.0;
         $consumed = 0.0;
 
         foreach ($layers as $layer) {
-            if ($remaining <= 0.00001) {
+            if ($remainingNeed <= 0.00001) {
                 break;
             }
             $available = max(0.0, (float) $layer->remaining_quantity);
             if ($available <= 0.00001) {
                 continue;
             }
-            $take = min($available, $remaining);
+            $take = min($available, $remainingNeed);
             $costPerPiece = max(0.0, (float) $layer->unit_price);
-            $totalCost += $take * $costPerPiece;
+            $lineCost = $take * $costPerPiece;
+            $totalCost += $lineCost;
             $consumed += $take;
-            $remaining -= $take;
+            $remainingNeed -= $take;
 
             $layer->remaining_quantity = max(0.0, $available - $take);
             $layer->save();
+
+            $p = $layer->purchase;
+            $layerDetails[] = [
+                'source' => 'purchase_fifo',
+                'purchase_item_id' => (int) $layer->id,
+                'purchase_id' => (int) $layer->purchase_id,
+                'invoice_number' => $p?->invoice_number,
+                'purchase_date' => $p && $p->purchase_date ? $p->purchase_date->format('Y-m-d') : null,
+                'quantity_pieces' => round($take, 4),
+                'unit_cost_per_piece' => round($costPerPiece, 6),
+                'line_cost' => round($lineCost, 4),
+            ];
         }
 
-        // في حال كانت البيانات التاريخية بلا طبقات كافية، نكمل بالتكلفة الافتراضية حتى لا يتعطل البيع.
-        if ($remaining > 0.00001) {
+        if ($remainingNeed > 0.00001) {
             $fallbackPerPiece = max(0.0, (float) $product->costPricePerInventoryPiece());
-            $totalCost += $remaining * $fallbackPerPiece;
-            $consumed += $remaining;
+            $fbCost = $remainingNeed * $fallbackPerPiece;
+            $totalCost += $fbCost;
+            $consumed += $remainingNeed;
+            $layerDetails[] = [
+                'source' => 'fallback_insufficient_layers',
+                'quantity_pieces' => round($remainingNeed, 4),
+                'unit_cost_per_piece' => round($fallbackPerPiece, 6),
+                'line_cost' => round($fbCost, 4),
+            ];
         }
 
         return [
             'total_cost' => round($totalCost, 6),
             'consumed_qty' => round($consumed, 6),
+            'layers' => $layerDetails,
         ];
+    }
+
+    /**
+     * عدد القطع (وحدة المخزون) التي خُصمت عند البيع لهذا السطر.
+     */
+    private function orderItemInventoryPiecesSold(OrderItem $item): float
+    {
+        if (Schema::hasColumn('order_items', 'inventory_pieces_sold') && $item->inventory_pieces_sold !== null) {
+            return max(0.0, (float) $item->inventory_pieces_sold);
+        }
+        $layers = $item->fifo_cost_layers;
+        if (is_array($layers)) {
+            $sum = 0.0;
+            foreach ($layers as $layer) {
+                $sum += (float) ($layer['quantity_pieces'] ?? 0);
+            }
+            if ($sum > 0.00001) {
+                return $sum;
+            }
+        }
+
+        return max(0.0, (float) ($item->quantity ?? 0));
+    }
+
+    /**
+     * إعادة كمية إلى طبقات شراء FIFO (عكس الاستهلاك عند البيع).
+     */
+    private function restoreFifoPurchaseLayersForSaleReturn(OrderItem $orderItem, float $fraction): void
+    {
+        $fraction = max(0.0, min(1.0, $fraction));
+        if ($fraction <= 0.00001) {
+            return;
+        }
+        if (!Schema::hasColumn('purchase_items', 'remaining_quantity')) {
+            return;
+        }
+        $layers = $orderItem->fifo_cost_layers;
+        if (!is_array($layers)) {
+            return;
+        }
+        foreach ($layers as $layer) {
+            if (($layer['source'] ?? '') !== 'purchase_fifo') {
+                continue;
+            }
+            $pid = $layer['purchase_item_id'] ?? null;
+            if (!$pid) {
+                continue;
+            }
+            $qty = (float) ($layer['quantity_pieces'] ?? 0);
+            if ($qty <= 0.00001) {
+                continue;
+            }
+            $restore = round($qty * $fraction, 4);
+            if ($restore <= 0.00001) {
+                continue;
+            }
+            $pi = PurchaseItem::whereKey($pid)->lockForUpdate()->first();
+            if ($pi) {
+                $pi->remaining_quantity = (float) ($pi->remaining_quantity ?? 0) + $restore;
+                $pi->save();
+            }
+        }
+    }
+
+    /**
+     * إرجاع جزء من سطر البيع: زيادة مخزون القطع + عكس FIFO بنفس نسبة وحدات البيع.
+     *
+     * @return array{delta_sale_units: float, pieces_restored: float}
+     */
+    private function applyOrderItemSaleReturn(OrderItem $orderItem, Product $product, float $requestedSaleUnits): array
+    {
+        $origQty = max(0.0, (float) ($orderItem->quantity ?? 0));
+        if ($origQty <= 0.00001) {
+            return ['delta_sale_units' => 0.0, 'pieces_restored' => 0.0];
+        }
+        $alreadyReturned = 0.0;
+        if (Schema::hasColumn('order_items', 'sale_quantity_returned')) {
+            $alreadyReturned = max(0.0, (float) ($orderItem->sale_quantity_returned ?? 0));
+        }
+        $remainingSale = max(0.0, $origQty - $alreadyReturned);
+        if ($remainingSale <= 0.00001) {
+            return ['delta_sale_units' => 0.0, 'pieces_restored' => 0.0];
+        }
+        $delta = min($requestedSaleUnits, $remainingSale);
+        if ($delta <= 0.00001) {
+            return ['delta_sale_units' => 0.0, 'pieces_restored' => 0.0];
+        }
+        $fraction = $delta / $origQty;
+        $piecesSold = $this->orderItemInventoryPiecesSold($orderItem);
+        $piecesToRestore = round($piecesSold * $fraction, 4);
+
+        $product->stock = (float) $product->stock + $piecesToRestore;
+        $product->save();
+
+        $this->restoreFifoPurchaseLayersForSaleReturn($orderItem, $fraction);
+
+        if (Schema::hasColumn('order_items', 'sale_quantity_returned')) {
+            $orderItem->sale_quantity_returned = $alreadyReturned + $delta;
+            $orderItem->save();
+        }
+
+        return ['delta_sale_units' => $delta, 'pieces_restored' => $piecesToRestore];
+    }
+
+    /**
+     * تفضيل المدير «إشعار عند كل بيع من الكاشير» — notificationPrefs.admin.saleComplete في client_preferences.
+     */
+    private function adminPrefCashierSaleNotificationsEnabled(): bool
+    {
+        if (!Schema::hasTable('system_settings')) {
+            return false;
+        }
+        $row = SystemSetting::query()->where('key', 'client_preferences')->first();
+        $prefs = is_array($row?->value_json) ? $row->value_json : [];
+        $v = $prefs['notificationPrefs']['admin']['saleComplete'] ?? false;
+
+        return $v === true || $v === 1 || $v === '1' || $v === 'true';
     }
 
     private function appendReasonKeepMeta(?string $existingNotes, string $reason): string

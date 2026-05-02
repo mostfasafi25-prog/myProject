@@ -75,7 +75,8 @@ return [
     |
     */
 
-    'timezone' => 'UTC',
+    // ضبط APP_TIMEZONE في .env (مثال: Asia/Hebron، Asia/Jerusalem، Asia/Amman) لمطابقة توقيت المبيعات والمخططات
+    'timezone' => env('APP_TIMEZONE', 'Asia/Hebron'),
 
     /*
     |--------------------------------------------------------------------------

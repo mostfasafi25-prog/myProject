@@ -524,17 +524,17 @@ class SupplierController extends Controller
                 'notes' => 'nullable|string'
             ]);
 
-            $amount = $validated['amount'];
+            $amount = round((float) $validated['amount'], 2);
             $paymentMethod = $validated['payment_method'];
-            $cashAmount = (float) ($validated['cash_amount'] ?? 0);
-            $appAmount = (float) ($validated['app_amount'] ?? 0);
+            $cashAmount = round((float) ($validated['cash_amount'] ?? 0), 2);
+            $appAmount = round((float) ($validated['app_amount'] ?? 0), 2);
 
             // Normalize by payment method
             if ($paymentMethod === 'cash') {
-                $cashAmount = (float) $amount;
+                $cashAmount = $amount;
                 $appAmount = 0.0;
             } elseif ($paymentMethod === 'app') {
-                $appAmount = (float) $amount;
+                $appAmount = $amount;
                 $cashAmount = 0.0;
             }
 
@@ -552,6 +552,13 @@ class SupplierController extends Controller
                         'message' => 'مجموع الكاش والتطبيق يجب أن يساوي إجمالي المبلغ'
                     ], 422);
                 }
+            } else {
+                if (abs(($cashAmount + $appAmount) - $amount) > 0.01) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'مبالغ الكاش/التطبيق لا تطابق المبلغ الإجمالي لهذه الطريقة'
+                    ], 422);
+                }
             }
 
             // Get supplier's pending/partially paid purchases
@@ -560,9 +567,9 @@ class SupplierController extends Controller
                 ->orderBy('purchase_date', 'asc')
                 ->get();
 
-            $totalRemaining = $purchases->sum('remaining_amount');
+            $totalRemaining = round((float) $purchases->sum('remaining_amount'), 2);
 
-            if ($amount > $totalRemaining) {
+            if ($amount > $totalRemaining + 0.01) {
                 return response()->json([
                     'success' => false,
                     'message' => 'مبلغ التسديد أكبر من إجمالي الدين المتبقي'
@@ -575,13 +582,18 @@ class SupplierController extends Controller
             $paidPurchases = [];
 
             foreach ($purchases as $purchase) {
-                if ($remainingToPay <= 0) break;
+                if ($remainingToPay <= 0.00001) break;
 
-                $purchaseRemaining = $purchase->remaining_amount;
-                $payForThis = min($purchaseRemaining, $remainingToPay);
+                $purchaseRemaining = round((float) $purchase->remaining_amount, 2);
+                $payForThis = round(min($purchaseRemaining, $remainingToPay), 2);
+                if ($payForThis <= 0.00001) {
+                    continue;
+                }
 
-                $newPaidAmount = $purchase->paid_amount + $payForThis;
-                $newRemainingAmount = $purchase->total_amount - $newPaidAmount;
+                $prevPaid = round((float) $purchase->paid_amount, 2);
+                $totalInv = round((float) $purchase->total_amount, 2);
+                $newPaidAmount = round($prevPaid + $payForThis, 2);
+                $newRemainingAmount = round(max(0, $totalInv - $newPaidAmount), 2);
 
                 // Determine new status
                 if ($newRemainingAmount <= 0.01) {
@@ -591,7 +603,7 @@ class SupplierController extends Controller
                 }
 
                 $purchase->paid_amount = $newPaidAmount;
-                $purchase->remaining_amount = max(0, $newRemainingAmount);
+                $purchase->remaining_amount = $newRemainingAmount;
                 $purchase->save();
 
                 $paidPurchases[] = [
@@ -603,9 +615,10 @@ class SupplierController extends Controller
                 $remainingToPay -= $payForThis;
             }
 
-            // Update supplier balance if exists
-            if ($supplier->balance) {
-                $supplier->balance = max(0, $supplier->balance - $amount);
+            // Update supplier balance if tracked
+            $bal = (float) ($supplier->balance ?? 0);
+            if ($bal > 0.00001) {
+                $supplier->balance = round(max(0, $bal - $amount), 2);
                 $supplier->save();
             }
 
@@ -690,6 +703,8 @@ class SupplierController extends Controller
                 'meta' => [
                     'amount_paid' => (float) $amount,
                     'payment_method' => $paymentMethod,
+                    'cash_amount' => round($cashAmount, 2),
+                    'app_amount' => round($appAmount, 2),
                 ],
             ]);
 

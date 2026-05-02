@@ -31,7 +31,17 @@ public function store(Request $request)
             'username' => 'nullable|string|max:255',
             'role' => 'nullable|string|max:255',
         ]);
-        
+
+        $actor = $request->user();
+        $actorRole = (string) ($actor?->role ?? '');
+        if (in_array($actorRole, ['cashier', 'super_cashier'], true)
+            && (string) ($validated['action_type'] ?? '') !== 'cashier_shift_end') {
+            return response()->json([
+                'success' => false,
+                'message' => 'غير مصرح بتسجيل هذا النشاط من حساب الكاشير',
+            ], 403);
+        }
+
         $activity = StaffActivity::create([
             'user_id' => $request->user()?->id,
             'username' => $validated['username'] ?? $request->user()?->username,

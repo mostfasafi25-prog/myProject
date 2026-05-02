@@ -3,20 +3,18 @@
 namespace App\Http\Controllers;
 
 use App\Models\SystemNotification;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Schema;
 
 class SystemNotificationController extends Controller
 {
-    public function index(Request $request)
+    /**
+     * إشعارات يستطيع الممثل رؤيتها (قبل تصفية المحذوف للمستخدم).
+     */
+    private function recipientScopeQuery(string $username, string $role): Builder
     {
-        if (!Schema::hasTable('system_notifications')) {
-            return response()->json(['success' => true, 'data' => []]);
-        }
-
-        [$username, $role] = $this->resolveActor($request);
-
-        $query = SystemNotification::query()
+        return SystemNotification::query()
             ->where(function ($q) use ($username, $role) {
                 $q->where('recipients_type', 'all');
                 if (in_array($role, ['admin', 'super_admin'], true)) {
@@ -29,10 +27,54 @@ class SystemNotificationController extends Controller
                     });
                 }
             });
+    }
 
-        if ($username !== '') {
-            $query->where(function ($q) use ($username) {
-                $q->whereNull('deleted_by')->orWhereJsonDoesntContain('deleted_by', $username);
+    private function notDeletedByUserScope(Builder $query, string $username): Builder
+    {
+        if ($username === '') {
+            return $query;
+        }
+
+        return $query->where(function ($q) use ($username) {
+            $q->whereNull('deleted_by')->orWhereJsonDoesntContain('deleted_by', $username);
+        });
+    }
+
+    /**
+     * مدير الصيدلية (role admin): يرى فقط إنهاء الدوام وإشعارات المبرمج.
+     */
+    private function scopePharmacyAdminAllowedTypes(Builder $query, string $role): Builder
+    {
+        if ($role !== 'admin') {
+            return $query;
+        }
+
+        return $query->where(function ($q) {
+            $q->whereIn('type', ['cashier_shift_end', 'shift_end'])
+                ->orWhere('meta->from_programmer', true);
+        });
+    }
+
+    public function index(Request $request)
+    {
+        if (!Schema::hasTable('system_notifications')) {
+            return response()->json(['success' => true, 'data' => []]);
+        }
+
+        [$username, $role] = $this->resolveActor($request);
+
+        $query = $this->recipientScopeQuery($username, $role);
+        $this->notDeletedByUserScope($query, $username);
+        $this->scopePharmacyAdminAllowedTypes($query, $role);
+
+        // الكاشير: لا يصلهم إلا إشعار يدوي من الإدارة/المالك أو التشجيع الأسبوعي التلقائي
+        if (in_array($role, ['cashier', 'super_cashier'], true)) {
+            $query->where(function ($q) {
+                $q->where('type', 'cashier_weekly_morale')
+                    ->orWhere(function ($sub) {
+                        $sub->whereIn('type', ['manual', 'owner_broadcast'])
+                            ->where('from_management', true);
+                    });
             });
         }
 
@@ -42,6 +84,8 @@ class SystemNotificationController extends Controller
             ->get()
             ->map(function (SystemNotification $n) use ($username) {
                 $readBy = is_array($n->read_by) ? $n->read_by : [];
+                $deletedBy = is_array($n->deleted_by) ? $n->deleted_by : [];
+                $meta = is_array($n->meta) ? $n->meta : [];
                 return [
                     'id' => $n->id,
                     'type' => $n->type,
@@ -53,8 +97,10 @@ class SystemNotificationController extends Controller
                     'managementLabel' => $n->management_label,
                     'recipients' => $n->recipients_type === 'users' ? ($n->recipient_usernames ?? []) : $n->recipients_type,
                     'readBy' => $readBy,
+                    'deletedBy' => $deletedBy,
                     'read' => $username !== '' ? in_array($username, $readBy, true) : false,
                     'createdAt' => optional($n->created_at)->toIso8601String(),
+                    'meta' => $meta,
                 ];
             })
             ->values();
@@ -66,6 +112,23 @@ class SystemNotificationController extends Controller
     }
     public function store(Request $request)
     {
+        $actor = $request->user();
+        $role = $actor?->role ?? '';
+        $type = (string) $request->input('type', '');
+        if (in_array($role, ['cashier', 'super_cashier'], true)) {
+            if (!in_array($type, ['cashier_shift_end'], true)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'غير مصرح بإرسال هذا النوع من الإشعارات',
+                ], 403);
+            }
+        } elseif (!in_array($role, ['admin', 'super_admin'], true)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'غير مصرح بإرسال إشعارات النظام',
+            ], 403);
+        }
+
         if (!Schema::hasTable('system_notifications')) {
             return response()->json([
                 'success' => false,
@@ -83,10 +146,17 @@ class SystemNotificationController extends Controller
             'recipient_usernames' => 'array|nullable',
             'type' => 'nullable|string',
             'pref_category' => 'nullable|string',
+            'meta' => 'nullable|array',
         ]);
     
         $user = $request->user();
         $username = $user?->username ?? 'admin';
+
+        $meta = isset($validated['meta']) && is_array($validated['meta']) ? $validated['meta'] : [];
+        // لا يضع «من المبرمج» إلا سوبر أدمن (أو عبر لوحة المالك التي تدمج الحقل قبل الاستدعاء)
+        if (($user?->role ?? '') !== 'super_admin') {
+            unset($meta['from_programmer']);
+        }
     
         $notification = SystemNotification::create([
             'title' => $validated['title'],
@@ -98,6 +168,7 @@ class SystemNotificationController extends Controller
             'recipient_usernames' => $validated['recipients_type'] === 'users' ? ($validated['recipient_usernames'] ?? []) : [],
             'type' => $validated['type'] ?? 'manual',
             'pref_category' => $validated['pref_category'] ?? 'management_manual',
+            'meta' => $meta !== [] ? $meta : null,
             'created_by' => $username,
             'read_by' => [],
             'deleted_by' => [],
@@ -188,25 +259,28 @@ class SystemNotificationController extends Controller
             return response()->json(['success' => true]);
         }
 
-        [$username] = $this->resolveActor($request);
+        [$username, $role] = $this->resolveActor($request);
         if ($username === '') {
-            return response()->json(['success' => true]);
+            return response()->json([
+                'success' => false,
+                'message' => 'تعذر تحديد المستخدم. أعد تسجيل الدخول.',
+            ], 422);
         }
 
-        SystemNotification::query()
-            ->where(function ($q) use ($username) {
-                $q->whereNull('deleted_by')->orWhereJsonDoesntContain('deleted_by', $username);
-            })
-            ->chunkById(100, function ($chunk) use ($username) {
-                foreach ($chunk as $notification) {
-                    $deletedBy = is_array($notification->deleted_by) ? $notification->deleted_by : [];
-                    if (!in_array($username, $deletedBy, true)) {
-                        $deletedBy[] = $username;
-                        $notification->deleted_by = array_values(array_unique($deletedBy));
-                        $notification->save();
-                    }
+        $query = $this->recipientScopeQuery($username, $role);
+        $this->notDeletedByUserScope($query, $username);
+        $this->scopePharmacyAdminAllowedTypes($query, $role);
+
+        $query->chunkById(100, function ($chunk) use ($username) {
+            foreach ($chunk as $notification) {
+                $deletedBy = is_array($notification->deleted_by) ? $notification->deleted_by : [];
+                if (!in_array($username, $deletedBy, true)) {
+                    $deletedBy[] = $username;
+                    $notification->deleted_by = array_values(array_unique($deletedBy));
+                    $notification->save();
                 }
-            });
+            }
+        }, 'id');
 
         return response()->json(['success' => true]);
     }
@@ -219,8 +293,16 @@ class SystemNotificationController extends Controller
     private function resolveActor(Request $request): array
     {
         $user = $request->user();
-        $username = trim((string) ($user->username ?? $request->input('username', $request->query('username', ''))));
-        $role = trim((string) ($user->role ?? $request->input('role', $request->query('role', ''))));
+        if ($user) {
+            return [
+                trim((string) ($user->username ?? '')),
+                trim((string) ($user->role ?? '')),
+            ];
+        }
+
+        $username = trim((string) $request->input('username', $request->query('username', '')));
+        $role = trim((string) $request->input('role', $request->query('role', '')));
+
         return [$username, $role];
     }
 }

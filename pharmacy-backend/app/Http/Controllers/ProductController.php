@@ -12,6 +12,7 @@ use App\Models\SystemNotification;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use App\Support\ActivityLogger;
 
 class ProductController extends Controller
@@ -100,27 +101,44 @@ class ProductController extends Controller
             $splitPart = $request->get('split_part'); // 1 = نصف, 2 = ثلث, 3 = ربع
             
             if ($forPos === 'true' || $forPos === '1' || $forPos === true) {
+                $productModels = $products->items();
+                $fifoByProduct = $this->buildFifoRetailSaleMetaForProducts(
+                    collect($productModels)->pluck('id')->filter()->all()
+                );
+
                 // معالجة المنتجات للبيع (POS)
-                $items = collect($products->items())->map(function ($product) use ($splitPart) {
+                $items = collect($productModels)->map(function ($product) use ($splitPart, $fifoByProduct) {
                     $productArray = $product->toArray();
                     $productArray['sale_type_names'] = $this->getProductSaleTypeNames($product);
-                    
+
+                    // سعر البطاقة في قاعدة البيانات (آخر تحديث من شراء/مخزون)
+                    $productArray['catalog_retail_price'] = round((float) ($productArray['price'] ?? 0), 2);
+
+                    $fifoMeta = $fifoByProduct[$product->id] ?? null;
+                    if ($fifoMeta && isset($fifoMeta['fifo_sale_price']) && (float) $fifoMeta['fifo_sale_price'] > 0.00001) {
+                        // للكاشير: سعر بيع الدفعة التي تُباع أولاً (FIFO) وليس فقط آخر سعر مسجّل
+                        $productArray['price'] = round((float) $fifoMeta['fifo_sale_price'], 2);
+                    }
+                    $productArray['fifo_retail_layers'] = $fifoMeta['layers'] ?? [];
+                    $productArray['fifo_sale_tiers'] = $fifoMeta['sale_tiers'] ?? [];
+                    $productArray['has_multiple_fifo_sale_prices'] = (bool) ($fifoMeta['has_multiple_sale_prices'] ?? false);
+
                     // إضافة الاسم المُجزأ للعرض
                     $productArray['split_display_name'] = $this->getSplitProductName($product, $splitPart);
-                    
+
                     // إذا تم تحديد جزء معين والمنتج يسمح بالتجزئة
                     if ($splitPart && $product->allow_split_sales) {
                         $divideInto = (int) ($product->divide_into ?: 1);
-                        $originalPrice = (float) $product->price;
-                        $partPrice = $originalPrice / $divideInto;
-                        
+                        $originalPrice = (float) $productArray['price'];
+                        $partPrice = $divideInto > 0 ? $originalPrice / $divideInto : $originalPrice;
+
                         $productArray['original_price'] = $originalPrice;
                         $productArray['price'] = round($partPrice, 2);
                         $productArray['split_part'] = (int) $splitPart;
                         $productArray['divide_into'] = $divideInto;
                         $productArray['part_price'] = round($partPrice, 2);
                     }
-                    
+
                     return $productArray;
                 });
                 
@@ -186,6 +204,96 @@ class ProductController extends Controller
 
 
 
+
+    /**
+     * لكل منتج: طبقات مخزون بسعر البيع المسجّل وقت الشراء (وحدة البيع) — الأقدم أولاً لـ FIFO.
+     *
+     * @param  array<int>  $productIds
+     * @return array<int, array{layers: array, fifo_sale_price: ?float, has_multiple_sale_prices: bool}>
+     */
+    private function buildFifoRetailSaleMetaForProducts(array $productIds): array
+    {
+        $productIds = array_values(array_unique(array_filter(array_map('intval', $productIds))));
+        if ($productIds === [] || !Schema::hasColumn('purchase_items', 'remaining_quantity')) {
+            return [];
+        }
+
+        $rows = PurchaseItem::query()
+            ->whereIn('product_id', $productIds)
+            ->where('remaining_quantity', '>', 0)
+            ->orderBy('id')
+            ->get(['id', 'product_id', 'remaining_quantity', 'sale_price', 'purchase_id']);
+
+        if ($rows->isEmpty()) {
+            return [];
+        }
+
+        $purchaseIds = $rows->pluck('purchase_id')->unique()->filter()->values()->all();
+        $invoiceByPurchase = $purchaseIds === []
+            ? []
+            : Purchase::query()->whereIn('id', $purchaseIds)->pluck('invoice_number', 'id')->all();
+
+        $byPid = [];
+        foreach ($rows as $r) {
+            $pid = (int) $r->product_id;
+            if (!isset($byPid[$pid])) {
+                $byPid[$pid] = [
+                    'layers' => [],
+                    'fifo_sale_price' => null,
+                    'has_multiple_sale_prices' => false,
+                ];
+            }
+            $sp = round((float) ($r->sale_price ?? 0), 2);
+            $byPid[$pid]['layers'][] = [
+                'purchase_item_id' => (int) $r->id,
+                'remaining_quantity' => round((float) $r->remaining_quantity, 4),
+                'sale_price' => $sp,
+                'invoice_number' => $invoiceByPurchase[$r->purchase_id] ?? null,
+            ];
+        }
+
+        foreach ($byPid as $pid => &$meta) {
+            foreach ($meta['layers'] as $L) {
+                if ($L['sale_price'] > 0.00001) {
+                    $meta['fifo_sale_price'] = (float) $L['sale_price'];
+                    break;
+                }
+            }
+            $uniq = array_values(array_unique(array_map(fn ($x) => round((float) $x['sale_price'], 2), $meta['layers'])));
+            $meta['has_multiple_sale_prices'] = count($uniq) > 1;
+
+            // دمج طبقات بنفس سعر البيع لوحدة العرض — مع ترتيب FIFO (أول ظهور لسعر جديد)
+            $tierOrder = [];
+            $tierAgg = [];
+            foreach ($meta['layers'] as $L) {
+                $sp = round((float) $L['sale_price'], 2);
+                if ($sp <= 0.00001) {
+                    continue;
+                }
+                $key = (string) $sp;
+                if (!isset($tierAgg[$key])) {
+                    $tierAgg[$key] = [
+                        'sale_price' => $sp,
+                        'remaining_pieces' => 0.0,
+                    ];
+                    $tierOrder[] = $key;
+                }
+                $tierAgg[$key]['remaining_pieces'] += (float) $L['remaining_quantity'];
+            }
+            $saleTiers = [];
+            $idx = 0;
+            foreach ($tierOrder as $k) {
+                $row = $tierAgg[$k];
+                $row['remaining_pieces'] = round($row['remaining_pieces'], 4);
+                $row['tier_index'] = $idx++;
+                $saleTiers[] = $row;
+            }
+            $meta['sale_tiers'] = $saleTiers;
+        }
+        unset($meta);
+
+        return $byPid;
+    }
 
 /**
  * الحصول على اسم المنتج مع التجزئة للبيع
@@ -286,13 +394,15 @@ private function getProductSaleTypeNames($product): array
             'existing_id' => $existingProduct->id,
             'existing_code' => $existingProduct->code
         ]);
-        
+
+        $detail = 'اسم المنتج "' . $request->name . '" موجود مسبقاً (الكود: ' . $existingProduct->code . ')';
+
         return response()->json([
             'success' => false,
-            'message' => 'خطأ في إضافة المنتج',
+            'message' => $detail,
             'errors' => [
-                'name' => ['اسم المنتج "' . $request->name . '" موجود مسبقاً (الكود: ' . $existingProduct->code . ')']
-            ]
+                'name' => [$detail],
+            ],
         ], 422);
     }
     
@@ -592,73 +702,6 @@ private function getProductSaleTypeNames($product): array
 
 
 
-public function getProductsByCategory($categoryId)
-{
-    try {
-        $category = Category::find($categoryId);
-        
-        if (!$category) {
-            return response()->json([
-                'success' => false,
-                'message' => 'القسم غير موجود'
-            ], 404);
-        }
-        
-        // جلب المنتجات المرتبطة بالقسم (many-to-many)
-     $products = Product::whereHas('categories', function ($query) use ($categoryId) {
-        $query->where('categories.id', $categoryId);
-    })
-    ->orWhere('category_id', $categoryId)
-    ->select([
-        'id', 'name', 'description', 'image_url', 'price', 'purchase_price', // ⭐ أضف purchase_price
-        'cost_price', 'stock', 'unit', 'sale_unit', 'sku', 'barcode',
-        'strips_per_box', 'pieces_per_strip', 'strip_unit_count',
-        'category_id', 'supplier_id', 'min_stock', 'max_stock',
-        'reorder_point', 'is_active'
-    ])
-    ->with(['category:id,name', 'supplier:id,name'])
-    ->withCount('purchaseItems')
-    ->orderBy('name')
-    ->get();
-        
-        // إحصائيات
-        $stats = [
-            'total_products' => $products->count(),
-            'total_stock' => $products->sum('stock'),
-            'total_value' => $products->sum(fn ($product) => $product->stockInventoryValue()),
-            'low_stock' => $products->filter(function($product) {
-                return $product->stock <= $product->reorder_point && $product->stock > 0;
-            })->count(),
-            'out_of_stock' => $products->filter(function($product) {
-                return $product->stock <= 0;
-            })->count()
-        ];
-        
-        return response()->json([
-            'success' => true,
-            'data' => [
-                'category' => [
-                    'id' => $category->id,
-                    'name' => $category->name,
-                    'slug' => $category->slug,
-                    'description' => $category->description
-                ],
-                'products' => $products,
-                'stats' => $stats
-            ],
-            'message' => 'تم جلب منتجات القسم بنجاح'
-        ]);
-        
-    } catch (\Exception $e) {
-        \Log::error('Error fetching products by category: ' . $e->getMessage());
-        
-        return response()->json([
-            'success' => false,
-            'message' => 'حدث خطأ في جلب بيانات المنتجات',
-            'error' => env('APP_DEBUG') ? $e->getMessage() : null
-        ], 500);
-    }
-}
     /**
      * عرض منتج محدد
      */
@@ -716,6 +759,163 @@ public function getProductsByCategory($categoryId)
                 'error' => env('APP_DEBUG') ? $e->getMessage() : null
             ], 500);
         }
+    }
+
+    /**
+     * طبقات تكلفة المخزون (FIFO): كل دفعة شراء بسعرها والكمية المتبقية منها بالحبات.
+     */
+    public function inventoryCostLayers(Product $product)
+    {
+        try {
+            if (!Schema::hasColumn('purchase_items', 'remaining_quantity')) {
+                return response()->json([
+                    'success' => true,
+                    'data' => [
+                        'layers' => [],
+                        'stock_pieces' => round((float) ($product->stock ?? 0), 4),
+                        'layers_remaining_sum' => null,
+                        'layers_stock_mismatch' => false,
+                        'note' => 'عمود الكمية المتبقية غير موجود — شغّل ترحيلات قاعدة البيانات.',
+                    ],
+                ]);
+            }
+
+            $rows = PurchaseItem::query()
+                ->where('product_id', $product->id)
+                ->where('remaining_quantity', '>', 0)
+                ->orderBy('id', 'asc')
+                ->with(['purchase' => fn ($q) => $q->select('id', 'invoice_number', 'purchase_date')])
+                ->get();
+
+            $layers = $rows->map(function (PurchaseItem $row) {
+                $rem = (float) $row->remaining_quantity;
+                $uc = (float) $row->unit_price;
+                $sp = (float) ($row->sale_price ?? 0);
+                $p = $row->purchase;
+
+                return [
+                    'purchase_item_id' => $row->id,
+                    'purchase_id' => $row->purchase_id,
+                    'invoice_number' => $p?->invoice_number,
+                    'purchase_date' => $p && $p->purchase_date ? $p->purchase_date->format('Y-m-d') : null,
+                    'remaining_quantity' => round($rem, 4),
+                    'unit_cost_per_piece' => round($uc, 4),
+                    'sale_price_per_sale_unit' => round($sp, 2),
+                    'layer_stock_value' => round($rem * $uc, 2),
+                ];
+            })->values();
+
+            $sumRem = (float) $rows->sum(fn ($r) => (float) $r->remaining_quantity);
+            $stock = (float) ($product->stock ?? 0);
+
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'layers' => $layers,
+                    'stock_pieces' => round($stock, 4),
+                    'layers_remaining_sum' => round($sumRem, 4),
+                    'layers_stock_mismatch' => abs($sumRem - $stock) > 0.05,
+                    'fifo_explanation' => 'عند البيع يُستهلك السطر الأول أولاً (أقدم شراء)، ثم التالي — لكل دفعة تكلفة حبة مختلفة إن اختلف سعر الشراء.',
+                ],
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'تعذر جلب طبقات التكلفة',
+                'error' => config('app.debug') ? $e->getMessage() : null,
+            ], 500);
+        }
+    }
+
+    /**
+     * تحديث مسميات الصنف وأجزائه من الكاشير (بدون إعادة حساب التعبئة الكاملة أو المخزون).
+     */
+    public function patchCashierDisplayLabels(Request $request, $id)
+    {
+        $product = Product::find($id);
+        if (!$product) {
+            return response()->json([
+                'success' => false,
+                'message' => 'المنتج غير موجود',
+            ], 404);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'name' => 'sometimes|string|max:255|unique:products,name,' . $id,
+            'full_unit_name' => 'nullable|string|max:120',
+            'split_item_name' => 'nullable|string|max:50',
+            'split_level1_name' => 'nullable|string|max:80',
+            'split_level2_name' => 'nullable|string|max:80',
+            'usage_how_to' => 'nullable|string|max:2000',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'خطأ في التحقق من البيانات',
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        $data = $validator->validated();
+        foreach (['full_unit_name', 'split_item_name', 'split_level1_name', 'split_level2_name', 'usage_how_to'] as $key) {
+            if (array_key_exists($key, $data) && $data[$key] !== null && trim((string) $data[$key]) === '') {
+                $data[$key] = null;
+            }
+        }
+
+        foreach ($data as $key => $value) {
+            $product->{$key} = $value;
+        }
+
+        $opts = $product->split_sale_options;
+        if (is_array($opts) && count($opts) > 0) {
+            $fullLabel = trim((string) ($product->full_unit_name ?? ''));
+            if ($fullLabel === '') {
+                $fullLabel = 'وحدة كاملة';
+            }
+            $div = max(1, (int) ($product->divide_into ?? 1));
+            $lvl1 = trim((string) ($product->split_level1_name ?? ''));
+            if ($lvl1 === '') {
+                $lvl1 = $div === 2 ? 'نصف' : ($div === 3 ? 'ثلث' : ($div === 4 ? 'ربع' : 'جزء'));
+            }
+            $lvl2 = trim((string) ($product->split_level2_name ?? ''));
+            if ($lvl2 === '') {
+                $lvl2 = trim((string) ($product->split_item_name ?? '')) ?: 'حبة';
+            }
+
+            foreach ($opts as $i => $o) {
+                if (!is_array($o)) {
+                    continue;
+                }
+                $oid = (string) ($o['id'] ?? '');
+                if ($oid === 'full') {
+                    $opts[$i]['label'] = $fullLabel;
+                } elseif ($oid === 'level1') {
+                    $opts[$i]['label'] = $lvl1;
+                } elseif ($oid === 'level2') {
+                    $opts[$i]['label'] = $lvl2;
+                }
+            }
+            $product->split_sale_options = $opts;
+        }
+
+        $product->save();
+        $product->load(['categories:id,name']);
+
+        $out = $product->toArray();
+        $out['sale_type_names'] = $this->getProductSaleTypeNames($product);
+
+        $message = 'تم حفظ المسميات';
+        if (count($data) === 1 && array_key_exists('usage_how_to', $data)) {
+            $message = 'تم حفظ كيفية الاستعمال';
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => $message,
+            'data' => $out,
+        ]);
     }
     
     /**
@@ -1327,80 +1527,6 @@ private function normalizeStockToInventoryPieces(float $stockInput, array $shape
 
 
     
-    /**
- * استعادة منتج محذوف
- */
-public function restore($id)
-{
-    try {
-        $product = Product::withTrashed()->find($id);
-        
-        if (!$product) {
-            return response()->json([
-                'success' => false,
-                'message' => 'المنتج غير موجود حتى في المحذوفات'
-            ], 404);
-        }
-        
-        $product->restore();
-        
-        return response()->json([
-            'success' => true,
-            'message' => 'تم استعادة المنتج بنجاح',
-            'data' => $product->load(['categories'])
-        ]);
-        
-    } catch (\Exception $e) {
-        \Log::error('🔥 RESTORE ERROR:', [
-            'id' => $id,
-            'error' => $e->getMessage()
-        ]);
-        
-        return response()->json([
-            'success' => false,
-            'message' => 'حدث خطأ أثناء استعادة المنتج',
-            'error' => env('APP_DEBUG') ? $e->getMessage() : null
-        ], 500);
-    }
-}
-
-/**
- * عرض المنتجات المحذوفة
- */
-public function trashed(Request $request)
-{
-    try {
-        $perPage = $request->get('per_page', 15);
-        
-        $products = Product::onlyTrashed()
-            ->with(['categories:id,name'])
-            ->orderBy('deleted_at', 'desc')
-            ->paginate($perPage);
-        
-        return response()->json([
-            'success' => true,
-            'data' => $products->items(),
-            'pagination' => [
-                'total' => $products->total(),
-                'per_page' => $products->perPage(),
-                'current_page' => $products->currentPage(),
-                'last_page' => $products->lastPage(),
-            ],
-            'message' => 'تم جلب المنتجات المحذوفة بنجاح'
-        ]);
-        
-    } catch (\Exception $e) {
-        \Log::error('🔥 TRASHED ERROR:', [
-            'error' => $e->getMessage()
-        ]);
-        
-        return response()->json([
-            'success' => false,
-            'message' => 'حدث خطأ في جلب المنتجات المحذوفة',
-            'error' => env('APP_DEBUG') ? $e->getMessage() : null
-        ], 500);
-    }
-}
 
 
     /**
@@ -1563,265 +1689,6 @@ public function destroy($id)
     }
 }
     
-    /**
-     * البحث المتقدم عن منتجات
-     */
-    public function search(Request $request)
-    {
-        $validator = Validator::make($request->all(), [
-            'query' => 'required|string|min:2|max:100'
-        ]);
-        
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'أدخل كلمة بحث صحيحة (من 2 إلى 100 حرف)',
-                'errors' => $validator->errors()
-            ], 422);
-        }
-        
-        try {
-            $products = Product::with(['category:id,name', 'supplier:id,name'])
-                ->where(function ($query) use ($request) {
-                    $query->where('name', 'LIKE', '%' . $request->query . '%')
-                          ->orWhere('description', 'LIKE', '%' . $request->query . '%')
-                          ->orWhere('sku', 'LIKE', '%' . $request->query . '%')
-                          ->orWhere('barcode', 'LIKE', '%' . $request->query . '%');
-                })
-                ->where('is_active', true)
-                ->orderBy('name')
-                ->limit(20)
-                ->get();
-            
-            return response()->json([
-                'success' => true,
-                'data' => $products,
-                'count' => $products->count(),
-                'message' => 'تم العثور على ' . $products->count() . ' منتج'
-            ]);
-            
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'حدث خطأ في البحث',
-                'error' => env('APP_DEBUG') ? $e->getMessage() : null
-            ], 500);
-        }
-    }
-    
-    /**
-     * المنتجات منخفضة المخزون
-     */
-    public function lowStock(Request $request)
-    {
-        try {
-            $perPage = $request->get('per_page', 20);
-            
-            $products = Product::with(['category:id,name', 'supplier:id,name'])
-                ->where('is_active', true)
-                ->whereRaw('stock <= reorder_point AND stock > 0')
-                ->orderByRaw('stock / GREATEST(reorder_point, 1)') // الترتيب حسب نسبة النفاد
-                ->paginate($perPage);
-            
-            $totalValue = Product::whereRaw('stock <= reorder_point AND stock > 0')
-                ->get(['stock', 'cost_price', 'sale_unit', 'unit', 'strips_per_box', 'pieces_per_strip', 'strip_unit_count'])
-                ->sum(fn ($p) => $p->stockInventoryValue());
-            
-            return response()->json([
-                'success' => true,
-                'data' => $products->items(),
-                'pagination' => [
-                    'total' => $products->total(),
-                    'per_page' => $products->perPage(),
-                    'current_page' => $products->currentPage(),
-                    'last_page' => $products->lastPage(),
-                ],
-                'stats' => [
-                    'total_products' => $products->total(),
-                    'total_value' => $totalValue,
-                    'critical_count' => Product::where('stock', '<=', 0)->count()
-                ],
-                'message' => 'تم جلب المنتجات منخفضة المخزون بنجاح'
-            ]);
-            
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'حدث خطأ في جلب المنتجات منخفضة المخزون',
-                'error' => env('APP_DEBUG') ? $e->getMessage() : null
-            ], 500);
-        }
-    }
-    
-    /**
-     * المنتجات المنتهية من المخزون
-     */
-    public function outOfStock(Request $request)
-    {
-        try {
-            $perPage = $request->get('per_page', 20);
-            
-            $products = Product::with(['category:id,name', 'supplier:id,name,phone'])
-                ->where('is_active', true)
-                ->where('stock', '<=', 0)
-                ->orderBy('name')
-                ->paginate($perPage);
-            
-            return response()->json([
-                'success' => true,
-                'data' => $products->items(),
-                'pagination' => $products->pagination(),
-                'stats' => [
-                    'total_products' => $products->total(),
-                    'suppliers_count' => $products->unique('supplier_id')->count(),
-                    'categories_count' => $products->unique('category_id')->count()
-                ],
-                'message' => 'تم جلب المنتجات المنتهية بنجاح'
-            ]);
-            
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'حدث خطأ في جلب المنتجات المنتهية',
-                'error' => env('APP_DEBUG') ? $e->getMessage() : null
-            ], 500);
-        }
-    }
-    
-    /**
-     * زيادة مخزون منتج (للمشتريات)
-     */
-    public function increaseStock(Request $request, $id)
-    {
-        $product = Product::find($id);
-        
-        if (!$product) {
-            return response()->json([
-                'success' => false,
-                'message' => 'المنتج غير موجود'
-            ], 404);
-        }
-        
-        $validator = Validator::make($request->all(), [
-            'quantity' => ['required', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0.1'],
-            'purchase_price' => ['nullable', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0'],
-            'reason' => 'nullable|string|max:255',
-            'reference' => 'nullable|string|max:100'
-        ]);
-        
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'خطأ في التحقق من البيانات',
-                'errors' => $validator->errors()
-            ], 422);
-        }
-        
-        try {
-            DB::transaction(function () use ($product, $request) {
-                // زيادة المخزون
-                $oldStock = $product->stock;
-                $newStock = $oldStock + $request->quantity;
-                
-                // تحديث سعر الشراء إذا تم إدخاله
-                if ($request->purchase_price) {
-                    $product->purchase_price = $request->purchase_price;
-                    $product->cost_price = $request->purchase_price;
-                }
-                
-                $product->stock = $newStock;
-                $product->save();
-                
-                // تسجيل حركة المخزون (إذا عندك جدول stock_movements)
-                // StockMovement::create([...]);
-                
-                // تحديث سجل المشتريات (سيتم من خلال PurchaseController)
-            });
-            
-            return response()->json([
-                'success' => true,
-                'message' => 'تم زيادة المخزون بنجاح',
-                'data' => [
-                    'product_id' => $product->id,
-                    'product_name' => $product->name,
-                    'old_stock' => $oldStock,
-                    'added_quantity' => $request->quantity,
-                    'new_stock' => $newStock,
-                    'updated_purchase_price' => $request->purchase_price
-                ]
-            ]);
-            
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'حدث خطأ أثناء زيادة المخزون',
-                'error' => env('APP_DEBUG') ? $e->getMessage() : null
-            ], 500);
-        }
-    }
-    
-    /**
-     * تقليل مخزون منتج (للبيع أو التالف)
-     */
-    public function decreaseStock(Request $request, $id)
-    {
-        $product = Product::find($id);
-        
-        if (!$product) {
-            return response()->json([
-                'success' => false,
-                'message' => 'المنتج غير موجود'
-            ], 404);
-        }
-        
-        $validator = Validator::make($request->all(), [
-            'quantity' => ['required', 'numeric', 'regex:/^\d+(\.\d)?$/', 'min:0.1', 'max:' . $product->stock],
-            'reason' => 'required|string|in:sale,damaged,expired,adjustment',
-            'notes' => 'nullable|string|max:500',
-            'reference' => 'nullable|string|max:100'
-        ]);
-        
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'خطأ في التحقق من البيانات',
-                'errors' => $validator->errors()
-            ], 422);
-        }
-        
-        try {
-            DB::transaction(function () use ($product, $request) {
-                $oldStock = $product->stock;
-                $newStock = max(0, $oldStock - $request->quantity);
-                
-                $product->stock = $newStock;
-                $product->save();
-                
-                // تسجيل حركة المخزون
-                // StockMovement::create([...]);
-            });
-            
-            return response()->json([
-                'success' => true,
-                'message' => 'تم تقليل المخزون بنجاح',
-                'data' => [
-                    'product_id' => $product->id,
-                    'product_name' => $product->name,
-                    'old_stock' => $oldStock,
-                    'removed_quantity' => $request->quantity,
-                    'new_stock' => $newStock,
-                    'reason' => $request->reason
-                ]
-            ]);
-            
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'حدث خطأ أثناء تقليل المخزون',
-                'error' => env('APP_DEBUG') ? $e->getMessage() : null
-            ], 500);
-        }
-    }
     
     /**
      * إحصائيات المنتجات
@@ -1883,228 +1750,7 @@ public function destroy($id)
         }
     }
     
-    /**
-     * البحث عن منتج بالباركود أو SKU
-     */
-    public function searchByCode(Request $request)
-    {
-        $validator = Validator::make($request->all(), [
-            'code' => 'required|string|max:100'
-        ]);
-        
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'أدخل رمز البحث',
-                'errors' => $validator->errors()
-            ], 422);
-        }
-        
-        try {
-            $product = Product::with(['category:id,name', 'supplier:id,name'])
-                ->where('barcode', $request->code)
-                ->orWhere('sku', $request->code)
-                ->where('is_active', true)
-                ->first();
-            
-            if (!$product) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'لم يتم العثور على المنتج'
-                ], 404);
-            }
-            
-            return response()->json([
-                'success' => true,
-                'data' => $product,
-                'message' => 'تم العثور على المنتج بنجاح'
-            ]);
-            
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'حدث خطأ في البحث',
-                'error' => env('APP_DEBUG') ? $e->getMessage() : null
-            ], 500);
-        }
-    }
 
-
-    /**
- * تعطيل/تفعيل منتج
- */
-public function toggleStatus($id)
-{
-    try {
-        $product = Product::find($id);
-        
-        if (!$product) {
-            return response()->json([
-                'success' => false,
-                'message' => 'المنتج غير موجود'
-            ], 404);
-        }
-        
-        // حفظ الحالة القديمة للـlog
-        $oldStatus = $product->is_active;
-        
-        // تغيير الحالة
-        $product->is_active = !$product->is_active;
-        $product->save();
-        
-        // تحميل العلاقات
-        $product->load(['categories:id,name']);
-        
-        $status = $product->is_active ? 'مفعل' : 'معطل';
-        
-        \Log::info('🔄 PRODUCT STATUS CHANGED:', [
-            'id' => $product->id,
-            'name' => $product->name,
-            'old_status' => $oldStatus ? 'نشط' : 'معطل',
-            'new_status' => $status
-        ]);
-        
-        return response()->json([
-            'success' => true,
-            'message' => 'تم ' . $status . ' المنتج "' . $product->name . '" بنجاح',
-            'data' => [
-                'id' => $product->id,
-                'name' => $product->name,
-                'is_active' => $product->is_active,
-                'status_text' => $status,
-                'updated_at' => $product->updated_at
-            ]
-        ]);
-        
-    } catch (\Exception $e) {
-        \Log::error('🔥 TOGGLE STATUS ERROR:', [
-            'id' => $id,
-            'error' => $e->getMessage()
-        ]);
-        
-        return response()->json([
-            'success' => false,
-            'message' => 'حدث خطأ أثناء تغيير حالة المنتج',
-            'error' => env('APP_DEBUG') ? $e->getMessage() : null
-        ], 500);
-    }
-}
-
-/**
- * تعطيل منتج محدد
- */
-public function disable($id)
-{
-    try {
-        $product = Product::find($id);
-        
-        if (!$product) {
-            return response()->json([
-                'success' => false,
-                'message' => 'المنتج غير موجود'
-            ], 404);
-        }
-        
-        if (!$product->is_active) {
-            return response()->json([
-                'success' => false,
-                'message' => 'المنتج معطل بالفعل'
-            ], 400);
-        }
-        
-        $product->is_active = false;
-        $product->save();
-        
-        \Log::info('⏸️ PRODUCT DISABLED:', [
-            'id' => $product->id,
-            'name' => $product->name,
-            'disabled_by' => auth()->id() ?? 'system'
-        ]);
-        
-        return response()->json([
-            'success' => true,
-            'message' => 'تم تعطيل المنتج "' . $product->name . '" بنجاح',
-            'data' => [
-                'id' => $product->id,
-                'name' => $product->name,
-                'code' => $product->code,
-                'is_active' => false,
-                'status' => 'معطل',
-                'note' => 'تم تعطيل المنتج ولن يظهر في قوائم البيع'
-            ]
-        ]);
-        
-    } catch (\Exception $e) {
-        \Log::error('🔥 DISABLE ERROR:', [
-            'id' => $id,
-            'error' => $e->getMessage()
-        ]);
-        
-        return response()->json([
-            'success' => false,
-            'message' => 'حدث خطأ أثناء تعطيل المنتج',
-            'error' => env('APP_DEBUG') ? $e->getMessage() : null
-        ], 500);
-    }
-}
-
-/**
- * تفعيل منتج محدد
- */
-public function enable($id)
-{
-    try {
-        $product = Product::find($id);
-        
-        if (!$product) {
-            return response()->json([
-                'success' => false,
-                'message' => 'المنتج غير موجود'
-            ], 404);
-        }
-        
-        if ($product->is_active) {
-            return response()->json([
-                'success' => false,
-                'message' => 'المنتج مفعل بالفعل'
-            ], 400);
-        }
-        
-        $product->is_active = true;
-        $product->save();
-        
-        \Log::info('✅ PRODUCT ENABLED:', [
-            'id' => $product->id,
-            'name' => $product->name,
-            'enabled_by' => auth()->id() ?? 'system'
-        ]);
-        
-        return response()->json([
-            'success' => true,
-            'message' => 'تم تفعيل المنتج "' . $product->name . '" بنجاح',
-            'data' => [
-                'id' => $product->id,
-                'name' => $product->name,
-                'code' => $product->code,
-                'is_active' => true,
-                'status' => 'مفعل',
-                'note' => 'تم تفعيل المنتج ويمكن الآن بيعه'
-            ]
-        ]);
-        
-    } catch (\Exception $e) {
-        \Log::error('🔥 ENABLE ERROR:', [
-            'id' => $id,
-            'error' => $e->getMessage()
-        ]);
-        
-        return response()->json([
-            'success' => false,
-            'message' => 'حدث خطأ أثناء تفعيل المنتج',
-            'error' => env('APP_DEBUG') ? $e->getMessage() : null
-        ], 500);
-    }
-}
 
 /**
  * تطبيق جرد المخزون دفعة واحدة مع تسجيل النشاط وإشعار الإدارة.
@@ -2175,7 +1821,9 @@ public function applyStocktake(Request $request)
             ]);
         }
 
-        if ($totalChanged > 0 && \Schema::hasTable('system_notifications')) {
+        $stocktakeActor = $request->user();
+        $skipStocktakeNotify = $stocktakeActor && in_array((string) ($stocktakeActor->role ?? ''), ['cashier', 'super_cashier'], true);
+        if ($totalChanged > 0 && \Schema::hasTable('system_notifications') && !$skipStocktakeNotify) {
             $detailsLines = array_map(function ($x) {
                 $sign = (float) $x['difference'] >= 0 ? '+' : '';
                 return "{$x['product_name']} | {$x['before_qty']} → {$x['after_qty']} | فرق {$sign}{$x['difference']}";
@@ -2220,40 +1868,6 @@ public function applyStocktake(Request $request)
     }
 }
 
-/**
- * تصفير الأصناف (حذف جميع المنتجات وربطها بالأقسام) بشكل مركزي من الباك اند.
- */
-public function resetAllProducts()
-{
-    try {
-        DB::beginTransaction();
-
-        if (\Schema::hasTable('category_product')) {
-            DB::table('category_product')->delete();
-        }
-
-        DB::table('products')->delete();
-
-        DB::commit();
-
-        return response()->json([
-            'success' => true,
-            'message' => 'تم تصفير جميع الأصناف بنجاح'
-        ]);
-    } catch (\Exception $e) {
-        DB::rollBack();
-        \Log::error('🔥 RESET PRODUCTS ERROR:', [
-            'error' => $e->getMessage(),
-            'trace' => $e->getTraceAsString()
-        ]);
-
-        return response()->json([
-            'success' => false,
-            'message' => 'فشل تصفير الأصناف',
-            'error' => env('APP_DEBUG') ? $e->getMessage() : null
-        ], 500);
-    }
-}
 
 private function generateUniqueBarcode(): string
 {

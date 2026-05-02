@@ -306,14 +306,8 @@ public function store(Request $request)
             'other_expenses.*.title' => 'required_with:other_expenses|string|max:255',
             'other_expenses.*.payment_method' => 'required_with:other_expenses|in:cash,app',
             'other_expenses.*.amount' => ['required_with:other_expenses', 'numeric', 'regex:/^\d+(\.\d+)?$/', 'min:0.01'],
+            'discount' => ['nullable', 'numeric', 'regex:/^\d+(\.\d+)?$/', 'min:0'],
         ]);
-
-        if ((float) $request->paid_amount > (float) $request->total_amount + 0.0001) {
-            return response()->json([
-                'success' => false,
-                'message' => 'المبلغ المدفوع لا يمكن أن يكون أكبر من إجمالي الفاتورة'
-            ], 422);
-        }
 
         $paymentValidation = $this->validateAndNormalizePaymentBreakdown(
             strtolower((string) $request->payment_method),
@@ -348,17 +342,52 @@ public function store(Request $request)
             ], 422);
         }
 
+        // إجمالي قبل الخصم = بنود + مصاريف إضافية؛ الإجمالي النهائي = قبل الخصم − خصم مبلغ ثابت
+        $sumLineTotals = round((float) $itemsInput->sum(function ($item) {
+            return (float) ($item['total_price'] ?? 0);
+        }), 2);
+        $grossTotal = round($sumLineTotals + $otherExpensesTotal, 2);
+        $discountRequested = round(max(0.0, (float) $request->input('discount', 0)), 2);
+        $purchaseDiscount = round(min($discountRequested, $grossTotal), 2);
+        $expectedNet = round($grossTotal - $purchaseDiscount, 2);
+        $clientGrand = round((float) $request->total_amount, 2);
+        if (abs($expectedNet - $clientGrand) > 0.05) {
+            return response()->json([
+                'success' => false,
+                'message' => 'إجمالي فاتورة الشراء لا يطابق (مجموع البنود والمصاريف − خصم المبلغ).',
+                'error_code' => 'PURCHASE_TOTAL_MISMATCH',
+                'data' => [
+                    'computed_net_total' => $expectedNet,
+                    'client_total' => $clientGrand,
+                    'gross_total' => $grossTotal,
+                    'discount' => $purchaseDiscount,
+                    'lines_sum' => $sumLineTotals,
+                    'other_expenses' => $otherExpensesTotal,
+                ],
+            ], 422);
+        }
+
+        $paidTotalInput = round(max(0.0, (float) $request->paid_amount), 2);
+        if ($paidTotalInput > $expectedNet + 0.0001 && !$request->supplier_id) {
+            return response()->json([
+                'success' => false,
+                'message' => 'دفع مبلغ أكبر من إجمالي الفاتورة مسموح فقط عند اختيار مورد، ليُوجَّه الفائض لتسديد دين سابق مسجَّل على رصيد المورد (أو رصيد مسبق).',
+            ], 422);
+        }
+
+        $invoicePaidAmount = round(min($paidTotalInput, $expectedNet), 2);
+
         DB::beginTransaction();
 
-        // حساب المبالغ
-        $remainingAmount = $request->remaining_amount ?? ($request->total_amount - $request->paid_amount);
+        // حساب المبالغ — المدفوع على الفاتورة فقط؛ الزيادة تُعالَج على رصيد المورد وحركة الخزنة بالمبلغ الكامل
+        $remainingAmount = round($expectedNet - $invoicePaidAmount, 2);
         $status = $request->status;
         
         // تحديد الحالة التلقائية إذا لم يتم تحديدها
         if (!$status) {
-            if ($request->paid_amount == 0) {
+            if ($invoicePaidAmount == 0) {
                 $status = 'pending';
-            } elseif ($request->paid_amount < $request->total_amount) {
+            } elseif ($invoicePaidAmount < $expectedNet - 0.0001) {
                 $status = 'partially_paid';
             } else {
                 $status = 'completed';
@@ -369,9 +398,11 @@ public function store(Request $request)
         $purchase = Purchase::create([
             'invoice_number' => $request->invoice_number,
             'supplier_id' => $request->supplier_id,
-            'total_amount' => $request->total_amount,
-            'grand_total' => $request->total_amount,
-            'paid_amount' => $request->paid_amount,
+            'total_amount' => $expectedNet,
+            'grand_total' => $expectedNet,
+            'discount' => $purchaseDiscount,
+            'tax' => 0,
+            'paid_amount' => $invoicePaidAmount,
             'remaining_amount' => $remainingAmount,
             'due_amount' => $remainingAmount,
             'status' => $status,
@@ -506,12 +537,14 @@ if ($product->allow_split_sales && $product->price > 0) {
         }
 
         // 3. محفظة المورد: رصيد سالب = دين نُسدّده بالمدفوع (كامل المبلغ من الخزنة)؛ رصيد موجب = دفعة مسبقة تُخصم من الخزنة
-        $paidTotal = round((float) $request->paid_amount, 2);
+        $paidTotal = $paidTotalInput;
         $treasuryDeduction = $paidTotal;
         $prepaidUsed = 0.0;
         $debtReduced = 0.0;
         $supplierBalanceDelta = null;
         $supplierWalletBefore = null;
+        $owedBeforeForSupplier = 0.0;
+        $debtSettledWithSurplus = 0.0;
 
         if ($request->supplier_id && $paidTotal > 0.00001) {
             $supplier = Supplier::lockForUpdate()->find($request->supplier_id);
@@ -520,7 +553,10 @@ if ($product->allow_split_sales && $product->price > 0) {
                 $bal = $supplierWalletBefore;
 
                 if ($bal < -0.00001) {
+                    $owedBeforeForSupplier = round(-$bal, 2);
                     $debtReduced = round(min($paidTotal, -$bal), 2);
+                    $surplusAfterInvoice = round(max(0.0, $paidTotal - $invoicePaidAmount), 2);
+                    $debtSettledWithSurplus = round(min($surplusAfterInvoice, $owedBeforeForSupplier), 2);
                     $supplier->balance = round($bal + $paidTotal, 2);
                     $supplier->save();
                     $treasuryDeduction = $paidTotal;
@@ -602,11 +638,21 @@ if ($product->allow_split_sales && $product->price > 0) {
                 $treasury->save();
 
                 $baseNote = $request->treasury_note ?? "دفع فاتورة شراء #{$request->invoice_number}";
+                if ($invoicePaidAmount > 0.00001) {
+                    $baseNote .= ' — على الفاتورة: ' . number_format($invoicePaidAmount, 2) . ' شيكل';
+                }
+                if ($paidTotal > $invoicePaidAmount + 0.00001) {
+                    $baseNote .= ' — إجمالي من الخزنة: ' . number_format($paidTotal, 2) . ' شيكل';
+                }
                 if ($prepaidUsed > 0.00001) {
                     $baseNote .= ' — منها ' . number_format($prepaidUsed, 2) . ' من رصيد مسبق للمورد';
                 }
-                if ($debtReduced > 0.00001) {
-                    $baseNote .= ' — منها ' . number_format($debtReduced, 2) . ' تسديد دين سابق للمورد';
+                if ($debtSettledWithSurplus > 0.00001 && $owedBeforeForSupplier > 0.00001) {
+                    $baseNote .= ' — تسديد دين سابق: ' . number_format($debtSettledWithSurplus, 2)
+                        . ' شيكل من أصل دين ' . number_format($owedBeforeForSupplier, 2) . ' شيكل (رصيد المورد قبل الدفع)';
+                } elseif ($debtReduced > 0.00001 && $owedBeforeForSupplier > 0.00001 && $debtSettledWithSurplus <= 0.00001) {
+                    $baseNote .= ' — تسديد دين سابق على المورد: ' . number_format($debtReduced, 2)
+                        . ' شيكل من أصل ' . number_format($owedBeforeForSupplier, 2) . ' شيكل';
                 }
 
                 foreach (
@@ -650,7 +696,9 @@ if ($product->allow_split_sales && $product->price > 0) {
         }
 
         try {
-            if (Schema::hasTable('system_notifications')) {
+            $purchaseActor = $request->user();
+            $skipPurchaseNotify = $purchaseActor && in_array((string) ($purchaseActor->role ?? ''), ['cashier', 'super_cashier'], true);
+            if (!$skipPurchaseNotify && Schema::hasTable('system_notifications')) {
                 SystemNotification::create([
                     'type' => 'purchase',
                     'pref_category' => 'purchase',
@@ -698,8 +746,12 @@ if ($product->allow_split_sales && $product->price > 0) {
             'data' => $purchase->load(['items', 'supplier']),
             'treasury_breakdown' => [
                 'paid_total' => $paidTotal,
+                'invoice_paid_amount' => $invoicePaidAmount,
+                'invoice_net_total' => $expectedNet,
+                'supplier_prior_debt' => $owedBeforeForSupplier,
+                'debt_settled_from_surplus' => $debtSettledWithSurplus,
+                'debt_reduced_total' => $debtReduced,
                 'from_supplier_prepaid' => $prepaidUsed,
-                'debt_reduced' => $debtReduced,
                 'supplier_balance_delta' => $supplierBalanceDelta,
                 'from_main_treasury' => max(0.0, $treasuryDeduction),
                 'other_expenses_total' => $otherExpensesTotal,

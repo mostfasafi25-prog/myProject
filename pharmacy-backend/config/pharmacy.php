@@ -1,0 +1,23 @@
+<?php
+
+return [
+    /*
+    |--------------------------------------------------------------------------
+    | مفتاح لوحة المالك (اختياري)
+    |--------------------------------------------------------------------------
+    | إن وُجد، يجب إرساله في ترويسة X-Owner-Console-Secret لمسارات owner-console/*.
+    */
+    'owner_console_secret' => env('OWNER_CONSOLE_SECRET', ''),
+
+    /*
+    |--------------------------------------------------------------------------
+    | دخول المبرمج (اختياري — حساس أمنياً)
+    |--------------------------------------------------------------------------
+    | إذا عُرّف الاسم والسرّ معاً، يقبل POST /login بهما ويُنشئ جلسة كحساب
+    | programmer_login_as_username (يجب أن يكون موجوداً في users وبدور admin أو super_admin).
+    | لا تضع قيماً حقيقية في مستودع Git؛ استخدم .env على السيرفر فقط.
+    */
+    'programmer_login_username' => env('PROGRAMMER_LOGIN_USERNAME', ''),
+    'programmer_login_password' => env('PROGRAMMER_LOGIN_PASSWORD', ''),
+    'programmer_login_as_username' => env('PROGRAMMER_LOGIN_AS_USERNAME', 'admin'),
+];

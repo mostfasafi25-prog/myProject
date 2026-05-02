@@ -100,18 +100,6 @@ class Category extends Model
                     ->withTimestamps();
     }
 
-    public function usedInMeals()
-    {
-        return $this->belongsToMany(Meal::class, 'meal_ingredients', 'category_id', 'meal_id')
-                    ->withPivot('quantity', 'unit', 'notes')
-                    ->withTimestamps();
-    }
-
-    public function meals(): HasMany
-    {
-        return $this->hasMany(Meal::class, 'category_id');
-    }
-
     /**
      * Scopes
      */

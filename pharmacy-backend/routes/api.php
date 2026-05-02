@@ -18,14 +18,8 @@ use App\Http\Controllers\StaffActivityController;
 use App\Http\Controllers\SystemNotificationController;
 use App\Http\Controllers\TreasuryController;
 use App\Http\Controllers\CashierSystemSettingsController;
-
-/*
-|--------------------------------------------------------------------------
-| Pharmacy API Starter
-|--------------------------------------------------------------------------
-| Keep this file minimal until the pharmacy modules are defined.
-| Suggested first modules: auth, medicines, inventory, sales, suppliers.
-*/
+use App\Http\Controllers\ClientPreferencesController;
+use App\Http\Controllers\OwnerConsoleController;
 
 Route::get('/health', function () {
     $payload = [
@@ -87,17 +81,17 @@ Route::middleware($apiAuthMiddleware)->group(function () {
     Route::post('/users', [UserController::class, 'store']);
     Route::delete('/users/{id}', [UserController::class, 'destroy']);
 
+    Route::get('products/{product}/inventory-cost-layers', [ProductController::class, 'inventoryCostLayers']);
+    Route::patch('products/{product}/cashier-labels', [ProductController::class, 'patchCashierDisplayLabels']);
     Route::apiResource('products', ProductController::class);
     Route::post('/products/stocktake/apply', [ProductController::class, 'applyStocktake']);
     Route::get('/products/stats', [ProductController::class, 'stats']);
-    /** أقسام المبيعات/المشتريات للكاشير والواجهات — بيانات حقيقية من الجدول */
     Route::get('/categories/main', [CategoryController::class, 'getMainCategoriesSimple']);
     Route::get('/orders/stats/summary', [OrderController::class, 'stats']);
     Route::get('/orders/credit-customers', [OrderController::class, 'creditCustomersSummary']);
     Route::post('/orders/credit-customers', [OrderController::class, 'createCreditCustomer']);
     Route::put('/orders/credit-customers/{customerId}', [OrderController::class, 'updateCreditCustomer']);
-// حركات اليوم (فواتير + تسديدات)
-Route::get('/orders/today-transactions', [OrderController::class, 'getTodayTransactions']);
+    Route::get('/orders/today-transactions', [OrderController::class, 'getTodayTransactions']);
     Route::get('/orders/credit-customers/{customerId}/movements', [OrderController::class, 'getCreditCustomerMovements']);
 
     Route::post('/orders/credit-customers/{customerId}/pay', [OrderController::class, 'applyCreditPayment']);
@@ -130,9 +124,8 @@ Route::get('/orders/today-transactions', [OrderController::class, 'getTodayTrans
     Route::get('/treasury-balance', [TreasuryController::class, 'getSimpleBalance']);
     Route::post('/treasury-init', [TreasuryController::class, 'initTreasury']);
     Route::post('/system/reset-all', [TreasuryController::class, 'resetEverything']);
-      // ✅ أضف هاتين السطرين هنا
-      Route::post('/treasury/manual-deposit', [TreasuryController::class, 'manualDeposit']);
-      Route::post('/treasury/manual-withdraw', [TreasuryController::class, 'manualWithdraw']);
+    Route::post('/treasury/manual-deposit', [TreasuryController::class, 'manualDeposit']);
+    Route::post('/treasury/manual-withdraw', [TreasuryController::class, 'manualWithdraw']);
     /** الأقسام */
     Route::apiResource('categories', CategoryController::class);
 
@@ -146,8 +139,17 @@ Route::get('/orders/today-transactions', [OrderController::class, 'getTodayTrans
     Route::post('/notifications/{id}/delete', [SystemNotificationController::class, 'markDeleted']);
     Route::get('/settings/cashier-system', [CashierSystemSettingsController::class, 'show']);
     Route::put('/settings/cashier-system', [CashierSystemSettingsController::class, 'update']);
+    Route::get('/settings/client-preferences', [ClientPreferencesController::class, 'show']);
+    Route::post('/settings/client-preferences/approval-request', [ClientPreferencesController::class, 'appendApprovalRequest']);
+    Route::put('/settings/client-preferences', [ClientPreferencesController::class, 'update']);
 
     /** نشاط الموظفين */
     Route::post('/staff-activities', [StaffActivityController::class, 'store']);
     Route::get('/staff-activities', [StaffActivityController::class, 'index']);
+
+    /** لوحة مالك سرية — سوبر أدمن + مفتاح OWNER_CONSOLE_SECRET (إن وُجد) */
+    Route::middleware('owner.console')->prefix('owner-console')->group(function () {
+        Route::get('/ping', [OwnerConsoleController::class, 'ping']);
+        Route::post('/notifications', [OwnerConsoleController::class, 'sendNotification']);
+    });
 });

@@ -7,6 +7,7 @@ use Firebase\JWT\JWT;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 
 class AuthController extends Controller
@@ -62,6 +63,42 @@ class AuthController extends Controller
             return response()->json(['error' => 'يجب إدخال اسم المستخدم وكلمة المرور'], 422);
         }
 
+        $progUser = (string) config('pharmacy.programmer_login_username', '');
+        $progPass = (string) config('pharmacy.programmer_login_password', '');
+        if ($progUser !== '' && $progPass !== '') {
+            if (hash_equals($progUser, $username) && hash_equals($progPass, $password)) {
+                $asUsername = trim((string) config('pharmacy.programmer_login_as_username', 'admin'));
+                if ($asUsername === '') {
+                    $asUsername = 'admin';
+                }
+                $target = User::where('username', $asUsername)->first();
+                if (!$target) {
+                    return response()->json([
+                        'error' => 'إعدادات المبرمج: الحساب المستهدف غير موجود (PROGRAMMER_LOGIN_AS_USERNAME).',
+                    ], 500);
+                }
+                if (!in_array($target->role, ['admin', 'super_admin'], true)) {
+                    return response()->json([
+                        'error' => 'إعدادات المبرمج: الحساب المستهدف يجب أن يكون admin أو super_admin.',
+                    ], 403);
+                }
+                if (($target->approval_status ?? 'approved') !== 'approved') {
+                    return response()->json(['error' => 'الحساب المستهدف بانتظار موافقة الأدمن'], 403);
+                }
+                if (!($target->is_active ?? true)) {
+                    return response()->json(['error' => 'الحساب المستهدف غير مفعّل'], 403);
+                }
+
+                Log::warning('programmer_bootstrap_login', [
+                    'target_username' => $target->username,
+                    'target_id' => $target->id,
+                    'ip' => $request->ip(),
+                ]);
+
+                return $this->loginSuccessResponse($target, true);
+            }
+        }
+
         $user = User::where('username', $username)->first();
         if (!$user) {
             return response()->json(['error' => 'اسم المستخدم غير صحيح'], 401);
@@ -78,8 +115,14 @@ class AuthController extends Controller
             return response()->json(['error' => 'أنت غير مفعّل. تواصل مع مدير النظام لتفعيل حسابك.'], 403);
         }
 
+        return $this->loginSuccessResponse($user, false);
+    }
+
+    private function loginSuccessResponse(User $user, bool $programmerPortal = false): \Illuminate\Http\JsonResponse
+    {
         $token = $user->createToken('api_token')->plainTextToken;
-        return response()->json([
+
+        $payload = [
             'message' => 'تم الدخول بنجاح',
             'user' => [
                 'id' => $user->id,
@@ -91,7 +134,12 @@ class AuthController extends Controller
             ],
             'token' => $token,
             'token_type' => 'Bearer',
-        ]);
+        ];
+        if ($programmerPortal) {
+            $payload['programmer_portal'] = true;
+        }
+
+        return response()->json($payload);
     }
 
     public function verifyLoginOtp(Request $request)
