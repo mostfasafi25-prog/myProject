@@ -10,6 +10,7 @@ class SystemSetting extends Model
     use HasFactory;
 
     protected $fillable = [
+        'pharmacy_id',
         'key',
         'value_json',
     ];

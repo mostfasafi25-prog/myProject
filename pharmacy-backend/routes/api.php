@@ -20,6 +20,8 @@ use App\Http\Controllers\TreasuryController;
 use App\Http\Controllers\CashierSystemSettingsController;
 use App\Http\Controllers\ClientPreferencesController;
 use App\Http\Controllers\OwnerConsoleController;
+use App\Http\Controllers\PharmacyController;
+use App\Http\Controllers\SubscriptionCatalogController;
 
 Route::get('/health', function () {
     $payload = [
@@ -40,7 +42,6 @@ Route::get('/health', function () {
     return response()->json($payload);
 });
 
-// فتح الرابط في المتصفح يرسل GET؛ نرجع JSON واضح بدل صفحة 405 الافتراضية
 Route::get('/login', function () {
     return response()->json([
         'app' => 'pharmacy-backend',
@@ -68,9 +69,13 @@ Route::post('/register/verify-otp', [AuthController::class, 'verifyRegisterOtp']
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/login/verify-otp', [AuthController::class, 'verifyLoginOtp']);
 
-Route::middleware($apiAuthMiddleware)->group(function () {
+Route::middleware(array_merge($apiAuthMiddleware, ['plan.access']))->group(function () {
+    Route::get('/pharmacies', [PharmacyController::class, 'index']);
+    Route::post('/pharmacies', [PharmacyController::class, 'store']);
+
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::get('/me', [AuthController::class, 'me']);
+    Route::get('/subscription/plans', [SubscriptionCatalogController::class, 'plans']);
     Route::put('orders/credit-customers/{customerId}/credit-limit', [OrderController::class, 'updateCreditLimit']);
     Route::get('/chatbase/identity-token', [AuthController::class, 'chatbaseIdentityToken']);
     Route::post('/change-password', [AuthController::class, 'changePassword']);
@@ -82,6 +87,7 @@ Route::middleware($apiAuthMiddleware)->group(function () {
     Route::delete('/users/{id}', [UserController::class, 'destroy']);
 
     Route::get('products/{product}/inventory-cost-layers', [ProductController::class, 'inventoryCostLayers']);
+    Route::get('products/{product}/stock-movements', [ProductController::class, 'stockMovements']);
     Route::patch('products/{product}/cashier-labels', [ProductController::class, 'patchCashierDisplayLabels']);
     Route::apiResource('products', ProductController::class);
     Route::post('/products/stocktake/apply', [ProductController::class, 'applyStocktake']);
@@ -100,36 +106,29 @@ Route::middleware($apiAuthMiddleware)->group(function () {
     Route::post('/orders/{id}/return', [OrderController::class, 'returnOrder']);
     Route::post('/orders/{id}/return-full', [OrderController::class, 'returnOrderFull']);
 
-    /** إنهاء دوام الكاشير — يُحفظ في السيرفر ولا يضيع عند تحديث الصفحة */
     Route::get('/cashier-shifts', [CashierShiftCloseController::class, 'index']);
     Route::post('/cashier-shifts', [CashierShiftCloseController::class, 'store']);
-    
-    /** رفع الصور للمنتجات */
+
     Route::post('/upload/product-image', [ImageUploadController::class, 'uploadProductImage']);
     Route::post('/upload/multiple-images', [ImageUploadController::class, 'uploadMultipleImages']);
     Route::delete('/upload/delete-image', [ImageUploadController::class, 'deleteImage']);
-    
-    /** الموردين */
+
     Route::apiResource('suppliers', SupplierController::class);
     Route::post('suppliers/{supplier}/pay-debt', [SupplierController::class, 'payDebt']);
-    
-    /** المشتريات */
+
     Route::apiResource('purchases', PurchaseController::class);
     Route::post('purchases/{purchase}/return-items', [PurchaseController::class, 'returnItems']);
     Route::post('purchases/{purchase}/full-return', [PurchaseController::class, 'fullReturn']);
     Route::delete('/purchases-all', [PurchaseController::class, 'destroyAll']);
-    
-    /** الخزنة */
+
     Route::apiResource('treasury', TreasuryController::class);
     Route::get('/treasury-balance', [TreasuryController::class, 'getSimpleBalance']);
     Route::post('/treasury-init', [TreasuryController::class, 'initTreasury']);
     Route::post('/system/reset-all', [TreasuryController::class, 'resetEverything']);
     Route::post('/treasury/manual-deposit', [TreasuryController::class, 'manualDeposit']);
     Route::post('/treasury/manual-withdraw', [TreasuryController::class, 'manualWithdraw']);
-    /** الأقسام */
     Route::apiResource('categories', CategoryController::class);
 
-    /** الإشعارات النظامية */
     Route::post('/notifications', [SystemNotificationController::class, 'store']);
 
     Route::get('/notifications', [SystemNotificationController::class, 'index']);
@@ -143,11 +142,9 @@ Route::middleware($apiAuthMiddleware)->group(function () {
     Route::post('/settings/client-preferences/approval-request', [ClientPreferencesController::class, 'appendApprovalRequest']);
     Route::put('/settings/client-preferences', [ClientPreferencesController::class, 'update']);
 
-    /** نشاط الموظفين */
     Route::post('/staff-activities', [StaffActivityController::class, 'store']);
     Route::get('/staff-activities', [StaffActivityController::class, 'index']);
 
-    /** لوحة مالك سرية — سوبر أدمن + مفتاح OWNER_CONSOLE_SECRET (إن وُجد) */
     Route::middleware('owner.console')->prefix('owner-console')->group(function () {
         Route::get('/ping', [OwnerConsoleController::class, 'ping']);
         Route::post('/notifications', [OwnerConsoleController::class, 'sendNotification']);

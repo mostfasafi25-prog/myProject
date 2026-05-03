@@ -80,7 +80,7 @@ class TreasuryController extends Controller
     public function getSimpleBalance()
     {
         try {
-            $treasury = Treasury::first();
+            $treasury = Treasury::getActive();
             
             if (!$treasury) {
                 return response()->json([
@@ -138,51 +138,16 @@ class TreasuryController extends Controller
                 ], 422);
             }
             
-            $treasury = Treasury::first();
-            
-            if ($treasury) {
-                return response()->json([
-                    'success' => true,
-                    'message' => 'الخزنة موجودة بالفعل',
-                    'data' => [
-                        'treasury' => $treasury,
-                        'created' => false
-                    ]
-                ]);
-            }
-            
-            $initBal = (float) ($request->initial_balance ?? 0);
-            $treasury = Treasury::create([
-                'name' => $request->name ?? 'الخزنة الرئيسية',
-                'balance' => $initBal,
-                'balance_cash' => $initBal,
-                'balance_app' => 0,
-                'total_income' => $initBal,
-                'total_expenses' => 0,
-                'is_active' => true
-            ]);
-            
-            // تسجيل المعاملة الافتتاحية
-            if ($request->initial_balance > 0) {
-                TreasuryTransaction::create([
-                    'treasury_id' => $treasury->id,
-                    'type' => 'income',
-                    'amount' => $request->initial_balance,
-                    'description' => 'رصيد افتتاحي للخزنة',
-                    'category' => 'initial_balance',
-                    'transaction_date' => now(),
-                    'status' => 'completed'
-                ]);
-            }
-            
+            $treasury = Treasury::getActive();
+
             return response()->json([
                 'success' => true,
-                'message' => 'تم إنشاء الخزنة بنجاح',
+                'message' => 'الخزنة جاهزة',
                 'data' => [
                     'treasury' => $treasury,
-                    'created' => true
-                ]
-            ], 201);
+                    'created' => $treasury->wasRecentlyCreated,
+                ],
+            ], $treasury->wasRecentlyCreated ? 201 : 200);
             
         } catch (\Exception $e) {
             return response()->json([
@@ -254,17 +219,8 @@ public function manualDeposit(Request $request)
         DB::beginTransaction();
         
         // جلب الخزنة
-        $treasury = Treasury::first();
-        if (!$treasury) {
-            $treasury = Treasury::create([
-                'balance' => 0,
-                'balance_cash' => 0,
-                'balance_app' => 0,
-                'total_income' => 0,
-                'total_expenses' => 0
-            ]);
-        }
-        
+        $treasury = Treasury::getActive();
+
         $oldBalance = $treasury->balance;
         $pm = strtolower((string) ($request->payment_method ?? 'cash'));
         $amt = (float) $request->amount;
@@ -368,7 +324,7 @@ public function manualWithdraw(Request $request)
         DB::beginTransaction();
         
         // جلب الخزنة
-        $treasury = Treasury::first();
+        $treasury = Treasury::getActive();
         if (!$treasury) {
             return response()->json([
                 'success' => false,
@@ -470,15 +426,26 @@ public function manualWithdraw(Request $request)
 public function resetEverything(Request $request)
 {
     try {
+        $actor = $request->user();
+        if ($actor && $actor->pharmacy_id !== null) {
+            return $this->resetTenantBulk($request, (int) $actor->pharmacy_id);
+        }
+        if (!$actor || $actor->role !== 'super_admin') {
+            return response()->json([
+                'success' => false,
+                'message' => 'تصفير كامل المنصة لسوبر أدمن فقط. كمدير صيدلية يُحذف نطاق صيدليتك فقط عند استدعاء التصفير.',
+            ], 403);
+        }
+
         // تسجيل الإحصائيات
         $stats = [
-            'orders_count' => \App\Models\Order::count(),
-            'transactions_count' => TreasuryTransaction::count(),
-            'purchases_count' => \App\Models\Purchase::count(),
-            'treasury_balance' => Treasury::sum('balance') ?? 0,
-            'suppliers_count' => \App\Models\Supplier::count(),
-            'customers_count' => \App\Models\Customer::count(),
-            'users_count' => \App\Models\User::count(),
+            'orders_count' => \App\Models\Order::withoutGlobalScopes()->count(),
+            'transactions_count' => TreasuryTransaction::withoutGlobalScopes()->count(),
+            'purchases_count' => \App\Models\Purchase::withoutGlobalScopes()->count(),
+            'treasury_balance' => Treasury::withoutGlobalScopes()->sum('balance') ?? 0,
+            'suppliers_count' => \App\Models\Supplier::withoutGlobalScopes()->count(),
+            'customers_count' => \App\Models\Customer::withoutGlobalScopes()->count(),
+            'users_count' => \App\Models\User::withoutGlobalScopes()->count(),
         ];
 
         DB::beginTransaction();
@@ -537,13 +504,12 @@ public function resetEverything(Request $request)
         if (\Schema::hasTable('treasury')) {
             DB::table('treasury')->delete();
             DB::table('treasury')->insert([
-                'name' => 'الخزنة الرئيسية',
+                'pharmacy_id' => 1,
                 'balance' => 0,
                 'balance_cash' => 0,
                 'balance_app' => 0,
                 'total_income' => 0,
                 'total_expenses' => 0,
-                'is_active' => true,
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
@@ -590,8 +556,133 @@ public function resetEverything(Request $request)
     }
 }
 
+    /**
+     * تصفير بيانات صيدلية واحدة (أدمن/كاشير مرتبطون بنفس pharmacy_id).
+     */
+    private function resetTenantBulk(Request $request, int $pharmacyId): \Illuminate\Http\JsonResponse
+    {
+        try {
+            $stats = [
+                'orders_count' => \App\Models\Order::withoutGlobalScopes()->where('pharmacy_id', $pharmacyId)->count(),
+                'transactions_count' => TreasuryTransaction::withoutGlobalScopes()->where('pharmacy_id', $pharmacyId)->count(),
+                'purchases_count' => \App\Models\Purchase::withoutGlobalScopes()->where('pharmacy_id', $pharmacyId)->count(),
+                'treasury_balance' => Treasury::withoutGlobalScopes()->where('pharmacy_id', $pharmacyId)->sum('balance') ?? 0,
+                'suppliers_count' => \App\Models\Supplier::withoutGlobalScopes()->where('pharmacy_id', $pharmacyId)->count(),
+                'customers_count' => \App\Models\Customer::withoutGlobalScopes()->where('pharmacy_id', $pharmacyId)->count(),
+                'users_count' => \App\Models\User::withoutGlobalScopes()->where('pharmacy_id', $pharmacyId)->count(),
+            ];
 
-    
+            DB::beginTransaction();
+
+            $keepId = (int) ($request->user()?->id ?? 0);
+            $adminToKeep = DB::table('users')
+                ->where('pharmacy_id', $pharmacyId)
+                ->where('id', $keepId)
+                ->whereIn('role', ['admin', 'super_admin'])
+                ->first();
+            if (!$adminToKeep) {
+                $adminToKeep = DB::table('users')
+                    ->where('pharmacy_id', $pharmacyId)
+                    ->whereIn('role', ['admin', 'super_admin'])
+                    ->orderBy('id')
+                    ->first();
+            }
+
+            $w = ['pharmacy_id' => $pharmacyId];
+            if (\Schema::hasTable('purchase_returns')) {
+                DB::table('purchase_returns')->where($w)->delete();
+            }
+            if (\Schema::hasTable('customer_credit_movements')) {
+                DB::table('customer_credit_movements')->where($w)->delete();
+            }
+            if (\Schema::hasTable('cashier_shift_closes')) {
+                DB::table('cashier_shift_closes')->where($w)->delete();
+            }
+            if (\Schema::hasTable('staff_activities')) {
+                DB::table('staff_activities')->where($w)->delete();
+            }
+            if (\Schema::hasTable('system_notifications')) {
+                DB::table('system_notifications')->where($w)->delete();
+            }
+            if (\Schema::hasTable('system_settings')) {
+                DB::table('system_settings')->where($w)->delete();
+            }
+            if (\Schema::hasTable('order_items')) {
+                DB::table('order_items')->where($w)->delete();
+            }
+            if (\Schema::hasTable('orders')) {
+                DB::table('orders')->where($w)->delete();
+            }
+            if (\Schema::hasTable('purchase_items')) {
+                DB::table('purchase_items')->where($w)->delete();
+            }
+            if (\Schema::hasTable('purchases')) {
+                DB::table('purchases')->where($w)->delete();
+            }
+            if (\Schema::hasTable('treasury_transactions')) {
+                DB::table('treasury_transactions')->where($w)->delete();
+            }
+
+            $productIds = DB::table('products')->where('pharmacy_id', $pharmacyId)->pluck('id');
+            if ($productIds->isNotEmpty() && \Schema::hasTable('category_product')) {
+                DB::table('category_product')->whereIn('product_id', $productIds)->delete();
+            }
+            if (\Schema::hasTable('products')) {
+                DB::table('products')->where($w)->delete();
+            }
+            if (\Schema::hasTable('categories')) {
+                DB::table('categories')->where($w)->delete();
+            }
+            if (\Schema::hasTable('suppliers')) {
+                DB::table('suppliers')->where($w)->delete();
+            }
+            if (\Schema::hasTable('customers')) {
+                DB::table('customers')->where($w)->delete();
+            }
+
+            if (\Schema::hasTable('treasury')) {
+                DB::table('treasury')->where($w)->delete();
+                DB::table('treasury')->insert([
+                    'pharmacy_id' => $pharmacyId,
+                    'balance' => 0,
+                    'balance_cash' => 0,
+                    'balance_app' => 0,
+                    'total_income' => 0,
+                    'total_expenses' => 0,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+            }
+
+            if (\Schema::hasTable('users') && $adminToKeep) {
+                $removeIds = DB::table('users')->where('pharmacy_id', $pharmacyId)->where('id', '!=', $adminToKeep->id)->pluck('id');
+                if ($removeIds->isNotEmpty() && \Schema::hasTable('personal_access_tokens')) {
+                    DB::table('personal_access_tokens')
+                        ->whereIn('tokenable_id', $removeIds)
+                        ->where('tokenable_type', 'App\\Models\\User')
+                        ->delete();
+                }
+                DB::table('users')->where('pharmacy_id', $pharmacyId)->where('id', '!=', $adminToKeep->id)->delete();
+            }
+
+            DB::commit();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'تم تصفير بيانات الصيدلية مع الإبقاء على حساب مدير واحد',
+                'pharmacy_id' => $pharmacyId,
+                'stats_before_reset' => $stats,
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+
+            return response()->json([
+                'success' => false,
+                'message' => '❌ فشل تصفير الصيدلية: '.$e->getMessage(),
+            ], 500);
+        }
+    }
+
     /**
      * حالة المال العام للعاملين (الرواتب)
      */

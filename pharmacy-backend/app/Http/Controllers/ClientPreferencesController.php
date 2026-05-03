@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\SystemSetting;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Schema;
 
@@ -13,13 +14,31 @@ class ClientPreferencesController extends Controller
 {
     private const KEY = 'client_preferences';
 
+    private function settingsPharmacyId(Request $request): int
+    {
+        $user = $request->user();
+        if ($user && $user->pharmacy_id !== null) {
+            return (int) $user->pharmacy_id;
+        }
+        $pid = (int) ($request->query('pharmacy_id') ?? $request->input('pharmacy_id', 0));
+        if ($pid < 1) {
+            throw new HttpResponseException(response()->json([
+                'success' => false,
+                'message' => 'لحساب سوبر أدمن أرسل pharmacy_id في الجسم أو ?pharmacy_id=',
+            ], 422));
+        }
+
+        return $pid;
+    }
+
     public function show(Request $request)
     {
         if (!Schema::hasTable('system_settings')) {
             return response()->json(['success' => true, 'data' => $this->defaults()]);
         }
 
-        $row = SystemSetting::query()->where('key', self::KEY)->first();
+        $pid = $this->settingsPharmacyId($request);
+        $row = SystemSetting::query()->where('pharmacy_id', $pid)->where('key', self::KEY)->first();
         $stored = is_array($row?->value_json) ? $row->value_json : [];
 
         return response()->json([
@@ -60,7 +79,8 @@ class ClientPreferencesController extends Controller
             ], 403);
         }
 
-        $row = SystemSetting::query()->where('key', self::KEY)->first();
+        $pid = $this->settingsPharmacyId($request);
+        $row = SystemSetting::query()->where('pharmacy_id', $pid)->where('key', self::KEY)->first();
         $current = is_array($row?->value_json) ? $row->value_json : [];
         $base = $this->mergeDefaults($current);
 
@@ -75,7 +95,7 @@ class ClientPreferencesController extends Controller
         }
 
         SystemSetting::query()->updateOrCreate(
-            ['key' => self::KEY],
+            ['pharmacy_id' => $pid, 'key' => self::KEY],
             ['value_json' => $base]
         );
 
@@ -99,7 +119,7 @@ class ClientPreferencesController extends Controller
 
         $user = $request->user();
         $role = (string) ($user?->role ?? '');
-        if (!in_array($role, ['cashier', 'super_cashier', 'admin', 'super_admin'], true)) {
+        if (!in_array($role, ['cashier', 'admin', 'super_admin'], true)) {
             return response()->json([
                 'success' => false,
                 'message' => 'غير مصرح بإنشاء طلب اعتماد',
@@ -133,7 +153,8 @@ class ClientPreferencesController extends Controller
             'createdAt' => now()->toIso8601String(),
         ];
 
-        $row = SystemSetting::query()->where('key', self::KEY)->first();
+        $pid = $this->settingsPharmacyId($request);
+        $row = SystemSetting::query()->where('pharmacy_id', $pid)->where('key', self::KEY)->first();
         $current = is_array($row?->value_json) ? $row->value_json : [];
         $base = $this->mergeDefaults($current);
         $list = is_array($base['approvalRequests'] ?? null) ? $base['approvalRequests'] : [];
@@ -141,7 +162,7 @@ class ClientPreferencesController extends Controller
         $base['approvalRequests'] = array_values($list);
 
         SystemSetting::query()->updateOrCreate(
-            ['key' => self::KEY],
+            ['pharmacy_id' => $pid, 'key' => self::KEY],
             ['value_json' => $base]
         );
 
@@ -160,6 +181,7 @@ class ClientPreferencesController extends Controller
                     'userLogin' => true,
                     'saleComplete' => false,
                     'purchases' => true,
+                    'subscription' => true,
                 ],
                 'cashierUsers' => [],
             ],

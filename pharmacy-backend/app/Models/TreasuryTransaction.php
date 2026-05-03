@@ -2,16 +2,19 @@
 
 namespace App\Models;
 
+use App\Models\Concerns\BelongsToPharmacy;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
 class TreasuryTransaction extends Model
 {
+    use BelongsToPharmacy;
     use HasFactory;
 
     protected $table = 'treasury_transactions';
 
     protected $fillable = [
+        'pharmacy_id',
         'treasury_id',
         'transaction_number',
         'type',
@@ -65,10 +68,7 @@ class TreasuryTransaction extends Model
             }
 
             if (empty($model->treasury_id)) {
-                $treasury = Treasury::first();
-                if ($treasury) {
-                    $model->treasury_id = $treasury->id;
-                }
+                $model->treasury_id = Treasury::getActive()->id;
             }
         });
     }

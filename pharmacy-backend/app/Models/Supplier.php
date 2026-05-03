@@ -2,15 +2,18 @@
 
 namespace App\Models;
 
+use App\Models\Concerns\BelongsToPharmacy;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Supplier extends Model
 {
+    use BelongsToPharmacy;
     use HasFactory, SoftDeletes;
 
     protected $fillable = [
+        'pharmacy_id',
         'name',
         'phone',
         'email',

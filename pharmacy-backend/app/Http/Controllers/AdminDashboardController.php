@@ -17,7 +17,7 @@ class AdminDashboardController extends Controller
     public function summary(Request $request)
     {
         $user = $request->user();
-        if (!$user || !in_array($user->role, ['admin', 'super_admin', 'super_cashier'], true)) {
+        if (!$user || !in_array($user->role, ['admin', 'super_admin', 'cashier'], true)) {
             return response()->json(['success' => false, 'message' => 'غير مصرح'], 403);
         }
 

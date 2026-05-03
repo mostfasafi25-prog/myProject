@@ -41,7 +41,8 @@ class SystemNotificationController extends Controller
     }
 
     /**
-     * مدير الصيدلية (role admin): يرى فقط إنهاء الدوام وإشعارات المبرمج.
+     * مدير الصيدلية (role admin): إنهاء الدوام، تفعيل باقة، ترحيب، إشعار المبرمج،
+     * وإشعارات «للكل» اليدوية من الإدارة/لوحة الويب (manual / owner_broadcast + from_management) مثل الكاشير.
      */
     private function scopePharmacyAdminAllowedTypes(Builder $query, string $role): Builder
     {
@@ -50,8 +51,12 @@ class SystemNotificationController extends Controller
         }
 
         return $query->where(function ($q) {
-            $q->whereIn('type', ['cashier_shift_end', 'shift_end'])
-                ->orWhere('meta->from_programmer', true);
+            $q->whereIn('type', ['cashier_shift_end', 'shift_end', 'subscription_activated', 'admin_welcome'])
+                ->orWhere('meta->from_programmer', true)
+                ->orWhere(function ($sub) {
+                    $sub->whereIn('type', ['manual', 'owner_broadcast'])
+                        ->where('from_management', true);
+                });
         });
     }
 
@@ -68,7 +73,7 @@ class SystemNotificationController extends Controller
         $this->scopePharmacyAdminAllowedTypes($query, $role);
 
         // الكاشير: لا يصلهم إلا إشعار يدوي من الإدارة/المالك أو التشجيع الأسبوعي التلقائي
-        if (in_array($role, ['cashier', 'super_cashier'], true)) {
+        if ($role === 'cashier') {
             $query->where(function ($q) {
                 $q->where('type', 'cashier_weekly_morale')
                     ->orWhere(function ($sub) {
@@ -115,7 +120,7 @@ class SystemNotificationController extends Controller
         $actor = $request->user();
         $role = $actor?->role ?? '';
         $type = (string) $request->input('type', '');
-        if (in_array($role, ['cashier', 'super_cashier'], true)) {
+        if ($role === 'cashier') {
             if (!in_array($type, ['cashier_shift_end'], true)) {
                 return response()->json([
                     'success' => false,

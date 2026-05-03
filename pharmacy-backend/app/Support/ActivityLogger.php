@@ -20,7 +20,7 @@ class ActivityLogger
             }
 
             $user = $request->user();
-            if ($user && in_array((string) ($user->role ?? ''), ['cashier', 'super_cashier'], true)) {
+            if ($user && (string) ($user->role ?? '') === 'cashier') {
                 return;
             }
 

@@ -2,12 +2,14 @@
 
 namespace App\Models;
 
+use App\Models\Concerns\BelongsToPharmacy;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
 
 class User extends Authenticatable
 {
+    use BelongsToPharmacy;
     use HasApiTokens, Notifiable;
 
     // الأدوار المسموحة
@@ -21,6 +23,7 @@ class User extends Authenticatable
         'role', // أضف role هنا
         'approval_status',
         'is_active',
+        'pharmacy_id',
     ];
 
     protected $hidden = [

@@ -622,7 +622,7 @@ class SupplierController extends Controller
                 $supplier->save();
             }
 
-            $treasury = Treasury::first();
+            $treasury = Treasury::getActive();
             if ($treasury) {
                 $deductCash = 0.0;
                 $deductApp = 0.0;

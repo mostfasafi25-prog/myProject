@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\StaffActivity;
 use App\Models\Order;
 use App\Models\Purchase;
+use App\Models\Customer;
 use App\Models\Supplier;
 use App\Models\User;
 use App\Models\TreasuryTransaction;
@@ -34,7 +35,7 @@ public function store(Request $request)
 
         $actor = $request->user();
         $actorRole = (string) ($actor?->role ?? '');
-        if (in_array($actorRole, ['cashier', 'super_cashier'], true)
+        if ($actorRole === 'cashier'
             && (string) ($validated['action_type'] ?? '') !== 'cashier_shift_end') {
             return response()->json([
                 'success' => false,
@@ -614,16 +615,18 @@ private function generateDescriptionFromMeta($data)
     private function getCreditCustomerDetails($customerId)
     {
         try {
-            $customer = DB::table('credit_customers')->where('id', $customerId)->first();
-            if (!$customer) return null;
-            
+            $customer = Customer::find($customerId);
+            if (!$customer) {
+                return null;
+            }
+
             return [
                 'type' => 'credit_customer',
                 'name' => $customer->name,
                 'phone' => $customer->phone ?? '—',
-                'balance' => (float) ($customer->balance ?? 0),
+                'balance' => (float) ($customer->current_balance ?? 0),
                 'credit_limit' => (float) ($customer->credit_limit ?? 0),
-                'created_at' => $customer->created_at ?? null
+                'created_at' => $customer->created_at ? $customer->created_at->toISOString() : null,
             ];
         } catch (\Exception $e) {
             return null;

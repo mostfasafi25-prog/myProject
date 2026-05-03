@@ -2,11 +2,15 @@
 
 namespace App\Models;
 
+use App\Models\Concerns\BelongsToPharmacy;
 use Illuminate\Database\Eloquent\Model;
 
 class CustomerCreditMovement extends Model
 {
+    use BelongsToPharmacy;
+
     protected $fillable = [
+        'pharmacy_id',
         'customer_id',
         'customer_name',
         'movement_type',

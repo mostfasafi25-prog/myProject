@@ -2,7 +2,11 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Pharmacy;
 use App\Models\User;
+use App\Services\AdminWelcomeNotificationService;
+use App\Services\PharmacyPlanService;
+use App\Services\UserCascadeDeleteService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Log;
@@ -39,7 +43,7 @@ class UserController extends Controller
             $query->where('username', 'LIKE', "%{$search}%");
         }
         
-        $users = $query->orderBy('created_at', 'desc')->get(['id', 'username', 'role', 'avatar_url', 'approval_status', 'is_active', 'created_at']);
+        $users = $query->orderBy('created_at', 'desc')->get(['id', 'username', 'role', 'avatar_url', 'approval_status', 'is_active', 'pharmacy_id', 'created_at']);
         
         return response()->json([
             'success' => true,
@@ -75,7 +79,7 @@ class UserController extends Controller
             'username' => 'required|string|max:50|unique:users,username',
             'password' => 'required|string|min:6',
             'avatar_url' => 'nullable|string|max:200000',
-            'role' => 'required|in:admin,super_admin,cashier,super_cashier',
+            'role' => 'required|in:admin,super_admin,cashier',
             'approval_status' => 'nullable|in:approved,pending',
             'is_active' => 'nullable|boolean',
         ]);
@@ -95,6 +99,50 @@ class UserController extends Controller
                     'message' => 'يمكنك إنشاء حسابات الكاشير فقط',
                 ], 403);
             }
+
+            $actor = $request->user();
+            $pharmacyId = $actor->pharmacy_id;
+            if ($actor->role === 'super_admin') {
+                if ($request->role === 'super_admin') {
+                    $pharmacyId = null;
+                } else {
+                    $pharmacyId = (int) $request->input('pharmacy_id', 0);
+                    if ($pharmacyId < 1) {
+                        return response()->json([
+                            'success' => false,
+                            'message' => 'يجب تمرير pharmacy_id لربط المستخدم بصيدلية (أو أنشئ صيدلية عبر POST /api/pharmacies)',
+                        ], 422);
+                    }
+                }
+            } elseif (!$pharmacyId) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'حساب الأدمن غير مرتبط بصيدلية',
+                ], 422);
+            }
+
+            if ($pharmacyId && in_array($request->role, ['admin', 'cashier'], true)) {
+                $pharmacy = Pharmacy::find((int) $pharmacyId);
+                if ($pharmacy) {
+                    $planService = app(PharmacyPlanService::class);
+                    if ($request->role === 'cashier') {
+                        $lim = $planService->limits($pharmacy);
+                        if (($lim['cashiers'] ?? 0) === 0) {
+                            return $planService->denyFreePlanCashierResponse();
+                        }
+                    }
+                    if (!$planService->canAddUser($pharmacy, (string) $request->role)) {
+                        $reason = match (true) {
+                            $request->role === 'cashier' => 'cashiers',
+                            $request->role === 'admin' => 'admin',
+                            default => 'cashiers',
+                        };
+
+                        return $planService->denyUserLimitResponse($reason);
+                    }
+                }
+            }
+
             $user = User::create([
                 'username' => $request->username,
                 'password' => Hash::make($request->password),
@@ -102,6 +150,7 @@ class UserController extends Controller
                 'role' => $request->role,
                 'approval_status' => $request->approval_status ?: 'approved',
                 'is_active' => $request->boolean('is_active', true),
+                'pharmacy_id' => $pharmacyId,
             ]);
 
             ActivityLogger::log($request, [
@@ -111,7 +160,11 @@ class UserController extends Controller
                 'description' => "إنشاء مستخدم جديد @{$user->username}",
                 'meta' => ['role' => $user->role],
             ]);
-            
+
+            if ($user->role === 'admin' && $user->pharmacy_id) {
+                AdminWelcomeNotificationService::dispatchForUser($user);
+            }
+
             return response()->json([
                 'success' => true,
                 'message' => 'تم إنشاء المستخدم بنجاح',
@@ -144,7 +197,7 @@ class UserController extends Controller
             $newRole = $request->input('role');
             $actor = $request->user();
             
-            if ($actor->role === 'admin' && !in_array($newRole, ['cashier', 'super_cashier'])) {
+            if ($actor->role === 'admin' && $newRole !== 'cashier') {
                 return response()->json([
                     'success' => false,
                     'message' => 'الأدمن العادي يمكنه تعيين أدوار الكاشير فقط'
@@ -162,7 +215,7 @@ class UserController extends Controller
         
         $validator = Validator::make($request->all(), [
             'username' => 'sometimes|string|max:50|unique:users,username,' . $id,
-            'role' => 'sometimes|in:admin,super_admin,cashier,super_cashier',
+            'role' => 'sometimes|in:admin,super_admin,cashier',
             'password' => 'sometimes|string|min:4',
             'avatar_url' => 'nullable|string|max:200000',
             'approval_status' => 'sometimes|in:approved,pending',
@@ -195,6 +248,17 @@ class UserController extends Controller
                     'success' => false,
                     'message' => 'لا يمكن تعطيل حساب المدير الأساسي (admin)',
                 ], 400);
+            }
+
+            if ($request->has('role') && $request->input('role') === 'admin' && $user->pharmacy_id) {
+                $otherAdmins = User::withoutGlobalScopes()
+                    ->where('pharmacy_id', $user->pharmacy_id)
+                    ->where('role', 'admin')
+                    ->where('id', '!=', $user->id)
+                    ->count();
+                if ($otherAdmins >= 1) {
+                    return app(PharmacyPlanService::class)->denyUserLimitResponse('admin');
+                }
             }
 
             $updateData = $request->only(['username', 'role', 'avatar_url', 'approval_status', 'is_active']);
@@ -284,7 +348,7 @@ class UserController extends Controller
     /**
      * حذف مستخدم
      */
-    public function destroy($id)
+    public function destroy($id, UserCascadeDeleteService $cascade)
     {
         $actor = request()->user();
         if (!in_array($actor?->role, ['admin', 'super_admin'], true)) {
@@ -305,8 +369,22 @@ class UserController extends Controller
                 'message' => 'يمكنك حذف حسابات الكاشير فقط',
             ], 403);
         }
-        // لا يمكن حذف المدير الرئيسي
-        $privilegedCount = User::whereIn('role', ['admin', 'super_admin'])->count();
+
+        if ($user->role === 'super_admin') {
+            return response()->json([
+                'success' => false,
+                'message' => 'لا يمكن حذف حساب سوبر أدمن.',
+            ], 400);
+        }
+
+        // لا يمكن حذف آخر مدير ضمن نفس نطاق الصيدلية (أو آخر سوبر أدمن على مستوى المنصة)
+        $privilegedQuery = User::withoutGlobalScopes();
+        if ($user->pharmacy_id !== null) {
+            $privilegedQuery->where('pharmacy_id', $user->pharmacy_id);
+        } else {
+            $privilegedQuery->whereNull('pharmacy_id')->where('role', 'super_admin');
+        }
+        $privilegedCount = (clone $privilegedQuery)->whereIn('role', ['admin', 'super_admin'])->count();
         if (in_array($user->role, ['admin', 'super_admin'], true) && $privilegedCount <= 1) {
             return response()->json([
                 'success' => false,
@@ -317,7 +395,7 @@ class UserController extends Controller
         try {
             $deletedUsername = $user->username;
             $deletedRole = $user->role;
-            $user->delete();
+            $cascade->deleteWithRelatedCleanup($user);
 
             ActivityLogger::log(request(), [
                 'action_type' => 'user_delete',

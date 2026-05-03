@@ -354,8 +354,8 @@ class OrderController extends Controller
 
             try {
                 $saleActor = $request->user();
-                $isCashierActor = $saleActor && in_array((string) ($saleActor->role ?? ''), ['cashier', 'super_cashier'], true);
-                $allowCashierSaleNotify = $this->adminPrefCashierSaleNotificationsEnabled();
+                $isCashierActor = $saleActor && (string) ($saleActor->role ?? '') === 'cashier';
+                $allowCashierSaleNotify = $this->adminPrefCashierSaleNotificationsEnabled((int) $order->pharmacy_id);
                 $shouldNotifySale = (!$isCashierActor || $allowCashierSaleNotify) && Schema::hasTable('system_notifications');
                 if ($shouldNotifySale) {
                     SystemNotification::create([
@@ -468,18 +468,7 @@ private function normalizePaymentMethod($method)
         $profit = (float) $profit;
         $paymentMethod = strtolower((string) $paymentMethod);
 
-        $treasury = Treasury::first();
-
-        if (!$treasury) {
-            $treasury = Treasury::create([
-                'balance' => 0,
-                'balance_cash' => 0,
-                'balance_app' => 0,
-                'total_income' => 0,
-                'total_expenses' => 0,
-                'total_profit' => 0,
-            ]);
-        }
+        $treasury = Treasury::getActive();
 
         $cashPortion = 0.0;
         $appPortion = 0.0;
@@ -1197,7 +1186,7 @@ public function updateCreditLimit(Request $request, $customerId)
 
             // ✅ 4. إيداع المبلغ في الخزنة حسب الكاش/التطبيق
             if ($amount > 0.00001) {
-                $treasury = Treasury::first();
+                $treasury = Treasury::getActive();
                 if ($treasury) {
                     $c = round($cashAmount, 2);
                     $a = round($appAmount, 2);
@@ -1596,7 +1585,7 @@ public function getCreditCustomerMovements($customerId)
 
             $refundAmt = round((float) $request->refund_amount, 2);
             if ($refundAmt > 0) {
-                $treasury = Treasury::lockForUpdate()->first();
+                $treasury = Treasury::lockActiveForUpdate();
                 if ($treasury) {
                     [$rCash, $rApp] = $this->treasuryRefundChannelsForOrder($order, $refundAmt);
                     $treasury->applyLiquidityDelta(-$rCash, -$rApp);
@@ -2076,7 +2065,7 @@ if (Schema::hasTable('staff_activities')) {
 
             $treasury = null;
             if ($refundAmount > 0.00001) {
-                $treasury = Treasury::lockForUpdate()->first();
+                $treasury = Treasury::lockActiveForUpdate();
                 if (!$treasury) {
                     DB::rollBack();
                     return response()->json([
@@ -2109,7 +2098,7 @@ if (Schema::hasTable('staff_activities')) {
 
             $treasuryBalance = $treasury
                 ? (float) ($treasury->balance ?? 0)
-                : (float) (Treasury::query()->value('balance') ?? 0);
+                : (float) (Treasury::getActive()->balance ?? 0);
 
             return response()->json([
                 'success' => true,
@@ -2422,12 +2411,12 @@ if (Schema::hasTable('staff_activities')) {
     /**
      * تفضيل المدير «إشعار عند كل بيع من الكاشير» — notificationPrefs.admin.saleComplete في client_preferences.
      */
-    private function adminPrefCashierSaleNotificationsEnabled(): bool
+    private function adminPrefCashierSaleNotificationsEnabled(int $pharmacyId): bool
     {
         if (!Schema::hasTable('system_settings')) {
             return false;
         }
-        $row = SystemSetting::query()->where('key', 'client_preferences')->first();
+        $row = SystemSetting::query()->where('pharmacy_id', $pharmacyId)->where('key', 'client_preferences')->first();
         $prefs = is_array($row?->value_json) ? $row->value_json : [];
         $v = $prefs['notificationPrefs']['admin']['saleComplete'] ?? false;
 

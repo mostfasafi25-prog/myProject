@@ -2,12 +2,16 @@
 
 namespace App\Models;
 
+use App\Models\Concerns\BelongsToPharmacy;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class CashierShiftClose extends Model
 {
+    use BelongsToPharmacy;
+
     protected $fillable = [
+        'pharmacy_id',
         'user_id',
         'username',
         'display_name',

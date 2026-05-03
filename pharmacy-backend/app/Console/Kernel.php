@@ -3,6 +3,7 @@
 namespace App\Console;
 
 use App\Models\SystemNotification;
+use App\Services\PlanReportRetentionService;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Console\Kernel as ConsoleKernel;
 use Illuminate\Support\Facades\Schema;
@@ -39,6 +40,12 @@ class Kernel extends ConsoleKernel
                 'deleted_by' => [],
             ]);
         })->weekly()->fridays()->at('15:00')->timezone($tz);
+
+        $schedule->call(function () {
+            app(PlanReportRetentionService::class)->enforceForAllPharmacies();
+        })->dailyAt('04:10')->timezone($tz);
+
+        $schedule->command('subscription:sync-monthly-states')->hourly()->timezone($tz);
     }
 
     /**

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\SystemSetting;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Schema;
 
@@ -10,7 +11,24 @@ class CashierSystemSettingsController extends Controller
 {
     private const SETTINGS_KEY = 'cashier_system';
 
-    public function show()
+    private function settingsPharmacyId(Request $request): int
+    {
+        $user = $request->user();
+        if ($user && $user->pharmacy_id !== null) {
+            return (int) $user->pharmacy_id;
+        }
+        $pid = (int) ($request->query('pharmacy_id') ?? $request->input('pharmacy_id', 0));
+        if ($pid < 1) {
+            throw new HttpResponseException(response()->json([
+                'success' => false,
+                'message' => 'لحساب سوبر أدمن أرسل pharmacy_id في الجسم أو ?pharmacy_id=',
+            ], 422));
+        }
+
+        return $pid;
+    }
+
+    public function show(Request $request)
     {
         if (!Schema::hasTable('system_settings')) {
             return response()->json([
@@ -19,7 +37,8 @@ class CashierSystemSettingsController extends Controller
             ]);
         }
 
-        $row = SystemSetting::query()->where('key', self::SETTINGS_KEY)->first();
+        $pid = $this->settingsPharmacyId($request);
+        $row = SystemSetting::query()->where('pharmacy_id', $pid)->where('key', self::SETTINGS_KEY)->first();
 
         return response()->json([
             'success' => true,
@@ -49,8 +68,9 @@ class CashierSystemSettingsController extends Controller
             $payload = [];
         }
 
+        $pid = $this->settingsPharmacyId($request);
         $row = SystemSetting::query()->updateOrCreate(
-            ['key' => self::SETTINGS_KEY],
+            ['pharmacy_id' => $pid, 'key' => self::SETTINGS_KEY],
             ['value_json' => $payload]
         );
 

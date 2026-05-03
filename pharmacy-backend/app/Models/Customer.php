@@ -2,14 +2,18 @@
 
 namespace App\Models;
 
+use App\Models\Concerns\BelongsToPharmacy;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Customer extends Model
 {
+    use BelongsToPharmacy;
+
     protected $table = 'customers';
     
     protected $fillable = [
+        'pharmacy_id',
         'name',
         'salary',
         'department',

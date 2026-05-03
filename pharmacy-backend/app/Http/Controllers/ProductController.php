@@ -3,8 +3,10 @@
 namespace App\Http\Controllers;
 
 use App\Models\Product;
+use App\Models\Pharmacy;
 use App\Models\PurchaseItem;
 use App\Models\Purchase;
+use App\Models\OrderItem;
 use App\Models\Category;
 use App\Models\Treasury;
 use App\Models\TreasuryTransaction;
@@ -14,6 +16,8 @@ use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use App\Support\ActivityLogger;
+use App\Services\PharmacyPlanService;
+use Carbon\Carbon;
 
 class ProductController extends Controller
 {
@@ -527,7 +531,17 @@ private function getProductSaleTypeNames($product): array
             ], 422);
         }
     }
-    
+
+    $planService = app(PharmacyPlanService::class);
+    $actor = $request->user();
+    $planPharmacyId = (int) ($actor?->pharmacy_id ?? config('pharmacy.default_pharmacy_id', 1));
+    $planPharmacy = Pharmacy::find($planPharmacyId);
+    if ($planPharmacy && !$planService->canAddProduct($planPharmacy)) {
+        $lim = $planService->limits($planPharmacy)['products'];
+
+        return $planService->denyProductLimitResponse((int) ($lim ?? 0));
+    }
+
     try {
         \Log::info('✅ CREATING PRODUCT...', [
             'name' => $request->name,
@@ -825,6 +839,176 @@ private function getProductSaleTypeNames($product): array
                 'error' => config('app.debug') ? $e->getMessage() : null,
             ], 500);
         }
+    }
+
+    /**
+     * حركات المخزون للصنف: بيع (بنود فواتير) وشراء (بنود مشتريات) مع تصفية بالنوع والتاريخ.
+     */
+    public function stockMovements(Request $request, Product $product)
+    {
+        $type = strtolower((string) $request->get('type', 'all'));
+        if (! in_array($type, ['all', 'sale', 'purchase'], true)) {
+            $type = 'all';
+        }
+
+        $limit = min(500, max(1, (int) $request->get('limit', 350)));
+        $dateFromRaw = $request->get('date_from');
+        $dateToRaw = $request->get('date_to');
+
+        $fromDt = null;
+        $toDt = null;
+        try {
+            if ($dateFromRaw !== null && $dateFromRaw !== '') {
+                $fromDt = Carbon::parse((string) $dateFromRaw)->startOfDay();
+            }
+            if ($dateToRaw !== null && $dateToRaw !== '') {
+                $toDt = Carbon::parse((string) $dateToRaw)->endOfDay();
+            }
+        } catch (\Throwable) {
+            return response()->json([
+                'success' => false,
+                'message' => 'تواريخ التصفية غير صالحة',
+            ], 422);
+        }
+
+        $rows = [];
+
+        if ($type === 'all' || $type === 'sale') {
+            $saleLines = OrderItem::query()
+                ->where('product_id', $product->id)
+                ->whereHas('order', function ($oq) use ($fromDt, $toDt) {
+                    $oq->whereNotIn('status', ['cancelled', 'returned']);
+                    if ($fromDt) {
+                        $oq->where('created_at', '>=', $fromDt);
+                    }
+                    if ($toDt) {
+                        $oq->where('created_at', '<=', $toDt);
+                    }
+                })
+                ->with([
+                    'order:id,status,created_at,customer_id',
+                    'order.customer:id,name',
+                ])
+                ->orderByDesc('id')
+                ->limit(2500)
+                ->get();
+
+            foreach ($saleLines as $line) {
+                $order = $line->order;
+                if (! $order) {
+                    continue;
+                }
+                $qty = (float) ($line->quantity ?? 0);
+                $ret = (float) ($line->sale_quantity_returned ?? 0);
+                $net = round(max(0, $qty - $ret), 4);
+                if ($net <= 0.00001 && $qty <= 0) {
+                    continue;
+                }
+
+                $rows[] = [
+                    'kind' => 'sale',
+                    'occurred_at' => $order->created_at?->toIso8601String(),
+                    'document_id' => (int) $order->id,
+                    'reference' => 'بيع #'.$order->id,
+                    'quantity' => $net,
+                    'gross_quantity' => round($qty, 4),
+                    'returned_quantity' => round($ret, 4),
+                    'unit_price' => round((float) ($line->unit_price ?? 0), 4),
+                    'line_total' => round((float) ($line->total_price ?? 0), 2),
+                    'counterparty' => $order->customer?->name,
+                    'status' => $order->status,
+                ];
+            }
+        }
+
+        if ($type === 'all' || $type === 'purchase') {
+            $purchaseLines = PurchaseItem::query()
+                ->where('product_id', $product->id)
+                ->whereHas('purchase', function ($pq) {
+                    $pq->where(function ($w) {
+                        $w->whereNull('status')->orWhere('status', '!=', 'returned');
+                    });
+                })
+                ->with([
+                    'purchase:id,invoice_number,purchase_date,created_at,status,supplier_id',
+                    'purchase.supplier:id,name',
+                ])
+                ->orderByDesc('id')
+                ->limit(2500)
+                ->get();
+
+            foreach ($purchaseLines as $line) {
+                $pur = $line->purchase;
+                if (! $pur) {
+                    continue;
+                }
+
+                $dayKey = $pur->purchase_date
+                    ? Carbon::parse($pur->purchase_date)->format('Y-m-d')
+                    : ($pur->created_at ? $pur->created_at->format('Y-m-d') : null);
+                if ($dayKey === null) {
+                    continue;
+                }
+                if ($fromDt && $dayKey < $fromDt->format('Y-m-d')) {
+                    continue;
+                }
+                if ($toDt && $dayKey > $toDt->format('Y-m-d')) {
+                    continue;
+                }
+
+                $gross = (float) ($line->quantity ?? 0);
+                $ret = (float) ($line->returned_quantity ?? 0);
+                $net = round(max(0, $gross - $ret), 4);
+                if ($net <= 0.00001 && $gross <= 0) {
+                    continue;
+                }
+
+                $inv = trim((string) ($pur->invoice_number ?? ''));
+                $ref = $inv !== '' ? 'شراء '.$inv : 'شراء #'.$pur->id;
+
+                $rows[] = [
+                    'kind' => 'purchase',
+                    'occurred_at' => $pur->purchase_date
+                        ? Carbon::parse($pur->purchase_date)->toIso8601String()
+                        : ($pur->created_at?->toIso8601String()),
+                    'document_id' => (int) $pur->id,
+                    'reference' => $ref,
+                    'quantity' => $net,
+                    'gross_quantity' => round($gross, 4),
+                    'returned_quantity' => round($ret, 4),
+                    'unit_price' => round((float) ($line->unit_price ?? 0), 4),
+                    'line_total' => round((float) ($line->total_price ?? 0), 2),
+                    'counterparty' => $pur->supplier?->name,
+                    'status' => $pur->status,
+                ];
+            }
+        }
+
+        usort($rows, function (array $a, array $b): int {
+            $ta = (string) ($a['occurred_at'] ?? '');
+            $tb = (string) ($b['occurred_at'] ?? '');
+
+            return strcmp($tb, $ta);
+        });
+
+        $rows = array_slice($rows, 0, $limit);
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'product' => [
+                    'id' => $product->id,
+                    'name' => $product->name,
+                ],
+                'filters' => [
+                    'type' => $type,
+                    'date_from' => $dateFromRaw,
+                    'date_to' => $dateToRaw,
+                    'limit' => $limit,
+                ],
+                'movements' => $rows,
+            ],
+        ]);
     }
 
     /**
@@ -1549,16 +1733,25 @@ public function destroy($id)
             ], 404);
         }
 
-        // منع الحذف فقط إذا كان الصنف مستخدماً في مبيعات (طلبات/فواتير)
+        $productPharmacyId = $product->pharmacy_id;
+
+        // منع الحذف فقط إذا كان الصنف مستخدماً في مبيعات (طلبات/فواتير) — ضمن نفس الصيدلية فقط
         if (\Schema::hasTable('order_items')) {
             $orderItemsCount = 0;
             if (\Schema::hasColumn('order_items', 'product_id')) {
-                $orderItemsCount = \DB::table('order_items')->where('product_id', $id)->count();
+                $q = \DB::table('order_items')->where('product_id', $id);
+                if (\Schema::hasColumn('order_items', 'pharmacy_id') && $productPharmacyId !== null) {
+                    $q->where('pharmacy_id', $productPharmacyId);
+                }
+                $orderItemsCount = $q->count();
             } elseif (\Schema::hasColumn('order_items', 'item_id') && \Schema::hasColumn('order_items', 'item_type')) {
-                $orderItemsCount = \DB::table('order_items')
+                $q = \DB::table('order_items')
                     ->where('item_type', 'App\Models\Product')
-                    ->where('item_id', $id)
-                    ->count();
+                    ->where('item_id', $id);
+                if (\Schema::hasColumn('order_items', 'pharmacy_id') && $productPharmacyId !== null) {
+                    $q->where('pharmacy_id', $productPharmacyId);
+                }
+                $orderItemsCount = $q->count();
             }
             if ($orderItemsCount > 0) {
                 return response()->json([
@@ -1569,7 +1762,11 @@ public function destroy($id)
             }
         }
         if (\Schema::hasTable('invoice_items') && \Schema::hasColumn('invoice_items', 'product_id')) {
-            $invoiceItemsCount = \DB::table('invoice_items')->where('product_id', $id)->count();
+            $q = \DB::table('invoice_items')->where('product_id', $id);
+            if (\Schema::hasColumn('invoice_items', 'pharmacy_id') && $productPharmacyId !== null) {
+                $q->where('pharmacy_id', $productPharmacyId);
+            }
+            $invoiceItemsCount = $q->count();
             if ($invoiceItemsCount > 0) {
                 return response()->json([
                     'success' => false,
@@ -1598,7 +1795,7 @@ public function destroy($id)
                 $purchasesToUpdate[$purchaseId]['deleted_total'] += (float) $item->total_price;
             }
 
-            $treasury = Treasury::first();
+            $treasury = Treasury::getActive();
             foreach ($purchasesToUpdate as $purchaseId => $data) {
                 $purchase = $data['purchase'];
                 if (!$purchase) {
@@ -1822,7 +2019,7 @@ public function applyStocktake(Request $request)
         }
 
         $stocktakeActor = $request->user();
-        $skipStocktakeNotify = $stocktakeActor && in_array((string) ($stocktakeActor->role ?? ''), ['cashier', 'super_cashier'], true);
+        $skipStocktakeNotify = $stocktakeActor && (string) ($stocktakeActor->role ?? '') === 'cashier';
         if ($totalChanged > 0 && \Schema::hasTable('system_notifications') && !$skipStocktakeNotify) {
             $detailsLines = array_map(function ($x) {
                 $sign = (float) $x['difference'] >= 0 ? '+' : '';

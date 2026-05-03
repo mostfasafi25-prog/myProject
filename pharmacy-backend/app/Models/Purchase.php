@@ -2,15 +2,18 @@
 
 namespace App\Models;
 
+use App\Models\Concerns\BelongsToPharmacy;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Purchase extends Model
 {
+    use BelongsToPharmacy;
     use HasFactory, SoftDeletes;
 
     protected $fillable = [
+        'pharmacy_id',
         'invoice_number',
         'supplier_id',
         'supplier_balance_delta',

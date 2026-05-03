@@ -583,7 +583,7 @@ if ($product->allow_split_sales && $product->price > 0) {
         }
 
         if ($treasuryDeduction > 0.00001 || $otherExpensesTotal > 0.00001) {
-            $treasury = Treasury::first();
+            $treasury = Treasury::getActive();
             if ($treasury) {
                 $pm = strtolower((string) $request->payment_method);
                 $tCash = 0.0;
@@ -697,7 +697,7 @@ if ($product->allow_split_sales && $product->price > 0) {
 
         try {
             $purchaseActor = $request->user();
-            $skipPurchaseNotify = $purchaseActor && in_array((string) ($purchaseActor->role ?? ''), ['cashier', 'super_cashier'], true);
+            $skipPurchaseNotify = $purchaseActor && (string) ($purchaseActor->role ?? '') === 'cashier';
             if (!$skipPurchaseNotify && Schema::hasTable('system_notifications')) {
                 SystemNotification::create([
                     'type' => 'purchase',
@@ -1122,7 +1122,7 @@ private function getPurchasesByDay($period = 'month')
                 })
                 ->delete();
 
-            $treasury = Treasury::first();
+            $treasury = Treasury::getActive();
             if ($treasury && ($netCashRestore > 0.00001 || $netAppRestore > 0.00001)) {
                 $oldBalance = $treasury->balance;
                 $treasury->applyLiquidityDelta($netCashRestore, $netAppRestore);
@@ -1325,7 +1325,7 @@ private function getPurchasesByDay($period = 'month')
                 })
                 ->delete();
 
-            $treasury = Treasury::first();
+            $treasury = Treasury::getActive();
             if ($treasury && ($netCashRestore > 0.00001 || $netAppRestore > 0.00001)) {
                 $oldBalance = $treasury->balance;
                 $treasury->applyLiquidityDelta($netCashRestore, $netAppRestore);
@@ -1674,7 +1674,7 @@ private function getPurchasesByDay($period = 'month')
             $purchase->save();
     
             if ($treasuryCashRefund > 0.00001) {
-                $treasury = Treasury::first();
+                $treasury = Treasury::getActive();
                 if ($treasury) {
                     $ratioBase = max(0.00001, $paidBeforeReturn);
                     $refundCash = round($treasuryCashRefund * ($cashPaidBeforeReturn / $ratioBase), 2);
@@ -1850,7 +1850,7 @@ private function getPurchasesByDay($period = 'month')
             $purchase->save();
 
             if ($treasuryRefund > 0.00001) {
-                $treasury = Treasury::first();
+                $treasury = Treasury::getActive();
                 if ($treasury) {
                     $ratioBase = max(0.00001, $paidBeforeReturn);
                     $refundCash = round($treasuryRefund * ($cashPaidBeforeReturn / $ratioBase), 2);

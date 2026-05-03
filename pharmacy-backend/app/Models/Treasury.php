@@ -2,17 +2,20 @@
 
 namespace App\Models;
 
+use App\Models\Concerns\BelongsToPharmacy;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Auth;
 
 class Treasury extends Model
 {
+    use BelongsToPharmacy;
     use HasFactory;
     
     protected $table = 'treasury';
 
     protected $fillable = [
+        'pharmacy_id',
         'balance',
         'balance_cash',
         'balance_app',
@@ -50,15 +53,33 @@ class Treasury extends Model
     /**
      * الحصول على السجل الفعال (أو إنشاء واحد جديد)
      */
-    public static function getActive()
+    public static function getActive(): self
     {
-        return self::firstOrCreate([], [
-            'balance' => 0,
-            'balance_cash' => 0,
-            'balance_app' => 0,
-            'total_income' => 0,
-            'total_expenses' => 0
-        ]);
+        $pharmacyId = Auth::user()?->pharmacy_id;
+        if ($pharmacyId === null) {
+            $pharmacyId = (int) config('pharmacy.default_pharmacy_id', 1);
+        }
+
+        return self::withoutGlobalScopes()->firstOrCreate(
+            ['pharmacy_id' => $pharmacyId],
+            [
+                'balance' => 0,
+                'balance_cash' => 0,
+                'balance_app' => 0,
+                'total_income' => 0,
+                'total_expenses' => 0,
+                'total_profit' => 0,
+                'total_sales' => 0,
+                'total_sold_items' => 0,
+            ]
+        );
+    }
+
+    public static function lockActiveForUpdate(): ?self
+    {
+        $active = self::getActive();
+
+        return self::withoutGlobalScopes()->whereKey($active->id)->lockForUpdate()->first();
     }
 
     /**

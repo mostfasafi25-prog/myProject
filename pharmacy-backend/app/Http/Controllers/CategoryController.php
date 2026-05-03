@@ -6,6 +6,7 @@ use App\Models\Category;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 use App\Models\Product;
 use Illuminate\Support\Facades\Log;
 use App\Models\TreasuryTransaction;
@@ -109,11 +110,23 @@ class CategoryController extends Controller
  */
 public function store(Request $request)
 {
+    $pharmacyIdForRules = auth()->user()?->pharmacy_id !== null
+        ? (int) auth()->user()->pharmacy_id
+        : (int) config('pharmacy.default_pharmacy_id', 1);
+
     $validator = Validator::make($request->all(), [
-        'name' => 'required|string|max:255|unique:categories,name',
+        'name' => [
+            'required',
+            'string',
+            'max:255',
+            Rule::unique('categories', 'name')->where(fn ($q) => $q->where('pharmacy_id', $pharmacyIdForRules)),
+        ],
         'description' => 'nullable|string|max:500',
         'icon' => 'nullable|string|in:fastfood,kitchen,local_drink,grocery,category,bakery,dairy,other',
-        'parent_id' => 'nullable|exists:categories,id',
+        'parent_id' => [
+            'nullable',
+            Rule::exists('categories', 'id')->where(fn ($q) => $q->where('pharmacy_id', $pharmacyIdForRules)),
+        ],
         'is_main' => 'boolean',
         'is_active' => 'boolean',
         'sort_order' => 'integer|min:0',
@@ -293,12 +306,20 @@ public function show($id)
         $icons = array_keys(config('categories.icons', []));
         
         $validator = Validator::make($request->all(), [
-            'name' => 'sometimes|string|max:255|unique:categories,name,' . $id,
+            'name' => [
+                'sometimes',
+                'string',
+                'max:255',
+                Rule::unique('categories', 'name')->ignore($id)->where(fn ($q) => $q->where('pharmacy_id', $category->pharmacy_id)),
+            ],
             'description' => 'nullable|string|max:500',
             'icon' => 'nullable|string|in:' . implode(',', $icons),
-            'category_id' => 'nullable|exists:categories,id',
+            'category_id' => [
+                'nullable',
+                Rule::exists('categories', 'id')->where(fn ($q) => $q->where('pharmacy_id', $category->pharmacy_id)),
+            ],
             'is_active' => 'boolean',
-            'sort_order' => 'integer|min:0'
+            'sort_order' => 'integer|min:0',
         ]);
         
         if ($validator->fails()) {
@@ -322,8 +343,11 @@ public function show($id)
                 'name' => $request->name ?? $category->name,
                 'description' => $request->has('description') ? $request->description : $category->description,
                 'icon' => $request->icon ?? $category->icon,
-'parent_id' => $request->has('parent_id') ? $request->parent_id : $category->parent_id,                'is_active' => $request->has('is_active') ? $request->boolean('is_active') : $category->is_active,
-                'sort_order' => $request->sort_order ?? $category->sort_order
+                'parent_id' => $request->has('category_id')
+                    ? $request->category_id
+                    : ($request->has('parent_id') ? $request->parent_id : $category->parent_id),
+                'is_active' => $request->has('is_active') ? $request->boolean('is_active') : $category->is_active,
+                'sort_order' => $request->sort_order ?? $category->sort_order,
             ]);
 
             ActivityLogger::log($request, [

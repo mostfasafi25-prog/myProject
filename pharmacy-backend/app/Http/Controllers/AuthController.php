@@ -2,12 +2,15 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Pharmacy;
 use App\Models\User;
+use App\Services\PharmacyPlanService;
 use Firebase\JWT\JWT;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Validator;
 
 class AuthController extends Controller
@@ -17,6 +20,16 @@ class AuthController extends Controller
         $user = $request->user();
         if (!$user) {
             return response()->json(['error' => 'غير مصرح'], 401);
+        }
+
+        $planService = app(PharmacyPlanService::class);
+        $pharmacyId = $user->pharmacy_id ?? null;
+        if (! $pharmacyId || ! Schema::hasTable('pharmacies')) {
+            return $planService->denyFeatureResponse('ai_assistant');
+        }
+        $pharmacy = Pharmacy::find($pharmacyId);
+        if (! $pharmacy || ! $planService->hasFeature($pharmacy, 'ai_assistant')) {
+            return $planService->denyFeatureResponse('ai_assistant');
         }
 
         $secret = env('CHATBOT_IDENTITY_SECRET');
@@ -124,14 +137,7 @@ class AuthController extends Controller
 
         $payload = [
             'message' => 'تم الدخول بنجاح',
-            'user' => [
-                'id' => $user->id,
-                'username' => $user->username,
-                'role' => $user->role,
-                'avatar_url' => $user->avatar_url,
-                'approval_status' => $user->approval_status,
-                'is_active' => (bool) ($user->is_active ?? true),
-            ],
+            'user' => $this->userWithSubscription($user),
             'token' => $token,
             'token_type' => 'Bearer',
         ];
@@ -180,17 +186,78 @@ class AuthController extends Controller
 
         return response()->json([
             'message' => 'تم الدخول بنجاح',
-            'user' => [
-                'id' => $user->id,
-                'username' => $user->username,
-                'role' => $user->role,
-                'avatar_url' => $user->avatar_url,
-                'approval_status' => $user->approval_status,
-                'is_active' => (bool) ($user->is_active ?? true),
-            ],
+            'user' => $this->userWithSubscription($user),
             'token' => $token,
             'token_type' => 'Bearer',
         ]);
+    }
+
+    /**
+     * تسمية العملة للـ API: إن كان عمود التسمية فارغاً أو قديماً يعرض «شيكل» رغم كود آخر نشتق من currency_code.
+     */
+    private function resolveApiCurrencyLabel(string $currencyCode, ?string $storedLabel): string
+    {
+        $code = strtoupper(trim($currencyCode));
+        $mapped = match ($code) {
+            'ILS' => 'شيكل',
+            'EGP' => 'جنيه',
+            'USD' => 'دولار',
+            'AED' => 'درهم',
+            default => null,
+        };
+        $label = trim((string) ($storedLabel ?? ''));
+        if ($mapped !== null) {
+            if ($label === '' || ($label === 'شيكل' && $code !== 'ILS')) {
+                return $mapped;
+            }
+
+            return $label;
+        }
+
+        return $label !== '' ? $label : 'شيكل';
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function userWithSubscription(User $user): array
+    {
+        $row = [
+            'id' => $user->id,
+            'username' => $user->username,
+            'role' => $user->role,
+            'pharmacy_id' => $user->pharmacy_id,
+            'avatar_url' => $user->avatar_url,
+            'approval_status' => $user->approval_status,
+            'is_active' => (bool) ($user->is_active ?? true),
+        ];
+        if ($user->pharmacy_id && Schema::hasTable('pharmacies')) {
+            $ph = Pharmacy::find($user->pharmacy_id);
+            if ($ph) {
+                $name = trim((string) ($ph->name ?? ''));
+                if ($name !== '') {
+                    $row['pharmacy_name'] = $name;
+                }
+                $currencyCode = 'ILS';
+                if (Schema::hasColumn('pharmacies', 'currency_code')) {
+                    $currencyCode = (string) ($ph->currency_code ?? 'ILS');
+                    $row['currency_code'] = $currencyCode;
+                }
+                if (Schema::hasColumn('pharmacies', 'currency_label')) {
+                    $row['currency_label'] = $this->resolveApiCurrencyLabel(
+                        Schema::hasColumn('pharmacies', 'currency_code') ? $currencyCode : 'ILS',
+                        $ph->currency_label ?? null
+                    );
+                }
+                if (Schema::hasColumn('pharmacies', 'subscription_plan')) {
+                    $planService = app(PharmacyPlanService::class);
+                    $planService->syncMonthlySubscriptionLifecycle($ph);
+                    $row['subscription'] = $planService->toApiArray($ph->fresh());
+                }
+            }
+        }
+
+        return $row;
     }
 
     public function logout(Request $request)
@@ -206,14 +273,7 @@ class AuthController extends Controller
             return response()->json(['message' => 'قم بتسجيل الدخول أولاً'], 401);
         }
         return response()->json([
-            'user' => [
-                'id' => $user->id,
-                'username' => $user->username,
-                'role' => $user->role,
-                'avatar_url' => $user->avatar_url,
-                'approval_status' => $user->approval_status,
-                'is_active' => (bool) ($user->is_active ?? true),
-            ],
+            'user' => $this->userWithSubscription($user),
         ]);
     }
 

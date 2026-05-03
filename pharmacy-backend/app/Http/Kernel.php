@@ -69,5 +69,8 @@ class Kernel extends HttpKernel
         'role' => \App\Http\Middleware\CheckRole::class,
         'active' => \App\Http\Middleware\EnsureUserIsActive::class,
         'owner.console' => \App\Http\Middleware\EnsureOwnerConsoleAccess::class,
+        'backend.web' => \App\Http\Middleware\EnsureBackendWebAuth::class,
+        'backend.share_scope' => \App\Http\Middleware\ShareBackendWebScope::class,
+        'plan.access' => \App\Http\Middleware\EnforcePharmacyPlanAccess::class,
     ];
 }
